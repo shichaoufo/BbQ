@@ -1,0 +1,118 @@
+# Windows 每次推送自动编译 BbQ（MinGW，与本地 Desktop_Qt_6_9_3_MinGW 环境一致）
+#
+# 产物：BbQ-Windows-x64.zip 绿色版（exe + Qt dll + mpv.dll + FluentUI 插件），
+# 解压即用，免本地配置——用于快速分发给别人测试。
+#
+# 依赖说明：
+#   - Qt 6.9.3 win64_mingw（install-qt-action 自带 MinGW 工具链）
+#   - libmpv 使用自编译版本（含 #17764 D3D11 补丁，官方源无此补丁）：
+#     https://github.com/shichaoufo/mpv/releases/tag/d3d11
+#   - FluentUI 官方仓库现编译（本地无改动），安装进 Qt 的 qml 目录
+#
+# 注意：runner 上 MinGW 与本地 Qt 官方 MinGW 版本可能存在小版本差异，
+# 若出现本地能编、CI 报错的情况，优先比对 gcc 版本
+
+name: Windows Build
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch: {}
+
+jobs:
+  windows-x64:
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Qt 6.9 (MinGW 64-bit)
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.9.3'
+          arch: 'win64_mingw'
+          modules: 'qtshadertools qtmultimedia qtwebsockets qt5compat'
+          cache: true
+
+      - name: Setup MSYS2 environment info
+        shell: pwsh
+        run: |
+          # install-qt-action 已把 MinGW 与 qmake 加入 PATH，打印版本供日志核对
+          gcc --version
+          qmake -query QT_INSTALL_PREFIX
+          qmake -query QT_INSTALL_QML
+          echo "QT_PREFIX=$(qmake -query QT_INSTALL_PREFIX)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          echo "QT_QML_DIR=$(qmake -query QT_INSTALL_QML)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Download custom libmpv (PR#17764 D3D11 patch)
+        shell: pwsh
+        run: |
+          $zip = "$env:RUNNER_TEMP\mpv-dev.zip"
+          Invoke-WebRequest `
+            -Uri "https://github.com/shichaoufo/mpv/releases/download/d3d11/mpv-libmpv-d3d11-v0.41.0-dev-gcfc287f6f-30370549392-x86_64-w64-mingw32.zip" `
+            -OutFile $zip
+          $dest = "$env:RUNNER_TEMP\mpv-dev"
+          Expand-Archive -Path $zip -DestinationPath $dest
+          # 兼容 zip 内多套一层目录的情况
+          $inner = Get-ChildItem $dest -Directory | Select-Object -First 1
+          if ($inner -and (Test-Path "$($inner.FullName)\include")) {
+            $mpvDir = $inner.FullName
+          } else {
+            $mpvDir = $dest
+          }
+          echo "MPV_DIR=$mpvDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Get-ChildItem $mpvDir -Recurse | Select-Object -First 20 | ForEach-Object { $_.FullName }
+
+      - name: Build FluentUI
+        shell: pwsh
+        run: |
+          git clone --depth 1 https://github.com/zhuzichu520/FluentUI.git $env:RUNNER_TEMP\FluentUI
+          cmake -S $env:RUNNER_TEMP\FluentUI -B $env:RUNNER_TEMP\FluentUI\build `
+            -G "MinGW Makefiles" `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_PREFIX_PATH="$env:QT_PREFIX"
+          cmake --build $env:RUNNER_TEMP\FluentUI\build --parallel
+          # FluentUI 构建时把插件直接链入 Qt 的 qml 目录，无需 install
+          $qmlDir = "$env:QT_QML_DIR\FluentUI"
+          if (-not (Test-Path "$qmlDir\qmldir")) {
+            New-Item -ItemType Directory -Force -Path $qmlDir | Out-Null
+            Get-ChildItem "$env:RUNNER_TEMP\FluentUI\build" -Recurse -Filter "qmldir" |
+              ForEach-Object { Copy-Item $_.FullName $qmlDir -Force }
+          }
+          if (-not (Test-Path "$qmlDir\qmldir")) { throw "FluentUI qmldir not found" }
+
+      - name: Configure (Release)
+        shell: pwsh
+        run: |
+          cmake -S . -B build `
+            -G "MinGW Makefiles" `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_PREFIX_PATH="$env:QT_PREFIX" `
+            -DFLUENTUI_QML_PATH="$env:QT_QML_DIR\FluentUI"
+
+      - name: Build
+        shell: pwsh
+        run: cmake --build build --parallel
+
+      - name: Deploy (windeployqt)
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem -Path build -Recurse -Filter "BbQ.exe" | Select-Object -First 1
+          if (-not $exe) { throw "BbQ.exe not found in build tree" }
+          $binDir = $exe.DirectoryName
+          echo "BIN_DIR=$binDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          windeployqt --release --qmldir qml "$($exe.FullName)"
+          # 拷贝 mpv.dll（运行时动态加载）
+          Copy-Item "$env:MPV_DIR\*.dll" $binDir -Force
+          Get-ChildItem $binDir | ForEach-Object { $_.Name }
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: BbQ-Windows-x64
+          path: ${{ env.BIN_DIR }}
+          retention-days: 14
