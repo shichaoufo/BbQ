@@ -1,13 +1,16 @@
 # macOS (Apple Silicon) 每次推送自动编译 BbQ
 #
 # 目标：把移植过程中的"编译期"问题在 CI 上收敛（Windows 本地无法验证
-# 非 WIN 分支）。产物为未签名的 BbQ.app，自用场景首次打开需右键→打开。
+# 非 WIN 分支），并产出自包含的 BbQ.app——Qt frameworks、QML 模块、
+# libmpv 及其全部依赖均打包进 .app 内部，目标机零依赖、零 Homebrew、
+# 零网络，直接拷贝即可运行（首次打开右键→打开放行 Gatekeeper）。
 #
 # 依赖说明：
 #   - Qt 6.9.3 clang_64（universal2，原生跑 ARM64；macos_arm64 arch 已不存在）
 #     基础包含 qtbase/qtdeclarative/qtsvg/qttools；Multimedia/WebSockets/
 #     ShaderTools/5Compat 为附加包需显式安装（已查 download.qt.io 6.9.3 元数据）
-#   - libmpv 来自 Homebrew（brew install mpv，同时提供头文件与 dylib）
+#   - libmpv 来自 Homebrew（brew install mpv，提供头文件与 dylib；
+#     最终产物中的 Homebrew 依赖由 Deploy 步骤搬运进 .app）
 #   - FluentUI 从官方仓库拉取并安装进 Qt 的 qml 目录；若你有本地改动，
 #     请改为 fork 固定或 vendored 子目录
 #
@@ -83,16 +86,73 @@ jobs:
         run: |
           cmake --install build --prefix "$PWD/stage"
 
-      # 自签（ad-hoc）：不加也可用，但签名后本地首次放行的记录更稳定
+      # ===== 全量打包：产出自包含 .app（目标机零依赖、零 Homebrew、零网络）=====
+      # 1) macdeployqt：Qt frameworks / plugins / QML 模块（含 FluentUI）拷入
+      #    .app 并修正 install name
+      # 2) Homebrew 依赖搬运：macdeployqt 对 /opt/homebrew 的传递依赖覆盖不全
+      #    （libmpv → ffmpeg 全家桶），手动 BFS 拷贝（cp -L 解引用符号链接）
+      #    并把引用改写为 @rpath
+      # 3) 校验主程序无残留外部绝对路径引用
+      - name: Deploy (macdeployqt + Homebrew dylib bundling)
+        run: |
+          set -euo pipefail
+          APP="stage/BbQ.app"
+          FW="$APP/Contents/Frameworks"
+          BIN="$APP/Contents/MacOS/BbQ"
+
+          macdeployqt "$APP" -qmldir="$GITHUB_WORKSPACE/qml" -verbose=1
+
+          mkdir -p "$FW"
+          # BFS 收集 libmpv 的全部 /opt/homebrew 传递依赖
+          queue=("/opt/homebrew/lib/libmpv.dylib")
+          seen=("/opt/homebrew/lib/libmpv.dylib")
+          while [ ${#queue[@]} -gt 0 ]; do
+            cur="${queue[0]}"; queue=("${queue[@]:1}")
+            base="$(basename "$cur")"
+            rm -f "$FW/$base"
+            cp -L "$cur" "$FW/$base"
+            chmod 755 "$FW/$base"
+            while IFS= read -r dep; do
+              [ -e "$dep" ] || continue
+              case " ${seen[*]} " in
+                *" $dep "*) ;;
+                *) seen+=("$dep"); queue+=("$dep") ;;
+              esac
+            done < <(otool -L "$FW/$base" | tail -n +3 | awk '{print $1}' | grep '^/opt/homebrew/' || true)
+          done
+
+          # 改写所有消费者对 /opt/homebrew 的引用 → @rpath/<名字>
+          for consumer in "$BIN" "$FW"/*.dylib; do
+            while IFS= read -r dep; do
+              install_name_tool -change "$dep" "@rpath/$(basename "$dep")" "$consumer"
+            done < <(otool -L "$consumer" | tail -n +3 | awk '{print $1}' | grep '^/opt/homebrew/' || true)
+          done
+
+          # 每个 dylib 的 install id 改为 @rpath/<名字>（去掉绝对路径 id）
+          for f in "$FW"/*.dylib; do
+            install_name_tool -id "@rpath/$(basename "$f")" "$f"
+          done
+
+          # 确保主程序带 @executable_path/../Frameworks 的 rpath
+          otool -l "$BIN" | grep -q "path @executable_path/../Frameworks" || \
+            install_name_tool -add_rpath "@executable_path/../Frameworks" "$BIN"
+
+          # 校验：主程序不得残留 /opt/homebrew 或 /Users/runner 引用
+          leftover=$(otool -L "$BIN" | grep -E '/opt/homebrew|/Users/runner' || true)
+          if [ -n "$leftover" ]; then
+            echo "ERROR: unresolved external refs in main binary:"; echo "$leftover"; exit 1
+          fi
+
+          echo "--- bundled dylibs ($(ls "$FW"/*.dylib | wc -l | tr -d ' ')):"
+          ls "$FW"
+          echo "--- final otool -L (main binary):"
+          otool -L "$BIN"
+
+      # 自签（ad-hoc）：必须在所有 install_name_tool 改写之后执行
       - name: Ad-hoc codesign
         run: |
-          codesign --force --deep -s - "stage/BbQ.app" || true
-
-      # libmpv 依赖较多 Homebrew dylib；自用机器装了 mpv 即可运行，
-      # 这里不做 macdeployqt 全量打包，仅记录依赖清单供参考
-      - name: List dynamic dependencies
-        run: |
-          otool -L "stage/BbQ.app/Contents/MacOS/BbQ" || true
+          codesign --force --deep -s - "stage/BbQ.app"
+          codesign --verify --verbose "stage/BbQ.app"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

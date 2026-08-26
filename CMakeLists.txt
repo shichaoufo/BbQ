@@ -70,12 +70,17 @@ else()
     message(WARNING "FluentUI not found, please compile and install FluentUI first")
 endif()
 
-find_package(Vulkan QUIET)
-if(Vulkan_FOUND)
-    message(STATUS "Vulkan found: ${Vulkan_LIBRARIES}")
-    add_compile_definitions(HAS_VULKAN=1)
-else()
-    message(WARNING "Vulkan not found, will fall back to OpenGL backend")
+# Vulkan 仅在 Windows 查找：HAS_VULKAN 当前源码未引用（死定义），
+# 且 macOS 上会误链 Homebrew 的 MoltenVK loader——目标机没有该库时
+# .app 会因缺 dylib 拒绝启动
+if(WIN32)
+    find_package(Vulkan QUIET)
+    if(Vulkan_FOUND)
+        message(STATUS "Vulkan found: ${Vulkan_LIBRARIES}")
+        add_compile_definitions(HAS_VULKAN=1)
+    else()
+        message(WARNING "Vulkan not found, will fall back to OpenGL backend")
+    endif()
 endif()
 
 set(PROJECT_SOURCES
