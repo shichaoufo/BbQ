@@ -1,0 +1,15 @@
+<RCC>
+    <qresource prefix="/BiliQt">
+        <file>icons/level/user-lv0.svg</file>
+        <file>icons/level/user-lv1.svg</file>
+        <file>icons/level/user-lv2.svg</file>
+        <file>icons/level/user-lv3.svg</file>
+        <file>icons/level/user-lv4.svg</file>
+        <file>icons/level/user-lv5.svg</file>
+        <file>icons/level/user-lv6.svg</file>
+        <file>icons/level/user-lv6p.svg</file>
+        <file>icons/level/user-up.svg</file>
+        <file>icons/level/verify0.svg</file>
+        <file>icons/level/verify1.svg</file>
+    </qresource>
+</RCC>

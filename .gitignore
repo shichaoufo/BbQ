@@ -1,0 +1,24 @@
+# 构建产物
+build/
+stage/
+
+# Qt Creator / IDE 本地配置
+.qtcreator/
+CMakeLists.txt.user*
+.clangd/
+compile_commands.json
+
+# CMake 生成文件
+CMakeCache.txt
+CMakeUserPresets.json
+
+# 运行期生成
+*.log
+bsb.conf
+DANMAKU_TRACE*.csv
+
+# macOS
+.DS_Store
+
+# Visual Studio Code
+.vscode/

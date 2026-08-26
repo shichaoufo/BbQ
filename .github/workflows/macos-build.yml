@@ -1,0 +1,89 @@
+# macOS (Apple Silicon) 每次推送自动编译 BbQ
+#
+# 目标：把移植过程中的"编译期"问题在 CI 上收敛（Windows 本地无法验证
+# 非 WIN 分支）。产物为未签名的 BbQ.app，自用场景首次打开需右键→打开。
+#
+# 依赖说明：
+#   - Qt 6.9.x arm64 由 install-qt-action 安装（与本地 Windows 侧 6.9.3 对齐）
+#   - libmpv 来自 Homebrew（brew install mpv，同时提供头文件与 dylib）
+#   - FluentUI 需要单独安装到 Qt 的 qml 目录（见下方 FluentUI 步骤）。
+#     本仓库未内置 FluentUI 源码，CI 上从官方仓库动态拉取并安装；
+#     若你的 FluentUI 有本地改动，请改为 fork 固定或 vendored 子目录
+#
+# 已知限制：runner 无 GUI 会话，只能验证"编译通过 + bundle 生成"，
+# 运行期行为（mpv 渲染、弹幕 vsync）必须真机联调
+
+name: macOS Build
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch: {}   # 允许手动触发
+
+jobs:
+  macos-arm64:
+    runs-on: macos-14      # Apple Silicon (M1)；需要 Intel 版时改为 macos-13
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Qt 6.9 (arm64)
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.9.3'
+          arch: 'macos_arm64'
+          modules: 'qtshadertools qtmultimedia qtquick3d'
+          cache: true
+
+      - name: Install libmpv & tools (Homebrew)
+        run: |
+          brew install mpv ninja
+          echo "MPV_PREFIX=$(brew --prefix mpv)" >> "$GITHUB_ENV"
+
+      - name: Build FluentUI
+        run: |
+          git clone --depth 1 https://github.com/zhuzichu520/FluentUI.git /tmp/FluentUI
+          cmake -S /tmp/FluentUI -B /tmp/FluentUI/build \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="$Qt6_DIR" \
+            -DFLUENTUI_BUILD_EXAMPLES=OFF
+          cmake --build /tmp/FluentUI/build --target FluentUI --parallel
+          cmake --install /tmp/FluentUI/build
+
+      - name: Configure (Release)
+        run: |
+          cmake -S . -B build \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="$Qt6_DIR" \
+            -DFLUENTUI_QML_PATH="$Qt6_DIR/qml/FluentUI"
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Install bundle (BbQ.app)
+        run: |
+          cmake --install build --prefix "$PWD/stage"
+
+      # 自签（ad-hoc）：不加也可用，但签名后本地首次放行的记录更稳定
+      - name: Ad-hoc codesign
+        run: |
+          codesign --force --deep -s - "stage/BbQ.app" || true
+
+      # libmpv 依赖较多 Homebrew dylib；自用机器装了 mpv 即可运行，
+      # 这里不做 macdeployqt 全量打包，仅记录依赖清单供参考
+      - name: List dynamic dependencies
+        run: |
+          otool -L "stage/BbQ.app/Contents/MacOS/BbQ" || true
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: BbQ-macOS-arm64
+          path: stage/BbQ.app
+          retention-days: 14

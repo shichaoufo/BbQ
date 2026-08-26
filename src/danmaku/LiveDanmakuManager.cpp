@@ -1,0 +1,565 @@
+#include "LiveDanmakuManager.h"
+#include "LoginManager.h"
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonArray>
+
+#include <QBuffer>
+#include <QCoreApplication>
+#include <QDataStream>
+#include <QtEndian>
+#include <QVariantMap>
+#include <QPointer>
+#include <QTimer>
+#include <zlib.h>
+
+LiveDanmakuManager::LiveDanmakuManager(QObject *parent)
+    : QObject(parent)
+    , m_webSocket(new QWebSocket(QString(), QWebSocketProtocol::VersionLatest, this))
+    , m_heartbeatTimer(new QTimer(this))
+    , m_switchTimer(new QTimer(this))
+    , m_cleanupTimer(new QTimer(this))
+    , m_batchTimer(new QTimer(this))
+    , m_roomId(0)
+    , m_isConnected(false)
+    , m_isClosing(false)
+    , m_sequence(1)
+    , m_danmakuPort(0)
+    , m_pendingRoomId(0)
+{
+    // 命名 WebSocket，避免析构时 abort() 触发的 destroyed/disconnected
+    // 信号在未命名对象上导致 Qt 打印 wildcard disconnect 警告
+    m_webSocket->setObjectName(QStringLiteral("LiveDanmakuSocket"));
+
+    connect(m_webSocket, &QWebSocket::connected, this, &LiveDanmakuManager::onConnected);
+    connect(m_webSocket, &QWebSocket::disconnected, this, &LiveDanmakuManager::onDisconnected);
+    connect(m_webSocket, &QWebSocket::textMessageReceived, this, &LiveDanmakuManager::onTextMessageReceived);
+    connect(m_webSocket, &QWebSocket::binaryMessageReceived, this, &LiveDanmakuManager::onBinaryMessageReceived);
+    connect(m_webSocket, &QWebSocket::errorOccurred, this, &LiveDanmakuManager::onError);
+
+    connect(m_heartbeatTimer, &QTimer::timeout, this, &LiveDanmakuManager::onHeartbeatTimer);
+    m_heartbeatTimer->setInterval(30000);
+
+    // close() 后延迟 open 新房间：disconnected 信号发出时 SSL 后台线程的握手关闭
+    // 可能未完成，立即 open 会导致 processHandshake 错误 → Qt 内部 abort → 崩溃。
+    // 500ms 足够 SSL 线程退出，且对弹幕加载体验影响可忽略（弹幕本就比视频晚）。
+    m_switchTimer->setSingleShot(true);
+    m_switchTimer->setInterval(500);
+    connect(m_switchTimer, &QTimer::timeout, this, &LiveDanmakuManager::onSwitchTimer);
+
+    // 延迟销毁旧 socket：每次 openConnection 创建新 socket，旧 socket 移入 m_oldSockets。
+    // 3 秒后统一删除，确保旧 socket 内部 QSslSocket 的 SSL 后台线程已完全退出，
+    // 避免 QSslSocket 析构时与 SSL 线程竞争 → 死锁卡死。
+    m_cleanupTimer->setSingleShot(true);
+    m_cleanupTimer->setInterval(3000);
+    connect(m_cleanupTimer, &QTimer::timeout, this, &LiveDanmakuManager::onCleanupTimer);
+
+    // 弹幕 50ms 合批：高峰时逐条发信号会让 QML 属性系统过载，
+    // 聚合为批次后一批弹幕仅一次跨线程信号
+    m_batchTimer->setSingleShot(true);
+    m_batchTimer->setInterval(50);
+    connect(m_batchTimer, &QTimer::timeout, this, &LiveDanmakuManager::flushDanmakuBatch);
+
+    // 退出时提前销毁 WebSocket：不要拖到 QML 引擎销毁阶段才在 ~LiveDanmakuManager
+    // 里析构。引擎销毁时 Qt 内部状态已开始拆卸，~QWebSocket 的内部 disconnect 警告
+    // 与网络线程的 deleteLater 析构并发，曾实测造成 AB-BA 死锁（进程残留不退出）。
+    // aboutToQuit 时事件循环刚结束、对象树完整，是更安全的销毁时机。
+    connect(qApp, &QCoreApplication::aboutToQuit, this, &LiveDanmakuManager::teardownConnection);
+}
+
+LiveDanmakuManager::~LiveDanmakuManager()
+{
+    // 正常路径下 aboutToQuit 已提前清理（teardownConnection），此处为兜底
+    teardownConnection();
+}
+
+void LiveDanmakuManager::teardownConnection()
+{
+    m_isClosing = true;
+    m_isConnected = false;
+
+    if (m_heartbeatTimer) {
+        m_heartbeatTimer->stop();
+    }
+    if (m_switchTimer) {
+        m_switchTimer->stop();
+    }
+    if (m_cleanupTimer) {
+        m_cleanupTimer->stop();
+    }
+    if (m_batchTimer) {
+        m_batchTimer->stop();
+    }
+    m_pendingDanmaku.clear();
+
+    if (m_webSocket) {
+        m_webSocket->blockSignals(true);
+        if (m_webSocket->state() != QAbstractSocket::UnconnectedState) {
+            m_webSocket->abort();
+        }
+        delete m_webSocket;
+        m_webSocket = nullptr;
+    }
+
+    // 销毁所有待删除的旧 socket。
+    // 注意：onCleanupTimer 中已用 deleteLater() 排队删除旧 socket 并 clear() 了列表，
+    // 正常情况下此处列表为空。仅在 timer 未触发（如程序退出）时列表非空，此时直接 delete 安全。
+    // 已 deleteLater 排队的对象不会出现在 m_oldSockets 中（clear 已移除引用），不会双重释放。
+    for (QWebSocket *old : m_oldSockets) {
+        old->blockSignals(true);
+        delete old;
+    }
+    m_oldSockets.clear();
+}
+
+void LiveDanmakuManager::connectRoom(int roomId)
+{
+    m_roomId = roomId;
+    m_sequence = 1;
+    m_isClosing = false;  // 新连接，允许接收消息
+
+    // switchTimer 正在运行（close 已完成，等 SSL 退出延迟）：
+    // 只更新 pendingRoomId，timer 到期会 open 最新房间
+    if (m_switchTimer->isActive()) {
+        m_pendingRoomId = roomId;
+        return;
+    }
+
+    // 已有连接：close() 优雅关闭，onDisconnected 中启动 switchTimer 延迟 open
+    if (m_webSocket && m_webSocket->state() != QAbstractSocket::UnconnectedState) {
+        m_pendingRoomId = roomId;
+        m_webSocket->close(QWebSocketProtocol::CloseCodeGoingAway, QStringLiteral("switching room"));
+        return;
+    }
+
+    // socket 已断开：仍需通过 switchTimer 延迟 open。
+    // wss:// 连接断开后，QSslSocket 的 SSL 后台线程可能仍在清理，
+    // 立即 open() 发起新 SSL 握手会与之竞争 → 死锁卡死。
+    // 500ms 延迟确保 SSL 线程完全退出后再建立新连接。
+    m_pendingRoomId = roomId;
+    m_switchTimer->start();
+}
+
+void LiveDanmakuManager::recreateSocket()
+{
+    // 将当前 socket 移入待删除列表，等 SSL 后台线程退出后统一销毁
+    if (m_webSocket) {
+        m_webSocket->blockSignals(true);
+        if (m_webSocket->state() != QAbstractSocket::UnconnectedState) {
+            m_webSocket->abort();
+        }
+        // 列表上限兜底：极端高频开关时（间隔 <3s），m_cleanupTimer 会被反复重启
+        // 而不触发，m_oldSockets 会线性增长。限制最多 3 个，超出立即 delete
+        // 最老的。3 秒已足够 SSL 后台线程退出，最老的 socket 可安全销毁。
+        while (m_oldSockets.size() >= 3) {
+            QWebSocket *oldest = m_oldSockets.takeFirst();
+            oldest->blockSignals(true);
+            delete oldest;
+        }
+        m_oldSockets.append(m_webSocket);
+        m_webSocket = nullptr;
+        // 启动/重启清理定时器，3 秒后删除所有旧 socket
+        m_cleanupTimer->start();
+    }
+
+    // 创建全新的 QWebSocket，避免复用旧 socket 的 SSL 状态
+    m_webSocket = new QWebSocket(QString(), QWebSocketProtocol::VersionLatest, this);
+    m_webSocket->setObjectName(QStringLiteral("LiveDanmakuSocket"));
+
+    connect(m_webSocket, &QWebSocket::connected, this, &LiveDanmakuManager::onConnected);
+    connect(m_webSocket, &QWebSocket::disconnected, this, &LiveDanmakuManager::onDisconnected);
+    connect(m_webSocket, &QWebSocket::textMessageReceived, this, &LiveDanmakuManager::onTextMessageReceived);
+    connect(m_webSocket, &QWebSocket::binaryMessageReceived, this, &LiveDanmakuManager::onBinaryMessageReceived);
+    connect(m_webSocket, &QWebSocket::errorOccurred, this, &LiveDanmakuManager::onError);
+}
+
+void LiveDanmakuManager::onCleanupTimer()
+{
+    // SSL 后台线程已完全退出（3 秒延迟），安全同步销毁旧 socket。
+    // 必须用 delete 而非 deleteLater：deleteLater 的实际析构时机不确定，
+    // 可能排到新 socket SSL 握手回调期间处理，旧 QSslSocket 析构与新 QSslSocket
+    // 握手在 OpenSSL 全局锁上竞争 → 死锁卡死。delete 在 timer 回调中同步完成，
+    // 时机确定，不会与新连接竞争。
+    // wildcard disconnect 警告是 Qt 内部日志噪音，无害，接受。
+    for (QWebSocket *old : m_oldSockets) {
+        old->blockSignals(true);
+        delete old;
+    }
+    m_oldSockets.clear();
+}
+
+void LiveDanmakuManager::openConnection()
+{
+    QString host = m_danmakuHost.isEmpty() ? "broadcastlv.chat.bilibili.com" : m_danmakuHost;
+    int port = m_danmakuPort > 0 ? m_danmakuPort : 2245;
+    QString url = QString("wss://%1:%2/sub").arg(host).arg(port);
+
+    // 每次连接都创建新的 QWebSocket，旧 socket 移入待删除列表。
+    // 复用同一 socket 会导致旧连接的 SSL 后台线程与新连接的 SSL 握手竞争 → 死锁卡死。
+    recreateSocket();
+
+    QNetworkRequest request(url);
+    request.setRawHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
+
+    QSslConfiguration sslConfig = QSslConfiguration::defaultConfiguration();
+    sslConfig.setPeerVerifyMode(QSslSocket::VerifyNone);
+    request.setSslConfiguration(sslConfig);
+
+    m_webSocket->open(request);
+}
+
+void LiveDanmakuManager::setDanmakuInfo(const QString &host, int port, const QString &token)
+{
+    m_danmakuHost = host;
+    m_danmakuPort = port;
+    m_danmakuToken = token;
+}
+
+void LiveDanmakuManager::disconnectRoom()
+{
+    m_heartbeatTimer->stop();
+    m_switchTimer->stop();  // 取消待切换房间，避免 onSwitchTimer 中误 open
+    m_isConnected = false;
+    m_isClosing = true;  // 标记正在断开，忽略残留消息
+    m_pendingRoomId = 0;
+    if (m_webSocket && m_webSocket->state() != QAbstractSocket::UnconnectedState) {
+        // 用 close() 替代 abort()，避免 SSL 后台线程的暴力中断警告。
+        m_webSocket->close(QWebSocketProtocol::CloseCodeGoingAway, QStringLiteral("closing"));
+    }
+}
+
+bool LiveDanmakuManager::isConnected() const
+{
+    return m_isConnected;
+}
+
+void LiveDanmakuManager::onConnected()
+{
+    // 忽略旧 socket 的信号：connectRoom 创建新 socket 后，旧 socket 的 pending
+    // connected 信号可能仍会触发本槽。sender() 返回信号发送者，若非当前 socket 则跳过。
+    if (sender() != m_webSocket) return;
+
+    // 二次防御：即使新建了 socket，如果在 open() 之后、connected 信号到达之前
+    // 又调用了 disconnectRoom()（m_isClosing=true），也不应发送 auth。
+    if (m_isClosing) {
+        if (m_webSocket) m_webSocket->abort();
+        return;
+    }
+    sendAuth(m_roomId);
+}
+
+void LiveDanmakuManager::onDisconnected()
+{
+    if (sender() != m_webSocket) return;
+
+    m_heartbeatTimer->stop();
+    m_isConnected = false;
+
+    if (!m_heartbeatTimer) {
+        return;
+    }
+
+    // 切换房间流程：close() 发出 disconnected 后，SSL 后台线程的握手关闭
+    // 可能仍未完成。启动 switchTimer 延迟 500ms 再 open，等 SSL 线程退出。
+    // 立即 open 会导致 processHandshake 错误 → Qt 内部 abort → 崩溃。
+    if (m_pendingRoomId > 0 && !m_isClosing) {
+        m_switchTimer->start();
+        return;  // 切换流程不向外发 disconnected 信号，避免 QML 误处理
+    }
+
+    emit disconnected();
+}
+
+void LiveDanmakuManager::onSwitchTimer()
+{
+    // SSL 后台线程已退出，安全 open 新房间
+    if (m_pendingRoomId > 0 && !m_isClosing) {
+        m_roomId = m_pendingRoomId;  // 确保 roomId 是最新的（timer 期间可能多次切换）
+        m_pendingRoomId = 0;
+        openConnection();
+    }
+}
+
+void LiveDanmakuManager::onTextMessageReceived(const QString &message)
+{
+    if (sender() != m_webSocket) return;
+    Q_UNUSED(message);
+}
+
+void LiveDanmakuManager::onBinaryMessageReceived(const QByteArray &message)
+{
+    if (sender() != m_webSocket) return;
+    // 断开后忽略残留的缓冲消息，避免切换直播间时旧弹幕串到新直播间
+    if (m_isClosing) {
+        return;
+    }
+    parsePacket(message);
+}
+
+void LiveDanmakuManager::onError(QAbstractSocket::SocketError error)
+{
+    if (sender() != m_webSocket) return;
+    Q_UNUSED(error);
+    if (m_webSocket) {
+        emit danmakuError(m_webSocket->errorString());
+    }
+}
+
+void LiveDanmakuManager::onHeartbeatTimer()
+{
+    sendHeartbeat();
+}
+
+void LiveDanmakuManager::sendHeartbeat()
+{
+    QByteArray packet = buildPacket(OP_HEARTBEAT);
+    m_webSocket->sendBinaryMessage(packet);
+}
+
+void LiveDanmakuManager::sendAuth(int roomId)
+{
+    QJsonObject authObj;
+    int uid = LoginManager::instance()->getCurrentUser().mid;
+    authObj["uid"] = uid;
+    authObj["roomid"] = roomId;
+    authObj["protover"] = 2;
+    authObj["platform"] = "web";
+    authObj["type"] = 2;
+    authObj["key"] = m_danmakuToken;
+    authObj["buvid"] = LoginManager::instance()->getOrCreateBuvid3();
+
+    QJsonDocument doc(authObj);
+    QByteArray payload = doc.toJson(QJsonDocument::Compact);
+
+    QByteArray packet = buildPacket(OP_AUTH, payload);
+    m_webSocket->sendBinaryMessage(packet);
+}
+
+void LiveDanmakuManager::parsePacket(const QByteArray &data)
+{
+    if (data.size() < PACKET_HEADER_SIZE) {
+        return;
+    }
+
+    int offset = 0;
+    while (offset < data.size()) {
+        if (offset + PACKET_HEADER_SIZE > data.size()) {
+            break;
+        }
+
+        QDataStream stream(data.mid(offset));
+        stream.setByteOrder(QDataStream::BigEndian);
+
+        quint32 packetLength;
+        quint16 headerLength;
+        quint16 protocolVersion;
+        quint32 operation;
+        quint32 sequence;
+
+        stream >> packetLength;
+        stream >> headerLength;
+        stream >> protocolVersion;
+        stream >> operation;
+        stream >> sequence;
+
+        if (packetLength < PACKET_HEADER_SIZE || offset + packetLength > data.size()) {
+            break;
+        }
+
+        QByteArray payload = data.mid(offset + headerLength, packetLength - headerLength);
+
+        switch (operation) {
+            case OP_AUTH_REPLY: {
+                QJsonDocument doc = QJsonDocument::fromJson(payload);
+                if (doc.isObject()) {
+                    QJsonObject obj = doc.object();
+                    int code = obj["code"].toInt();
+                    if (code == 0) {
+                        m_isConnected = true;
+                        m_heartbeatTimer->start();
+
+                        if (obj.contains("data")) {
+                            QJsonObject dataObj = obj["data"].toObject();
+                            int online = dataObj["online"].toInt();
+                            emit roomInfo(online, "");
+                        }
+
+                        emit connected();
+                    } else {
+                        emit danmakuError(QString("认证失败: %1").arg(code));
+                    }
+                }
+                break;
+            }
+
+            case OP_HEARTBEAT_REPLY: {
+                break;
+            }
+
+            case OP_MESSAGE: {
+
+                if (protocolVersion == 2) {
+                    z_stream strm;
+                    strm.zalloc = Z_NULL;
+                    strm.zfree = Z_NULL;
+                    strm.opaque = Z_NULL;
+                    strm.avail_in = payload.size();
+                    strm.next_in = (Bytef*)payload.data();
+
+                    QByteArray decompressed;
+
+                    if (inflateInit(&strm) == Z_OK) {
+                        do {
+                            char buffer[8192];
+                            strm.avail_out = sizeof(buffer);
+                            strm.next_out = (Bytef*)buffer;
+
+                            int ret = inflate(&strm, Z_NO_FLUSH);
+                            if (ret == Z_STREAM_ERROR) {
+                                break;
+                            }
+
+                            size_t produced = sizeof(buffer) - strm.avail_out;
+                            decompressed.append(buffer, produced);
+                        } while (strm.avail_out == 0);
+
+                        inflateEnd(&strm);
+
+                        if (!decompressed.isEmpty()) {
+                            parsePacket(decompressed);
+                        }
+                    }
+                } else {
+                    QJsonDocument doc = QJsonDocument::fromJson(payload);
+                    if (doc.isObject()) {
+                        QJsonObject obj = doc.object();
+                        QString cmd = obj["cmd"].toString();
+
+                        if (cmd == "DANMU_MSG") {
+                            QJsonArray info = obj["info"].toArray();
+
+                            LiveDanmakuItem danmaku;
+                            danmaku.type = 1;
+                            danmaku.color = QColor(255, 255, 255);
+
+                            if (info.size() > 1) {
+                                danmaku.text = info[1].toString();
+                            }
+
+                            if (info.size() > 2) {
+                                QJsonArray userInfo = info[2].toArray();
+                                if (userInfo.size() > 1) {
+                                    danmaku.nickname = userInfo[1].toString();
+                                }
+                                if (userInfo.size() > 0) {
+                                    danmaku.uid = QString::number(userInfo[0].toVariant().toLongLong());
+                                }
+                            }
+
+                            if (info.size() > 0) {
+                                QJsonArray basicInfo = info[0].toArray();
+                                if (basicInfo.size() > 3) {
+                                    int colorValue = basicInfo[3].toInt();
+                                    if (colorValue == 0) {
+                                        danmaku.color = QColor(255, 255, 255);
+                                    } else {
+                                        danmaku.color = QColor((colorValue >> 16) & 0xFF,
+                                                               (colorValue >> 8) & 0xFF,
+                                                               colorValue & 0xFF);
+                                    }
+                                }
+                                if (basicInfo.size() > 4) {
+                                    danmaku.timestamp = basicInfo[4].toVariant().toLongLong();
+                                }
+                            }
+
+                            // 50ms 合批发射：缓冲累积，超阈值立即冲刷（防超高峰值时延迟无限累积）
+                            QVariantMap dm;
+                            dm["text"] = danmaku.text;
+                            dm["nickname"] = danmaku.nickname;
+                            dm["color"] = danmaku.color.name();
+                            dm["type"] = danmaku.type;
+                            m_pendingDanmaku.append(dm);
+                            if (m_pendingDanmaku.size() >= 300) {
+                                flushDanmakuBatch();
+                            } else if (!m_batchTimer->isActive()) {
+                                m_batchTimer->start();
+                            }
+                        }
+                        else if (cmd == "SUPER_CHAT_MESSAGE") {
+                            // 醒目留言：data 内含发送者/金额/内容/持续时长/官方配色
+                            // 用户信息现行协议在 user_info 内（uname/face），旧版在顶层（username/face）
+                            // 下半部颜色现行字段为 background_color2，旧版为 background_bottom_color
+                            QJsonObject data = obj["data"].toObject();
+                            QJsonObject userInfo = data["user_info"].toObject();
+                            QString username = userInfo["uname"].toString();
+                            if (username.isEmpty()) username = data["username"].toString();
+                            QString face = userInfo["face"].toString();
+                            if (face.isEmpty()) face = data["face"].toString();
+                            QString message = data["message"].toString();
+                            int price = data["price"].toInt();
+                            // time 为展示持续秒数（仅到时间自动消失，不做倒计时 UI）
+                            int scTime = data["time"].toInt();
+                            QString bgColor = data["background_color"].toString();
+                            QString bgBottomColor = data["background_color2"].toString();
+                            if (bgBottomColor.isEmpty()) bgBottomColor = data["background_bottom_color"].toString();
+                            if (scTime <= 0) scTime = 60;  // 异常数据兜底
+                            emit superChatReceived(username, face, message, price, scTime,
+                                                   bgColor, bgBottomColor);
+                        }
+                        else if (cmd == "SEND_GIFT") {
+                        }
+                        else if (cmd == "WELCOME") {
+                        }
+                        else if (cmd == "LIVE") {
+                        }
+                        else if (cmd == "PREPARING") {
+                        }
+                    }
+                }
+                break;
+            }
+
+            default:
+                break;
+        }
+
+        offset += packetLength;
+    }
+}
+
+QByteArray LiveDanmakuManager::buildPacket(int operation, const QByteArray &payload)
+{
+    QByteArray packet;
+    QDataStream stream(&packet, QIODevice::WriteOnly);
+    stream.setByteOrder(QDataStream::BigEndian);
+
+    quint32 packetLength = PACKET_HEADER_SIZE + payload.size();
+    quint16 headerLength = PACKET_HEADER_SIZE;
+    quint16 protocolVersion = 0;
+    quint32 op = operation;
+    quint32 sequence = m_sequence++;
+
+    stream << packetLength;
+    stream << headerLength;
+    stream << protocolVersion;
+    stream << op;
+    stream << sequence;
+
+    if (!payload.isEmpty()) {
+        packet.append(payload);
+    }
+
+    return packet;
+}
+
+void LiveDanmakuManager::flushDanmakuBatch()
+{
+    if (m_batchTimer)
+        m_batchTimer->stop();
+    if (m_pendingDanmaku.isEmpty())
+        return;
+    const QVariantList batch = m_pendingDanmaku;
+    m_pendingDanmaku.clear();
+    emit danmakuBatchReceived(batch);
+}

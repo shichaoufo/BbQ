@@ -1,0 +1,9 @@
+# clangd（Qt Creator Clang Code Model）配置
+# MinGW-w64 的 math.h 内部使用 GCC 内建类型 __float80（x87 80 位浮点），
+# g++ 原生认识它；clangd 在 Windows GNU 目标下不认识，会在 main.cpp 等
+# 包含链上报 "unknown type name '__float80'"。此处替换成 long double
+# 仅为让 clangd 语法分析通过，不影响 g++ 实际构建产物。
+# 编译正常但 IDE 有此误报时，可放心忽略；本文件只为消除该编辑器噪音。
+CompileFlags:
+  Add:
+    - "-D__float80=long double"
