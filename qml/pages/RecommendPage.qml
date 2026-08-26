@@ -103,6 +103,12 @@ Rectangle {
             root._lastContentY = target
             root._scrollRestored = true
             root.contentYChangedExternally(target)
+        } else if (savedY <= 0 && gridView.contentHeight > 0) {
+            // 保存位置就在顶部：内容布局完成后恢复即视为完成（无需位移）。
+            // 必须置位 _scrollRestored 关闭恢复逻辑，否则它会一直保持待命，
+            // 之后加载更多触发 contentHeight 变化时，会拿陈旧的
+            // recommendContentHeight 对当前滚动位置做比例缩放，页面突然下跳
+            root._scrollRestored = true
         }
     }
 
