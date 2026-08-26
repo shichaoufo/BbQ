@@ -4,11 +4,12 @@
 # 非 WIN 分支）。产物为未签名的 BbQ.app，自用场景首次打开需右键→打开。
 #
 # 依赖说明：
-#   - Qt 6.9.x arm64 由 install-qt-action 安装（与本地 Windows 侧 6.9.3 对齐）
+#   - Qt 6.9.3 clang_64（universal2，原生跑 ARM64；macos_arm64 arch 已不存在）
+#     基础包含 qtbase/qtdeclarative/qtsvg/qttools；Multimedia/WebSockets/
+#     ShaderTools/5Compat 为附加包需显式安装（已查 download.qt.io 6.9.3 元数据）
 #   - libmpv 来自 Homebrew（brew install mpv，同时提供头文件与 dylib）
-#   - FluentUI 需要单独安装到 Qt 的 qml 目录（见下方 FluentUI 步骤）。
-#     本仓库未内置 FluentUI 源码，CI 上从官方仓库动态拉取并安装；
-#     若你的 FluentUI 有本地改动，请改为 fork 固定或 vendored 子目录
+#   - FluentUI 从官方仓库拉取并安装进 Qt 的 qml 目录；若你有本地改动，
+#     请改为 fork 固定或 vendored 子目录
 #
 # 已知限制：runner 无 GUI 会话，只能验证"编译通过 + bundle 生成"，
 # 运行期行为（mpv 渲染、弹幕 vsync）必须真机联调
@@ -31,19 +32,21 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Qt 6.9 macOS 只发布 clang_64（universal2，原生跑在 Apple Silicon 上，
-      # macos_arm64 arch 名已不存在，6.9 起查 download.qt.io 元数据验证）
       - name: Install Qt 6.9 (universal, runs native on ARM64)
         uses: jurplel/install-qt-action@v4
         with:
           version: '6.9.3'
           arch: 'clang_64'
+          modules: 'qtshadertools qtmultimedia qtwebsockets qt5compat'
           cache: true
 
+      # qmake 由 install-qt-action 加入 PATH；用 -query 拿权威安装路径，
+      # 不依赖 action 的环境变量命名
       - name: Install libmpv & tools (Homebrew)
         run: |
           brew install mpv ninja
-          echo "MPV_PREFIX=$(brew --prefix mpv)" >> "$GITHUB_ENV"
+          echo "QT_PREFIX=$(qmake -query QT_INSTALL_PREFIX)" >> "$GITHUB_ENV"
+          echo "QT_QML_DIR=$(qmake -query QT_INSTALL_QML)" >> "$GITHUB_ENV"
 
       - name: Build FluentUI
         run: |
@@ -51,9 +54,9 @@ jobs:
           cmake -S /tmp/FluentUI -B /tmp/FluentUI/build \
             -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_PREFIX_PATH="$Qt6_DIR" \
+            -DCMAKE_PREFIX_PATH="$QT_PREFIX" \
             -DFLUENTUI_BUILD_EXAMPLES=OFF
-          cmake --build /tmp/FluentUI/build --target FluentUI --parallel
+          cmake --build /tmp/FluentUI/build --parallel
           cmake --install /tmp/FluentUI/build
 
       - name: Configure (Release)
@@ -61,8 +64,8 @@ jobs:
           cmake -S . -B build \
             -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_PREFIX_PATH="$Qt6_DIR" \
-            -DFLUENTUI_QML_PATH="$Qt6_DIR/qml/FluentUI"
+            -DCMAKE_PREFIX_PATH="$QT_PREFIX" \
+            -DFLUENTUI_QML_PATH="$QT_QML_DIR/FluentUI"
 
       - name: Build
         run: cmake --build build --parallel
