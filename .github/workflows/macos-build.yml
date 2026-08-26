@@ -154,9 +154,20 @@ jobs:
           codesign --force --deep -s - "stage/BbQ.app"
           codesign --verify --verbose "stage/BbQ.app"
 
+      # 打成 DMG 再上传：GitHub artifact 打包不保留 .app 的符号链接与
+      # 可执行权限（bundle 结构会被拆坏），DMG 将整个文件系统原样冻结，
+      # 单文件传输/分发不会再破坏结构
+      - name: Create DMG
+        run: |
+          hdiutil create -volname "BbQ" \
+            -srcfolder "stage/BbQ.app" \
+            -ov -format UDZO \
+            "BbQ-macOS-arm64.dmg"
+          ls -lh BbQ-macOS-arm64.dmg
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: BbQ-macOS-arm64
-          path: stage/BbQ.app
+          path: BbQ-macOS-arm64.dmg
           retention-days: 14
