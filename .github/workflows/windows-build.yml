@@ -72,7 +72,7 @@ jobs:
         run: |
           git clone --depth 1 https://github.com/zhuzichu520/FluentUI.git $env:RUNNER_TEMP\FluentUI
           cmake -S $env:RUNNER_TEMP\FluentUI -B $env:RUNNER_TEMP\FluentUI\build `
-            -G "MinGW Makefiles" `
+            -G Ninja `
             -DCMAKE_BUILD_TYPE=Release `
             -DCMAKE_PREFIX_PATH="$env:QT_PREFIX"
           cmake --build $env:RUNNER_TEMP\FluentUI\build --parallel
@@ -89,7 +89,7 @@ jobs:
         shell: pwsh
         run: |
           cmake -S . -B build `
-            -G "MinGW Makefiles" `
+            -G Ninja `
             -DCMAKE_BUILD_TYPE=Release `
             -DCMAKE_PREFIX_PATH="$env:QT_PREFIX" `
             -DFLUENTUI_QML_PATH="$env:QT_QML_DIR\FluentUI"
