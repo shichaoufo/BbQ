@@ -36,7 +36,6 @@ jobs:
         with:
           version: '6.9.3'
           arch: 'macos_arm64'
-          modules: 'qtshadertools qtmultimedia qtquick3d'
           cache: true
 
       - name: Install libmpv & tools (Homebrew)
