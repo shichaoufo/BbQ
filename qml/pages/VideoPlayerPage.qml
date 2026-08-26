@@ -2283,6 +2283,10 @@ Rectangle {
                 if (mpvPlayer.hasVideo && mpvPlayer.duration > 0) {
                     mpvPlayer.seek(pageRoot._pendingSeek)
                     mpvPlayer.play()
+                    // 空降让路：抬高护栏到恢复位置 +1.5s，避免恢复瞬间
+                    // （若历史位置恰落在标注片段内）被空降跳过立即覆盖
+                    pageRoot._sponsorSkipGuardMs = Math.max(pageRoot._sponsorSkipGuardMs,
+                                                            pageRoot._pendingSeek + 1500)
                     pageRoot._pendingSeek = 0
                     pageRoot._historyRestored = true
                 }
@@ -2322,8 +2326,9 @@ Rectangle {
             }
             mpvPlayer.play()
             if (Login.isLoggedIn && pageRoot.aid !== "" && pageRoot.cid !== "") {
-                // 开始播放时上报一次 progress=0，让服务器知道正在观看
-                doReportHistory(0, true)
+                // 不再上报 progress=0：它会覆盖服务器存储的历史进度（上次看到
+                // 一半 → 打开即清零 → 快速退出时进度丢失 → 下次无法恢复）。
+                // "在看"状态由 position>=5s 的首次上报与 15s 心跳维持
                 // 启动心跳定时器，持续同步播放进度
                 heartbeatTimer.start()
             }
@@ -2848,6 +2853,10 @@ Rectangle {
                                 }
                                 mpvPlayer.seek(seekMs)
                                 mpvPlayer.play()
+                                // 空降让路：抬高护栏到恢复位置 +1.5s，避免恢复瞬间
+                                // （若历史位置恰落在标注片段内）被空降跳过立即覆盖
+                                pageRoot._sponsorSkipGuardMs = Math.max(pageRoot._sponsorSkipGuardMs,
+                                                                        seekMs + 1500)
                                 pageRoot._pendingSeek = 0
                                 pageRoot._historyRestored = true
                             }
@@ -2882,9 +2891,13 @@ Rectangle {
                         }
                         // 空降助手：进入标注片段则跳到片段结尾。护栏 _sponsorSkipGuardMs
                         // 抑制 seek 生效前（position 仍报旧值）的重复触发；手动 seek 回
-                        // 片段内仍会再次跳过（与官方网页端行为一致）
+                        // 片段内仍会再次跳过（与官方网页端行为一致）。
+                        // _pendingSeek > 0 = 历史进度恢复（或切清晰度/重试的位置恢复）
+                        // 尚未执行：期间不抢跳（如片头恰饭片段会把进度先拉到片段尾，
+                        // 覆盖/打乱随后的历史恢复 seek，表现为"恢复失效"）
                         if (pageRoot.sponsorEnabled && pageRoot.sponsorSegments.length > 0
-                                && position > 0 && position >= pageRoot._sponsorSkipGuardMs) {
+                                && position > 0 && position >= pageRoot._sponsorSkipGuardMs
+                                && pageRoot._pendingSeek === 0) {
                             var sponsorPosSec = position / 1000
                             for (var ssi = 0; ssi < pageRoot.sponsorSegments.length; ssi++) {
                                 var sseg = pageRoot.sponsorSegments[ssi]
@@ -3456,7 +3469,7 @@ Rectangle {
                                 id: chapterTip
                                 visible: chapterHover.hovered
                                          && (pageRoot.viewPoints.length > 0
-                                             || pageRoot.sponsorSegments.length > 0)
+                                             || chapterTip.hitSegment !== null)
                                 property int hitIndex: {
                                     var ratio = chapterHover.point.position.x / Math.max(1, progressWrap.width)
                                     var pos = ratio * (progressSlider.to / 1000)

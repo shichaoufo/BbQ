@@ -1834,29 +1834,45 @@ void PlayUrlManager::getPlayerDetail(const QString &aid, const QString &cid, con
     getPlayerDetailImpl(aid, cid, bvid, false);
 }
 
-void PlayUrlManager::getPlayerDetailImpl(const QString &aid, const QString &cid, const QString &bvid, bool asGuest)
+void PlayUrlManager::getPlayerDetailImpl(const QString &aid, const QString &cid, const QString &bvid, bool asGuest,
+                                         bool useLegacyEndpoint, const QVariantList &fallbackViewPoints)
 {
-    qDebug() << "[PlayUrlManager] getPlayerDetail aid:" << aid << "cid:" << cid << "bvid:" << bvid
-             << "asGuest:" << asGuest;
+    qWarning() << "[PlayUrlManager] getPlayerDetail aid:" << aid << "cid:" << cid << "bvid:" << bvid
+             << "asGuest:" << asGuest << "legacy:" << useLegacyEndpoint;
 
     QString params = bvid.isEmpty()
                          ? QString("aid=%1&cid=%2").arg(aid, cid)
                          : QString("aid=%1&cid=%2&bvid=%3").arg(aid, cid, bvid);
 
-    QString signedParams = WbiSigner::instance()->signParams(params);
-    QString url = QString("https://api.bilibili.com/x/player/wbi/v2?%1").arg(signedParams);
+    QString url;
+    if (useLegacyEndpoint) {
+        // 老 /x/player/v2：无需 WBI 签名，作为 wbi/v2 被 412 风控时的备选
+        url = QString("https://api.bilibili.com/x/player/v2?%1").arg(params);
+    } else {
+        QString signedParams = WbiSigner::instance()->signParams(params);
+        url = QString("https://api.bilibili.com/x/player/wbi/v2?%1").arg(signedParams);
+    }
 
     QUrl reqUrl(url);
     QNetworkRequest request(reqUrl);
 
-    // 使用 wiliwili 风格的 headers 绕过 B 站 412 风控
-    request.setRawHeader(QByteArray("User-Agent"), QByteArray("wiliwili"));
-    request.setRawHeader(QByteArray("Referer"), QByteArray("https://www.bilibili.com/client"));
-    request.setRawHeader(QByteArray("Origin"), QByteArray("https://www.bilibili.com"));
-    request.setRawHeader(QByteArray("Accept"), QByteArray("application/json, text/plain, */*"));
-    request.setRawHeader(QByteArray("Accept-Language"), QByteArray("zh-CN,zh;q=0.9,en;q=0.8"));
-    request.setRawHeader(QByteArray("Connection"), QByteArray("keep-alive"));
-    request.setRawHeader(QByteArray("Cache-Control"), QByteArray("no-cache"));
+    if (useLegacyEndpoint) {
+        // 老端点用浏览器风格头（与 history/cursor 一致）：该组合是真实浏览器
+        // 访问 bilibili 的常规特征，与被风控盯上的 wiliwili+wbi/v2 组合区分开
+        request.setRawHeader("User-Agent", USER_AGENT.toUtf8());
+        request.setRawHeader("Referer", REFERER.toUtf8());
+        request.setRawHeader("Origin", ORIGIN.toUtf8());
+        request.setRawHeader("Accept", "application/json, text/plain, */*");
+    } else {
+        // 使用 wiliwili 风格的 headers 绕过 B 站 412 风控
+        request.setRawHeader(QByteArray("User-Agent"), QByteArray("wiliwili"));
+        request.setRawHeader(QByteArray("Referer"), QByteArray("https://www.bilibili.com/client"));
+        request.setRawHeader(QByteArray("Origin"), QByteArray("https://www.bilibili.com"));
+        request.setRawHeader(QByteArray("Accept"), QByteArray("application/json, text/plain, */*"));
+        request.setRawHeader(QByteArray("Accept-Language"), QByteArray("zh-CN,zh;q=0.9,en;q=0.8"));
+        request.setRawHeader(QByteArray("Connection"), QByteArray("keep-alive"));
+        request.setRawHeader(QByteArray("Cache-Control"), QByteArray("no-cache"));
+    }
 
     // 防 412 风控：确保真实设备指纹（buvid3 缺失是 412 的常见原因），与 getUserSpaceDynamics 同一套模式
     LoginManager *loginMgr = LoginManager::instance();
@@ -1880,7 +1896,9 @@ void PlayUrlManager::getPlayerDetailImpl(const QString &aid, const QString &cid,
         appendCookie("buvid4", loginMgr->getBuvid4());
         appendCookie("b_nut", loginMgr->getBNut());
         appendCookie("bili_ticket", loginMgr->getBiliTicket());
-        appendCookie("buvid_fp", buvid3);
+        // 注意：不再伪造 buvid_fp=buvid3。buvid_fp 应为 32 位 hex 指纹，拿
+        // buvid3（infoc 格式）冒充是明显的指纹伪造特征，疑似近期 412 风控诱因；
+        // 登录 cookie 里如有真实 buvid_fp 会随 getCookies() 带上，没有就不发
 
         if (!cookies.isEmpty()) {
             request.setRawHeader("Cookie", cookies.toUtf8());
@@ -1890,11 +1908,37 @@ void PlayUrlManager::getPlayerDetailImpl(const QString &aid, const QString &cid,
     // 独立 QNAM：与 playurl 完全隔离连接池。wbi/v2 带 Cookie 成功后连接会被
     // 服务端风控标记，若与 playurl 共池，后续 playurl 复用该连接会被按游客
     // 处理（最高 480P）——实测：wbi/v2 200 后下一视频 480P，wbi/v2 被 412
-    // （连接废弃）后 playurl 反而全清晰度
-    if (!m_playerDetailManager)
-        m_playerDetailManager = new QNetworkAccessManager(this);
-    QNetworkReply *reply = m_playerDetailManager->get(request);
-    connect(reply, &QNetworkReply::finished, this, [this, reply, aid, cid, bvid, asGuest]() {
+    // （连接废弃）后 playurl 反而全清晰度。
+    // legacy 走浏览器风格专用池（m_historyProgressManager），避免复用刚被
+    // 风控标记/按游客处理的 wbi/v2 连接
+    QNetworkAccessManager *manager = nullptr;
+    if (useLegacyEndpoint) {
+        if (!m_historyProgressManager)
+            m_historyProgressManager = new QNetworkAccessManager(this);
+        manager = m_historyProgressManager;
+    } else {
+        if (!m_playerDetailManager)
+            m_playerDetailManager = new QNetworkAccessManager(this);
+        manager = m_playerDetailManager;
+    }
+    QNetworkReply *reply = manager->get(request);
+    connect(reply, &QNetworkReply::finished, this, [this, reply, aid, cid, bvid, asGuest, useLegacyEndpoint, fallbackViewPoints]() {
+        // 412 风控分层降级：
+        //   wbi/v2+Cookie 412 → 游客重试（章节游客也返回）
+        //   游客也 412        → 老 /x/player/v2 + Cookie（浏览器风格头）
+        //   老 v2 也 412      → history/cursor 翻页找进度（最终兜底）
+        auto handleBanned = [this, aid, cid, bvid, asGuest, useLegacyEndpoint, fallbackViewPoints]() {
+            if (!asGuest && !useLegacyEndpoint) {
+                qWarning() << "[PlayUrlManager] player/wbi/v2 banned (412), retrying as guest";
+                getPlayerDetailImpl(aid, cid, bvid, true);
+            } else if (!asGuest && useLegacyEndpoint) {
+                qWarning() << "[PlayUrlManager] legacy /x/player/v2 banned (412), falling back to history/cursor";
+                getHistoryProgress(aid, cid, fallbackViewPoints);
+            } else {
+                qWarning() << "[PlayUrlManager] player/wbi/v2 banned (412) even as guest, trying legacy /x/player/v2";
+                getPlayerDetailImpl(aid, cid, bvid, false, true, fallbackViewPoints);
+            }
+        };
         int httpStatus = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
         if (reply->error() != QNetworkReply::NoError) {
             qWarning() << "[PlayUrlManager] player/wbi/v2 network error:" << reply->error()
@@ -1903,16 +1947,18 @@ void PlayUrlManager::getPlayerDetailImpl(const QString &aid, const QString &cid,
             if (!errBody.isEmpty()) {
                 qDebug() << "[PlayUrlManager] player/wbi/v2 error body:" << errBody.left(512);
             }
-            // 412 风控：先以游客身份重试一次（view_points 章节数据游客也返回，
-            // 仅放弃 last_play_time）；游客重试仍失败则降级到 /x/v2/history/list
+            // B 站风控两种形态都接进降级链：HTTP 412，或 HTTP 200 + body 含 -412
             if (httpStatus == 412 || errBody.contains("-412")) {
-                if (!asGuest) {
-                    qWarning() << "[PlayUrlManager] player/wbi/v2 banned (412), retrying as guest";
-                    getPlayerDetailImpl(aid, cid, bvid, true);
-                } else {
-                    qWarning() << "[PlayUrlManager] player/wbi/v2 banned (412) even as guest, falling back to /x/v2/history/list";
-                    getHistoryProgress(aid, cid);
-                }
+                handleBanned();
+            } else {
+                // 其他网络错误：emit 空进度 + 透传章节，别让 QML 干等
+                QVariantMap failDetail;
+                failDetail["aid"] = aid;
+                failDetail["cid"] = cid;
+                failDetail["lastPlayTime"] = 0;
+                failDetail["lastPlayCid"] = "";
+                failDetail["viewPoints"] = fallbackViewPoints;
+                emit playerDetailReady(failDetail);
             }
             reply->deleteLater();
             return;
@@ -1929,8 +1975,13 @@ void PlayUrlManager::getPlayerDetailImpl(const QString &aid, const QString &cid,
 
         QJsonObject root = doc.object();
         if (root["code"].toInt() != 0) {
-            qWarning() << "[PlayUrlManager] player/wbi/v2 API error:" << root["code"].toInt()
-                       << root["message"].toString();
+            int apiCode = root["code"].toInt();
+            qWarning() << "[PlayUrlManager] player/wbi/v2 API error:" << apiCode
+                     << root["message"].toString();
+            // HTTP 200 + JSON code:-412 也是风控（B 站常见形态），同样走降级链
+            if (apiCode == -412) {
+                handleBanned();
+            }
             reply->deleteLater();
             return;
         }
@@ -1942,6 +1993,9 @@ void PlayUrlManager::getPlayerDetailImpl(const QString &aid, const QString &cid,
         detail["cid"] = cid;
 
         // 解析历史播放进度
+        // last_play_time 单位为毫秒，直接透传（已对照加入章节功能前的可用版本
+        // 核实：同样裸透传且恢复正常。注意 history/cursor 降级路径的 progress
+        // 才是秒、在那边 ×1000——两条路径单位不同，勿混淆）
         qint64 lastPlayTime = 0;
         QString lastPlayCid;
         if (dataObj.contains("last_play_time")) {
@@ -1955,25 +2009,42 @@ void PlayUrlManager::getPlayerDetailImpl(const QString &aid, const QString &cid,
 
         // 解析分段章节（view_points，UP主设置的视频分段）。
         // 章节数据只在此接口返回（/x/web-interface/view 无此字段），
-        // 每项含 content(标题)/from(起始秒)/to(结束秒)；无章节为空列表
+        // 每项含 content(标题)/from(起始秒)/to(结束秒)；无章节为空列表。
+        // 老 /x/player/v2 响应若缺 view_points 字段，沿用调用链上游（游客
+        // wbi/v2）已解析的章节
         QVariantList viewPointsList;
-        const QJsonArray vpArr = dataObj.value("view_points").toArray();
-        for (const QJsonValue &v : vpArr) {
-            const QJsonObject o = v.toObject();
-            if (o.value("content").toString().isEmpty())
-                continue;
-            QVariantMap m;
-            m["title"] = o.value("content").toString();
-            m["from"] = o.value("from").toDouble();
-            m["to"] = o.value("to").toDouble();
-            viewPointsList.append(m);
+        if (dataObj.contains("view_points")) {
+            const QJsonArray vpArr = dataObj.value("view_points").toArray();
+            for (const QJsonValue &v : vpArr) {
+                const QJsonObject o = v.toObject();
+                if (o.value("content").toString().isEmpty())
+                    continue;
+                QVariantMap m;
+                m["title"] = o.value("content").toString();
+                m["from"] = o.value("from").toDouble();
+                m["to"] = o.value("to").toDouble();
+                viewPointsList.append(m);
+            }
+        } else {
+            viewPointsList = fallbackViewPoints;
         }
         detail["viewPoints"] = viewPointsList;
         if (!viewPointsList.isEmpty())
-            qDebug() << "[PlayUrlManager] chapters from player/wbi/v2:" << viewPointsList.size();
+            qWarning() << "[PlayUrlManager] chapters from player detail:" << viewPointsList.size();
 
-        qDebug() << "[PlayUrlManager] playerDetail:" << "lastPlayTime=" << lastPlayTime
+        qWarning() << "[PlayUrlManager] playerDetail:" << "lastPlayTime=" << lastPlayTime
                  << "lastPlayCid=" << lastPlayCid;
+
+        // 游客重试成功：登录态的历史进度被游客身份丢掉（last_play_time 仅
+        // 登录 Cookie 请求返回）。先走老 /x/player/v2 + Cookie 补救（同源数据，
+        // 端点/请求特征不同，被连带风控的概率低）；viewPoints 一并传递，
+        // 避免降级 emit 把 QML 侧章节覆盖为空
+        if (asGuest && lastPlayTime == 0) {
+            qWarning() << "[PlayUrlManager] guest got no progress, trying legacy /x/player/v2 with cookies";
+            getPlayerDetailImpl(aid, cid, bvid, false, true, viewPointsList);
+            reply->deleteLater();
+            return;
+        }
 
         emit playerDetailReady(detail);
         reply->deleteLater();
@@ -1981,14 +2052,24 @@ void PlayUrlManager::getPlayerDetailImpl(const QString &aid, const QString &cid,
 }
 
 // 降级方案：通过 /x/web-interface/history/cursor 获取视频观看进度
-// 当 /x/player/wbi/v2 被风控拦截时使用
-void PlayUrlManager::getHistoryProgress(const QString &aid, const QString &cid)
-{
-    qDebug() << "[PlayUrlManager] getHistoryProgress fallback aid:" << aid << "cid:" << cid;
+// 当 /x/player/wbi/v2（含老 v2 备选）都被风控拦截时的最终兜底。
+// history/cursor 每页只返回最近 ps=30 条，目标视频可能埋得更深，
+// 故按 cursor 翻页查找，最多 maxHistoryPages 页
+static const int maxHistoryPages = 5;
 
+void PlayUrlManager::getHistoryProgress(const QString &aid, const QString &cid,
+                                        const QVariantList &viewPoints)
+{
+    qWarning() << "[PlayUrlManager] getHistoryProgress fallback aid:" << aid << "cid:" << cid;
+    fetchHistoryCursorPage(aid, cid, viewPoints, 0, 0, 1);
+}
+
+void PlayUrlManager::fetchHistoryCursorPage(const QString &aid, const QString &cid,
+                                            const QVariantList &viewPoints, qint64 max, qint64 viewAt, int page)
+{
     // 使用 /x/web-interface/history/cursor（与 ApiManager::getHistoryList 相同，无需 WBI 签名）
     QString url = "https://api.bilibili.com/x/web-interface/history/cursor";
-    QString params = "max=0&view_at=0&ps=30";
+    QString params = QString("max=%1&view_at=%2&ps=30").arg(max).arg(viewAt);
 
     QUrl reqUrl(url + "?" + params);
     QNetworkRequest request(reqUrl);
@@ -2002,33 +2083,48 @@ void PlayUrlManager::getHistoryProgress(const QString &aid, const QString &cid)
         request.setRawHeader("Cookie", cookies.toUtf8());
     }
 
-    qDebug() << "[PlayUrlManager] getHistoryProgress request:" << url << "?" << params;
+    qWarning() << "[PlayUrlManager] history/cursor page" << page << "request:" << params
+             << "cookieLen:" << cookies.size();
 
-    // 与 getPlayerDetailImpl 同理：走专用 QNAM，避免污染 playurl 共享连接池
-    if (!m_playerDetailManager)
-        m_playerDetailManager = new QNetworkAccessManager(this);
-    QNetworkReply *reply = m_playerDetailManager->get(request);
-    connect(reply, &QNetworkReply::finished, this, [this, reply, aid, cid]() {
+    // 浏览器风格专用 QNAM（m_historyProgressManager）：不复用 m_playerDetailManager，
+    // 避免搭上刚被风控 412/按游客处理的连接
+    if (!m_historyProgressManager)
+        m_historyProgressManager = new QNetworkAccessManager(this);
+    QNetworkReply *reply = m_historyProgressManager->get(request);
+    connect(reply, &QNetworkReply::finished, this, [this, reply, aid, cid, viewPoints, page]() {
+        // 失败时也 emit（lastPlayTime=0 + 透传章节）：保证 QML 侧总能收到
+        // playerDetailReady，章节不因降级失败而丢失
+        QVariantMap failDetail;
+        failDetail["aid"] = aid;
+        failDetail["cid"] = cid;
+        failDetail["lastPlayTime"] = 0;
+        failDetail["lastPlayCid"] = "";
+        failDetail["viewPoints"] = viewPoints;
+
         int httpStatus = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
         if (reply->error() != QNetworkReply::NoError) {
-            qDebug() << "[PlayUrlManager] history/cursor error:" << reply->error()
-                     << "httpStatus:" << httpStatus;
+            qWarning() << "[PlayUrlManager] history/cursor error:" << reply->error()
+                     << "httpStatus:" << httpStatus << reply->errorString();
+            emit playerDetailReady(failDetail);
             reply->deleteLater();
             return;
         }
 
         QByteArray data = reply->readAll();
-        qDebug() << "[PlayUrlManager] history/cursor response:" << data.left(500);
 
         QJsonDocument doc = QJsonDocument::fromJson(data);
         if (!doc.isObject()) {
+            qWarning() << "[PlayUrlManager] history/cursor invalid JSON, size:" << data.size();
+            emit playerDetailReady(failDetail);
             reply->deleteLater();
             return;
         }
 
         QJsonObject root = doc.object();
         if (root["code"].toInt() != 0) {
-            qDebug() << "[PlayUrlManager] history/cursor API error:" << root["code"].toInt();
+            qWarning() << "[PlayUrlManager] history/cursor API error:" << root["code"].toInt()
+                     << root["message"].toString();
+            emit playerDetailReady(failDetail);
             reply->deleteLater();
             return;
         }
@@ -2038,60 +2134,72 @@ void PlayUrlManager::getHistoryProgress(const QString &aid, const QString &cid)
         detail["cid"] = cid;
         detail["lastPlayTime"] = 0;
         detail["lastPlayCid"] = "";
-        // 降级路径拿不到章节：显式空列表，与主路径信号结构一致，
-        // 避免 QML 侧 detail.viewPoints 为 undefined 时的语义歧义
-        detail["viewPoints"] = QVariantList();
+        // viewPoints 由调用方透传（游客补救场景带真实章节）；独立降级场景为
+        // 空列表，与主路径信号结构一致，避免 QML 侧 undefined 语义歧义
+        detail["viewPoints"] = viewPoints;
 
         QJsonObject dataObj = root["data"].toObject();
-        if (dataObj.contains("list")) {
-            QJsonArray list = dataObj["list"].toArray();
-            for (const QJsonValue &item : list) {
-                QJsonObject obj = item.toObject();
-                // history/cursor 返回的结构：list[].history.oid/cid
+        QJsonArray list = dataObj["list"].toArray();
+        bool found = false;
+        for (const QJsonValue &item : list) {
+            QJsonObject obj = item.toObject();
+            // history/cursor 返回的结构：list[].history.oid/cid
+            if (!obj.contains("history")) continue;
+            QJsonObject historyObj = obj["history"].toObject();
+
+            QString itemAid;
+            if (historyObj.contains("oid")) {
+                itemAid = QString::number(historyObj["oid"].toVariant().toLongLong());
+            } else if (historyObj.contains("aid")) {
+                itemAid = QString::number(historyObj["aid"].toVariant().toLongLong());
+            }
+            QString itemCid = QString::number(historyObj["cid"].toVariant().toLongLong());
+
+            if (itemAid == aid && itemCid == cid) {
                 // progress/duration 可能在 history 内部或顶层
-                if (!obj.contains("history")) continue;
-                QJsonObject historyObj = obj["history"].toObject();
-
-                QString itemAid;
-                if (historyObj.contains("oid")) {
-                    itemAid = QString::number(historyObj["oid"].toVariant().toLongLong());
-                } else if (historyObj.contains("aid")) {
-                    itemAid = QString::number(historyObj["aid"].toVariant().toLongLong());
+                int progress = 0;
+                int duration = 0;
+                if (historyObj.contains("progress")) {
+                    progress = historyObj["progress"].toInt();
+                } else if (obj.contains("progress")) {
+                    progress = obj["progress"].toInt();
                 }
-                QString itemCid = QString::number(historyObj["cid"].toVariant().toLongLong());
-
-                qDebug() << "[PlayUrlManager] history/cursor item:"
-                         << "aid=" << itemAid << "cid=" << itemCid
-                         << "history keys:" << historyObj.keys();
-
-                if (itemAid == aid && itemCid == cid) {
-                    // progress/duration 可能在 history 内部或顶层
-                    int progress = 0;
-                    int duration = 0;
-                    if (historyObj.contains("progress")) {
-                        progress = historyObj["progress"].toInt();
-                    } else if (obj.contains("progress")) {
-                        progress = obj["progress"].toInt();
-                    }
-                    if (historyObj.contains("duration")) {
-                        duration = historyObj["duration"].toInt();
-                    } else if (obj.contains("duration")) {
-                        duration = obj["duration"].toInt();
-                    }
-
-                    qint64 lastPlayTime = static_cast<qint64>(progress) * 1000;
-                    detail["lastPlayTime"] = lastPlayTime;
-                    detail["lastPlayCid"] = cid;
-                    qDebug() << "[PlayUrlManager] history/cursor FOUND match:"
-                             << "progress=" << progress << "duration=" << duration
-                             << "lastPlayTime=" << lastPlayTime
-                             << "obj keys:" << obj.keys();
-                    break;
+                if (historyObj.contains("duration")) {
+                    duration = historyObj["duration"].toInt();
+                } else if (obj.contains("duration")) {
+                    duration = obj["duration"].toInt();
                 }
+
+                qint64 lastPlayTime = static_cast<qint64>(progress) * 1000;
+                detail["lastPlayTime"] = lastPlayTime;
+                detail["lastPlayCid"] = cid;
+                qWarning() << "[PlayUrlManager] history/cursor FOUND match at page" << page
+                         << "progress=" << progress << "duration=" << duration
+                         << "lastPlayTime=" << lastPlayTime;
+                found = true;
+                break;
             }
         }
 
-        qDebug() << "[PlayUrlManager] history/cursor result: lastPlayTime=" << detail["lastPlayTime"];
+        if (found) {
+            emit playerDetailReady(detail);
+            reply->deleteLater();
+            return;
+        }
+
+        // 本页没找到：用响应里的 cursor 翻下一页（list 空说明历史翻完了）
+        QJsonObject cursor = dataObj["cursor"].toObject();
+        qint64 nextMax = cursor["max"].toVariant().toLongLong();
+        qint64 nextViewAt = cursor["view_at"].toVariant().toLongLong();
+        if (page < maxHistoryPages && !list.isEmpty() && nextMax > 0) {
+            qWarning() << "[PlayUrlManager] history/cursor not in page" << page
+                     << "(" << list.size() << "items ), fetching page" << page + 1;
+            reply->deleteLater();
+            fetchHistoryCursorPage(aid, cid, viewPoints, nextMax, nextViewAt, page + 1);
+            return;
+        }
+
+        qWarning() << "[PlayUrlManager] history/cursor result: not found in" << page << "page(s), lastPlayTime=0";
         emit playerDetailReady(detail);
         reply->deleteLater();
     });

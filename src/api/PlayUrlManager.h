@@ -327,11 +327,25 @@ public:
     Q_INVOKABLE void getVideoPageList(const QString &aid, const QString &bvid, const QString &currentCid = QString());
 
     // 降级方案：通过 /x/v2/history/list 获取观看进度
-    void getHistoryProgress(const QString &aid, const QString &cid);
+    // viewPoints：可选，游客重试成功后已解析的章节数据，降级 emit 时原样带回，
+    // 避免二次 playerDetailReady 把 QML 侧章节覆盖成空列表
+    void getHistoryProgress(const QString &aid, const QString &cid,
+                            const QVariantList &viewPoints = QVariantList());
+
+    // history/cursor 分页抓取（getHistoryProgress 内部用）：
+    // 目标视频可能不在最近一页（ps=30），最多翻 maxPages 页
+    void fetchHistoryCursorPage(const QString &aid, const QString &cid,
+                                const QVariantList &viewPoints, qint64 max, qint64 viewAt, int page);
 
     // getPlayerDetail 内部实现；asGuest=true 时不带登录 Cookie（412 风控重试用，
-    // view_points 章节数据游客身份也返回，仅放弃 last_play_time 历史进度）
-    void getPlayerDetailImpl(const QString &aid, const QString &cid, const QString &bvid, bool asGuest);
+    // view_points 章节数据游客身份也返回，仅放弃 last_play_time 历史进度）。
+    // useLegacyEndpoint=true 时改走老 /x/player/v2（无需 WBI 签名，浏览器风格
+    // 头+登录 Cookie）：wbi/v2 被 412 风控时的备选路径，同样返回 last_play_time。
+    // fallbackViewPoints：调用链上游（游客 wbi/v2）已解析的章节，响应缺
+    // view_points 字段时沿用，避免降级 emit 把 QML 侧章节覆盖为空
+    void getPlayerDetailImpl(const QString &aid, const QString &cid, const QString &bvid, bool asGuest,
+                             bool useLegacyEndpoint = false,
+                             const QVariantList &fallbackViewPoints = QVariantList());
 
     // 获取番剧详情（通过 season_id 或 ep_id）
     Q_INVOKABLE void getSeasonDetail(const QString &id, const QString &type = "season");
@@ -433,6 +447,9 @@ private:
     // player/wbi/v2（章节/历史进度）专用 QNAM：与 playurl 隔离连接池。
     // 该接口易被风控标记连接，复用共享连接池会把 playurl 拖累成游客 480P
     QNetworkAccessManager *m_playerDetailManager = nullptr;
+    // 浏览器风格降级请求（老 /x/player/v2、history/cursor）专用 QNAM：
+    // 独立连接池，避免复用 m_playerDetailManager 里刚被风控标记/按游客处理的连接
+    QNetworkAccessManager *m_historyProgressManager = nullptr;
     QList<QualityInfo> m_qualityList;
     QMap<QString, QString> m_playUrls;
     QMap<QString, QString> m_userUploadCursorMap;  // mid -> lastAid，APP 投稿游标分页
