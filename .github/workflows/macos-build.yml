@@ -48,6 +48,9 @@ jobs:
           echo "QT_PREFIX=$(qmake -query QT_INSTALL_PREFIX)" >> "$GITHUB_ENV"
           echo "QT_QML_DIR=$(qmake -query QT_INSTALL_QML)" >> "$GITHUB_ENV"
 
+      # FluentUI 构建时把插件 dylib 直接链入 Qt 的 qml 目录，
+      # 其 cmake install 规则默认指向 /usr/local/imports（无权限），
+      # 因此跳过 install，改为校验插件目录完整性 + 缺 qmldir 时补拷
       - name: Build FluentUI
         run: |
           git clone --depth 1 https://github.com/zhuzichu520/FluentUI.git /tmp/FluentUI
@@ -57,7 +60,13 @@ jobs:
             -DCMAKE_PREFIX_PATH="$QT_PREFIX" \
             -DFLUENTUI_BUILD_EXAMPLES=OFF
           cmake --build /tmp/FluentUI/build --parallel
-          cmake --install /tmp/FluentUI/build
+          echo "--- plugin dir contents:"
+          ls -la "$QT_QML_DIR/FluentUI/" || true
+          if [ ! -f "$QT_QML_DIR/FluentUI/qmldir" ]; then
+            echo "qmldir missing in plugin dir, copying from build tree"
+            find /tmp/FluentUI/build -name qmldir -exec cp {} "$QT_QML_DIR/FluentUI/" \;
+          fi
+          test -f "$QT_QML_DIR/FluentUI/qmldir" || { echo "ERROR: FluentUI qmldir not found"; exit 1; }
 
       - name: Configure (Release)
         run: |
