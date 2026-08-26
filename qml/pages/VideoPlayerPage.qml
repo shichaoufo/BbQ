@@ -3208,6 +3208,8 @@ Rectangle {
                     anchors.rightMargin: 6
                     height: 3
                     z: 50
+                    color: "transparent"    // 容器默认白色，会在底轨圆角外的
+                                            // 四角露出白边，必须显式透明
                     enabled: false          // 鼠标事件穿透到播放区（点击/双击等）
                     opacity: (pageRoot.miniProgressEnabled
                               && !pageRoot.controlsVisible
@@ -3217,14 +3219,16 @@ Rectangle {
                         NumberAnimation { duration: 200; easing.type: Easing.OutCubic }
                     }
 
-                    // 底轨：与主进度条轨道同款灰（主题区分明暗）
+                    // 底轨：与主进度条轨道同款灰（主题区分明暗）；
+                    // radius = 高度一半 → 两端半圆（胶囊形），与主进度条一致
                     Rectangle {
                         anchors.fill: parent
+                        radius: height / 2
                         color: FluTheme.dark ? Qt.rgba(162/255,162/255,162/255,1)
                                              : Qt.rgba(138/255,138/255,138/255,1)
                     }
 
-                    // 已播放填充
+                    // 已播放填充：两端半圆（宽度 < 高度时 Qt 自动收窄圆角）
                     Rectangle {
                         anchors.left: parent.left
                         anchors.top: parent.top
@@ -3232,10 +3236,11 @@ Rectangle {
                         width: mpvPlayer.duration > 0
                                ? parent.width * (mpvPlayer.position / mpvPlayer.duration)
                                : 0
+                        radius: height / 2
                         color: FluTheme.primaryColor
                     }
 
-                    // 空降助手色块
+                    // 空降助手色块：两端半圆，与主进度条色带一致
                     Repeater {
                         model: pageRoot.sponsorSegments
                         Rectangle {
@@ -3244,6 +3249,7 @@ Rectangle {
                                              / mpvPlayer.duration * parent.width)
                             y: 0
                             height: parent.height
+                            radius: height / 2
                             color: pageRoot.sponsorCategoryColor(modelData.category)
                             visible: modelData.end > modelData.start
                                      && mpvPlayer.duration > 0
