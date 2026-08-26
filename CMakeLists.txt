@@ -350,11 +350,9 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     qrencode
 )
 
-# z：zlib 压缩（弹幕 XML / 网络响应解压）。macOS 系统自带无需显式链接；
-# MinGW/Linux 需要显式链接
-if(NOT APPLE)
-    target_link_libraries(${PROJECT_NAME} PRIVATE z)
-endif()
+# z：zlib 压缩（直播弹幕包 inflate 解压等）。macOS 系统提供 /usr/lib/libz.dylib，
+# 直接调用 zlib API 时仍需显式链接（-lz）
+target_link_libraries(${PROJECT_NAME} PRIVATE z)
 
 # DanmakuCanvas 图集路径使用 QRhi private API（newTexture/uploadTexture），
 # RHI 接口跨后端通用（D3D11/Metal/OpenGL），private 头随标准 Qt 安装提供
