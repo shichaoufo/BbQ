@@ -31,11 +31,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Qt 6.9 (arm64)
+      # Qt 6.9 macOS 只发布 clang_64（universal2，原生跑在 Apple Silicon 上，
+      # macos_arm64 arch 名已不存在，6.9 起查 download.qt.io 元数据验证）
+      - name: Install Qt 6.9 (universal, runs native on ARM64)
         uses: jurplel/install-qt-action@v4
         with:
           version: '6.9.3'
-          arch: 'macos_arm64'
+          arch: 'clang_64'
           cache: true
 
       - name: Install libmpv & tools (Homebrew)
