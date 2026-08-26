@@ -356,11 +356,15 @@ if(NOT APPLE)
     target_link_libraries(${PROJECT_NAME} PRIVATE z)
 endif()
 
-# Windows D3D11 路径需要 QRhi private headers 与 d3d11 库
+# DanmakuCanvas 图集路径使用 QRhi private API（newTexture/uploadTexture），
+# RHI 接口跨后端通用（D3D11/Metal/OpenGL），private 头随标准 Qt 安装提供
+target_link_libraries(${PROJECT_NAME} PRIVATE Qt${QT_VERSION_MAJOR}::GuiPrivate)
+
+# Windows 专属系统库
+# d3d11/dxgi：MpvObjectD3D11 渲染路径
 # dwmapi：DanmakuCanvas 的 vsync 网格查询（DwmGetCompositionTimingInfo）
 if(WIN32)
     target_link_libraries(${PROJECT_NAME} PRIVATE
-        Qt${QT_VERSION_MAJOR}::GuiPrivate
         d3d11
         dxgi
         dwmapi
