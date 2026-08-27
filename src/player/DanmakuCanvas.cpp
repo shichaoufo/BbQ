@@ -1157,7 +1157,7 @@ int DanmakuCanvas::outlineExtent(int fontSize) const
 {
     switch (m_outlineStyle) {
     case 1:  return qMax(1, fontSize / 12);   // 重墨：稍厚的边
-    case 2:  return qMax(1, fontSize / 12);   // 投影：右下偏移量
+    case 2:  return qMax(1, fontSize / 12);   // 投影：右下偏移量（小偏移，影子隐约可辨）
     default: return qMax(1, fontSize / 10);   // 描边
     }
 }
@@ -1256,9 +1256,16 @@ QImage DanmakuCanvas::renderImage(const QString &text, const QColor &color, qrea
         break;
     }
     case 2: {
-        // 45° 投影：本体 + 右下偏移半透明影（B 站网页端同款，无真模糊）
+        // 45° 投影：本体 + 右下偏移半透明影（B 站网页端同款，无真模糊）。
+        // 本体加最细 1px 描边（半透明，同描边档配色）：浅色弹幕在亮画面
+        // 上本体边缘易糊进背景，细边兜住轮廓，观感仍保持"轻"
         p.setPen(QColor(0, 0, 0, 160));
         p.drawText(extent + extent, baseline + extent, text);
+        p.setPen(QColor(0, 0, 0, 217));
+        p.drawText(extent, baseline - 1, text);
+        p.drawText(extent, baseline + 1, text);
+        p.drawText(extent - 1, baseline, text);
+        p.drawText(extent + 1, baseline, text);
         p.setPen(color);
         p.drawText(extent, baseline, text);
         break;
