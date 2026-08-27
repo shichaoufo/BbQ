@@ -384,6 +384,7 @@ Rectangle {
     property real danmakuOpacity: 1.0
     property int danmakuRangeIndex: 3 // 0=1/4屏, 1=半屏, 2=3/4屏, 3=全屏（与直播一致）
     property int danmakuSpeedIndex: 1 // 0=慢, 1=中, 2=快
+    property int danmakuOutlineStyle: 0 // 描边样式：0=描边 1=重墨 2=45°投影（B站三档）
     property real playbackSpeed: 1.0
     readonly property string currentSpeed: {
         var s = playbackSpeed
@@ -930,6 +931,7 @@ Rectangle {
         pageRoot.danmakuOpacity = Settings.getReal("video/danmaku/opacity", 1.0)
         pageRoot.danmakuRangeIndex = Settings.getInt("video/danmaku/rangeIndex", 3)
         pageRoot.danmakuSpeedIndex = Settings.getInt("video/danmaku/speedIndex", 1)
+        pageRoot.danmakuOutlineStyle = Settings.getInt("video/danmaku/outlineStyle", 0)
         pageRoot.playbackSpeed = Settings.getReal("video/playbackSpeed", 1.0)
         pageRoot.danmakuFpsLimit = Settings.getInt("video/danmaku/fpsLimit", 60)
         pageRoot.sponsorEnabled = Settings.getBool("video/sponsor/enabled", true)
@@ -944,6 +946,7 @@ Rectangle {
         Settings.setReal("video/danmaku/opacity", pageRoot.danmakuOpacity)
         Settings.setInt("video/danmaku/rangeIndex", pageRoot.danmakuRangeIndex)
         Settings.setInt("video/danmaku/speedIndex", pageRoot.danmakuSpeedIndex)
+        Settings.setInt("video/danmaku/outlineStyle", pageRoot.danmakuOutlineStyle)
         Settings.setReal("video/playbackSpeed", pageRoot.playbackSpeed)
         Settings.setInt("video/danmaku/fpsLimit", pageRoot.danmakuFpsLimit)
         Settings.setBool("video/sponsor/enabled", pageRoot.sponsorEnabled)
@@ -3066,6 +3069,7 @@ Rectangle {
                     danmakuEnabled: pageRoot.danmakuEnabled
                     opacityValue: pageRoot.danmakuOpacity
                     fontSizeScale: pageRoot.danmakuSize
+                    outlineStyle: pageRoot.danmakuOutlineStyle
                     speedScale: pageRoot._danmakuSpeedScale(pageRoot.danmakuSpeedIndex) * pageRoot.playbackSpeed
                     displayAreaRatio: [0.25, 0.5, 0.75, 1.0][pageRoot.danmakuRangeIndex] || 1.0
                     areaOffsetRatio: 0.0
@@ -3990,6 +3994,29 @@ Rectangle {
                                     onActivated: function(index) {
                                         pageRoot.danmakuFpsLimit = optionValues[index]
                                         FramePacer.setTargetRate(pageRoot.danmakuFpsLimit)
+                                        savePlayerSettings()
+                                    }
+                                }
+                            }
+
+                            // 弹幕描边样式（对齐 B 站三档）
+                            RowLayout {
+                                Layout.fillWidth: true
+                                spacing: 8
+
+                                FluText {
+                                    text: "描边样式"
+                                    font: FluTextStyle.Body
+                                    color: "#FFFFFF"
+                                }
+
+                                Item { Layout.fillWidth: true }
+
+                                FluComboBox {
+                                    model: ["描边", "重墨", "45°投影"]
+                                    currentIndex: pageRoot.danmakuOutlineStyle
+                                    onActivated: function(index) {
+                                        pageRoot.danmakuOutlineStyle = index
                                         savePlayerSettings()
                                     }
                                 }

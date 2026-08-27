@@ -108,6 +108,8 @@ class DanmakuCanvas : public QQuickItem
     Q_PROPERTY(bool danmakuEnabled READ danmakuEnabled WRITE setDanmakuEnabled NOTIFY danmakuEnabledChanged)
     Q_PROPERTY(int maxItems READ maxItems WRITE setMaxItems NOTIFY maxItemsChanged)
     Q_PROPERTY(int activeCount READ activeCount NOTIFY activeCountChanged)
+    // 描边样式（对齐 B 站网页端）：0=描边 1=重墨 2=45°投影
+    Q_PROPERTY(int outlineStyle READ outlineStyle WRITE setOutlineStyle NOTIFY outlineStyleChanged)
     // 暂停状态：true 时弹幕原地冻结、帧驱动链停转（不空耗渲染）
     Q_PROPERTY(bool paused READ paused WRITE setPaused NOTIFY pausedChanged)
 
@@ -162,6 +164,9 @@ public:
     bool paused() const { return m_paused; }
     void setPaused(bool v);
 
+    int outlineStyle() const { return m_outlineStyle; }
+    void setOutlineStyle(int v);
+
     int activeCount() const { return m_live.size(); }
 
 signals:
@@ -173,6 +178,7 @@ signals:
     void danmakuEnabledChanged();
     void maxItemsChanged();
     void activeCountChanged();
+    void outlineStyleChanged();
     void pausedChanged();
 
 protected:
@@ -222,6 +228,7 @@ private:
     void   measure(const QString &text, qreal fontScale, qreal &outW, qreal &outH) const;
     QImage renderImage(const QString &text, const QColor &color, qreal dpr, qreal fontScale) const;
     int    logicalFontSize() const { return qRound(m_baseFontSize * m_fontSizeScale); }
+    int    outlineExtent(int fontSize) const;  ///< 当前描边样式的外扩像素（随样式三档变化）
     qreal  calcLineHeight() const;          ///< 当前字号档下单条弹幕渲染高度（含描边行距）
     void   refreshLineHeight();             ///< 字号变化后重算缓存并通知 QML
     void   markFontDirty();                 ///< 字号/DPR 变化 → 重建全部纹理
@@ -232,6 +239,7 @@ private:
     QRect  atlasAlloc(int w, int h);
     void   atlasFree(const QRect &r);       ///< 归还区域（相邻区间合并）
     void   atlasReset();                    ///< 分配器整体作废（图集满/字号变化/窗口迁移）
+    void   purgePendingUploads(AtlasSubTexture *sub);  ///< 删除子纹理前摘除其残留上传条目（防悬垂指针）
     /// 渲染线程消费（commitTextureOperations 触发，材质准备阶段）：
     /// 创建宿主 QRhiTexture（首次）+ 部分上传烘焙位图并入渲染器的
     /// resourceUpdate 批 + 回填子纹理宿主快照
@@ -327,6 +335,7 @@ private:
     int   m_trackHeight = 32;
     bool  m_danmakuEnabled = true;
     int   m_maxItems = 80;
+    int   m_outlineStyle = 0;  ///< 0=描边 1=重墨 2=45°投影（B站网页端三档）
 
     static constexpr int kMaxSlots = 400;   ///< 同屏弹幕硬上限
     static constexpr int kMaxActivationsPerFrame = 6;  ///< 单帧纹理激活预算（防高峰尖刺帧）

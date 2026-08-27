@@ -184,6 +184,19 @@ void DanmakuCanvas::flushAtlasUploads(QRhi *rhi, QRhiResourceUpdateBatch *resour
     m_pendingUploads.clear();
 }
 
+void DanmakuCanvas::purgePendingUploads(AtlasSubTexture *sub)
+{
+    // 槽位复用要删除旧子纹理；若其上传仍在队列中（当帧批次被剔除未消费，
+    // 如整层透明度归零时 commitTextureOperations 未执行），渲染线程稍后
+    // 消费队列会对已释放内存调用 setHostTexture——堆损坏的典型表现就是
+    // 弹幕纹理内容随机错乱成其他弹幕的位图。删除前先摘除引用条目
+    QMutexLocker lock(&m_uploadMutex);
+    for (int i = m_pendingUploads.size() - 1; i >= 0; --i) {
+        if (m_pendingUploads[i].sub == sub)
+            m_pendingUploads.removeAt(i);
+    }
+}
+
 DanmakuCanvas::DanmakuCanvas(QQuickItem *parent)
     : QQuickItem(parent)
 {
@@ -798,6 +811,21 @@ void DanmakuCanvas::setMaxItems(int v)
     }
 }
 
+void DanmakuCanvas::setOutlineStyle(int v)
+{
+    // 非法值钳到 0（描边）；切换后全部纹理需按新样式重建
+    if (v < 0 || v > 2)
+        v = 0;
+    if (m_outlineStyle == v)
+        return;
+    m_outlineStyle = v;
+    emit outlineStyleChanged();
+    refreshLineHeight();  // 三档外扩量不同 → 轨道高度下限随之变化
+    markFontDirty();      // 已在屏弹幕也按新样式重渲染（走现成的纹理重建链）
+}
+
+
+
 void DanmakuCanvas::markFontDirty()
 {
     m_fontDirty = true;   // 在 updatePaintNode 内重建全部纹理
@@ -871,6 +899,18 @@ QSGNode *DanmakuCanvas::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData *)
         m_atlasResetPending = false;
         atlasResetThisFrame = true;
         atlasReset();
+        // 整图作废时必须同步置空池内全部旧子纹理的 subRect：
+        // 本帧重建循环边分配新区域边复用槽位（atlasFree 旧 subRect），
+        // 而新布局与旧布局同为紧凑打包、行坐标大量重合——若旧坐标
+        // 仍有效，会被误当作新布局的区域归还进空闲表 → 后续分配区域
+        // 重叠 → 两条弹幕共用图集区域、上传互相覆盖 = "变成其他字/
+        // 截断"（即 markFreed 注释所述失效模式，此前漏了重排这条路径）。
+        // 置空后：重建循环的 atlasFree 自动忽略、下帧延迟回收路径
+        // 同样安全；未被本帧重建的槽位零面积无采样
+        for (auto &s : m_pool) {
+            if (s.texNode && s.texNode->texture())
+                static_cast<AtlasSubTexture *>(s.texNode->texture())->markFreed();
+        }
         for (auto &it : m_live)
             it.textureReady = false;
         m_fontDirty = true;
@@ -972,9 +1012,10 @@ QSGNode *DanmakuCanvas::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData *)
             // 复用槽位：归还旧区域并替换子纹理（同步点内先 delete 后
             // setTexture，渲染线程此期间被 sync 屏障阻塞，无野指针窗口）
             if (s.texNode->texture()) {
-                atlasFree(static_cast<AtlasSubTexture *>(
-                              s.texNode->texture())->subRect());
-                delete s.texNode->texture();
+                auto *oldSub = static_cast<AtlasSubTexture *>(s.texNode->texture());
+                atlasFree(oldSub->subRect());
+                purgePendingUploads(oldSub);   // 摘除可能残留的上传条目，防悬垂
+                delete oldSub;
             }
             AtlasSubTexture *subTex = new AtlasSubTexture(this, sub, m_atlasSize);
             s.texNode->setTexture(subTex);
@@ -1105,19 +1146,36 @@ void DanmakuCanvas::loadExternalFonts()
 }
 
 // ---------------------------------------------------------------------------
+// 描边样式参数（对齐 B 站网页端三档）：
+//   0=描边   等宽黑边（半透明 217），粗细 fontSize/10
+//   1=重墨   加粗描边（不透明），粗细 fontSize/12（8 方向偏移叠加后
+//            边宽约为描边档的 1.5 倍，B 站同款的"稍厚+更黑"）
+//   2=投影   无描边，右下 45° 半透明影，偏移 fontSize/12
+// 三种样式的外扩量不同，measure/renderImage/calcLineHeight 共用此处参数
+// ---------------------------------------------------------------------------
+int DanmakuCanvas::outlineExtent(int fontSize) const
+{
+    switch (m_outlineStyle) {
+    case 1:  return qMax(1, fontSize / 12);   // 重墨：稍厚的边
+    case 2:  return qMax(1, fontSize / 12);   // 投影：右下偏移量
+    default: return qMax(1, fontSize / 10);   // 描边
+    }
+}
+
+// ---------------------------------------------------------------------------
 // 轨道行高：当前字号档下单条弹幕的实际渲染高度（QML 轨道高度下限的依据）
 // ---------------------------------------------------------------------------
 qreal DanmakuCanvas::calcLineHeight() const
 {
-    // 与 measure() 同参（dmScale=1）：ascent+descent+上下描边，再加 2px 行距
+    // 与 measure() 同参（dmScale=1）：ascent+descent+上下外扩，再加 2px 行距
     // 让相邻轨道肉眼可分。字体度量依赖已加载的弹幕字体链
     const int logicalSize = qMax(1, logicalFontSize());
     QFont font;
     font.setFamilies(fontFamilies());
     font.setPixelSize(logicalSize);
     const QFontMetrics fm(font);
-    const int outline = qMax(1, logicalSize / 10);
-    return fm.ascent() + fm.descent() + outline * 2 + 2;
+    const int extent = outlineExtent(logicalSize);
+    return fm.ascent() + fm.descent() + extent * 2 + 2;
 }
 
 void DanmakuCanvas::refreshLineHeight()
@@ -1141,9 +1199,13 @@ void DanmakuCanvas::measure(const QString &text, qreal fontScale, qreal &outW, q
     //font.setWeight(QFont::Black);
 
     const QFontMetrics fm(font);
-    const int outline = qMax(1, logicalSize / 10);
-    outW = fm.horizontalAdvance(text) + outline * 2;
-    outH = fm.ascent() + fm.descent() + outline * 2;
+    const int extent = outlineExtent(logicalSize);
+    // 必须与 renderImage() 的位图分配严格一致（对称 extent*2）：
+    // it.width/it.height 参与固定弹幕居中与垂直居中，两者不一致会导致
+    // 位置偏移；曾试过投影档不对称测量（左侧只留 1px），与渲染位图
+    // 尺寸脱节引发异常，已回退为全样式对称
+    outW = fm.horizontalAdvance(text) + extent * 2;
+    outH = fm.ascent() + fm.descent() + extent * 2;
 }
 
 QImage DanmakuCanvas::renderImage(const QString &text, const QColor &color, qreal dpr, qreal fontScale) const
@@ -1157,9 +1219,9 @@ QImage DanmakuCanvas::renderImage(const QString &text, const QColor &color, qrea
     //font.setWeight(QFont::Black);
 
     const QFontMetrics fm(font);
-    const int outline = qMax(1, physicalFontSize / 10);
-    const int imgWidth  = fm.horizontalAdvance(text) + outline * 2;
-    const int imgHeight = fm.ascent() + fm.descent() + outline * 2;
+    const int extent = outlineExtent(physicalFontSize);
+    const int imgWidth  = fm.horizontalAdvance(text) + extent * 2;
+    const int imgHeight = fm.ascent() + fm.descent() + extent * 2;
 
     // RGBA8888_Premultiplied：与 QRhiTexture::RGBA8 内存布局匹配，
     // 图集部分上传零转换（ARGB32 需逐像素重排）
@@ -1172,16 +1234,49 @@ QImage DanmakuCanvas::renderImage(const QString &text, const QColor &color, qrea
     p.setRenderHint(QPainter::Antialiasing, false);
     p.setFont(font);
 
-    // 4 方向描边（沿用原版参数）
-    const QColor outlineColor(0, 0, 0, 217);
-    p.setPen(outlineColor);
-    p.drawText(outline, outline + fm.ascent() - 1, text);
-    p.drawText(outline, outline + fm.ascent() + 1, text);
-    p.drawText(outline - 1, outline + fm.ascent(), text);
-    p.drawText(outline + 1, outline + fm.ascent(), text);
+    const int baseline = extent + fm.ascent();
+    switch (m_outlineStyle) {
+    case 1: {
+        // 重墨：环形描边——第 1 环（8 方向 1px）恒画，大字号（extent≥3）
+        // 补第 2 环。边宽小字号 ~1.5px、大字号 ~2.5px，纯黑不透明，
+        // 对比描边档是"稍厚 + 更黑"（B 站同款观感，不夸张）
+        p.setPen(QColor(0, 0, 0, 255));
+        const int rings = extent >= 3 ? 2 : 1;
+        for (int r = 1; r <= rings; ++r) {
+            for (int dx = -r; dx <= r; ++dx) {
+                for (int dy = -r; dy <= r; ++dy) {
+                    if ((dx == 0 && dy == 0) || qMax(qAbs(dx), qAbs(dy)) != r)
+                        continue;   // 只画第 r 环（边框环），内环跳过
+                    p.drawText(extent + dx, baseline + dy, text);
+                }
+            }
+        }
+        p.setPen(color);
+        p.drawText(extent, baseline, text);
+        break;
+    }
+    case 2: {
+        // 45° 投影：本体 + 右下偏移半透明影（B 站网页端同款，无真模糊）
+        p.setPen(QColor(0, 0, 0, 160));
+        p.drawText(extent + extent, baseline + extent, text);
+        p.setPen(color);
+        p.drawText(extent, baseline, text);
+        break;
+    }
+    default: {
+        // 描边：4 方向偏移（沿用原版参数）
+        const QColor outlineColor(0, 0, 0, 217);
+        p.setPen(outlineColor);
+        p.drawText(extent, baseline - 1, text);
+        p.drawText(extent, baseline + 1, text);
+        p.drawText(extent - 1, baseline, text);
+        p.drawText(extent + 1, baseline, text);
 
-    p.setPen(color);
-    p.drawText(outline, outline + fm.ascent(), text);
+        p.setPen(color);
+        p.drawText(extent, baseline, text);
+        break;
+    }
+    }
     p.end();
 
     return image;

@@ -29,6 +29,7 @@ Item {
     property int trackHeight: 32
     property int scrollDuration: 8000
     property int maxItems: 80
+    property int outlineStyle: 0   // 描边样式：0=描边 1=重墨 2=45°投影（B站三档）
 
     property var _tracks: []
     property var _topTracks: []
@@ -54,6 +55,7 @@ Item {
         trackHeight: root.effTrackHeight   // 居中基准与轨道分配共用同一高度
         danmakuEnabled: root.danmakuEnabled
         maxItems: root.maxItems
+        outlineStyle: root.outlineStyle   // 描边样式（C++ 侧切换时重建全部纹理）
         speedScale: root.speedScale   // 调速由 C++ 进度保持式完成
     }
 
