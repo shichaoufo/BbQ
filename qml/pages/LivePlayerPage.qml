@@ -1,4 +1,4 @@
-import QtQuick 2.15
+﻿import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
 import QtQuick.Window 2.15
@@ -766,6 +766,11 @@ Rectangle {
                     if (anchor.base_info.face) root.face = anchor.base_info.face
                     if (anchor.base_info.mid) root.mid = String(anchor.base_info.mid)
                 }
+                // getInfoByRoom 的 anchor_info.base_info 不含 mid 字段，
+                // 主播 uid 在 room_info.uid，取不到时回退
+                if (root.mid === "" && info.uid) {
+                    root.mid = String(info.uid)
+                }
                 
                 if (root.mid !== "") {
                     InteractionManager.getUserRelation(root.mid)
@@ -1254,17 +1259,25 @@ Rectangle {
     }
 
     // 顶部渐变阴影 + 直播标题
+    // 阴影高度独立于文字区：文字区之下再延伸 40px，渐变消失点下移，
+    // 保证标题/主播名/观看人数下有足够的深色背景衬托
     Rectangle {
         id: topBar
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.top: parent.top
-        height: titleColumn.height + Theme.spacingMedium * 2
+        height: titleColumn.height + Theme.spacingMedium * 2 + 40
         gradient: Gradient {
             GradientStop { position: 0.0; color: "#CC000000" }
+            GradientStop { position: 0.45; color: "#CC000000" }
             GradientStop { position: 1.0; color: "transparent" }
         }
         opacity: root.controlsVisible ? 1 : 0
+        // 不能直接绑 controlsVisible：enabled 瞬间翻false会立刻抽掉按钮的
+        // 阴影/描边（FluControlBackground 依赖 enabled），在淡出动画中途
+        // 突变产生残影。改为跟随 opacity：淡出全程保持 enabled（阴影随
+        // 整体平滑淡出），完全透明后才禁用整棵子树，拦截幽灵点击
+        enabled: opacity > 0
         Behavior on opacity {
             NumberAnimation {
                 duration: Theme.animationFast
@@ -1294,39 +1307,50 @@ Rectangle {
             }
         }
 
-        FluButton {
-            id: followBtn
-            anchors.right: parent.right
-            anchors.top: parent.top
-            anchors.rightMargin: Theme.spacingMedium
-            anchors.topMargin: Theme.spacingMedium
-            text: root.isFollowing ? "已关注" : "+ 关注"
-            font: FluTextStyle.Caption
-            background: Rectangle {
-                color: root.isFollowing ? "transparent" : "#FF4D4F"
-                radius: 4
-                border.color: root.isFollowing ? "#FFFFFF" : "transparent"
-                border.width: 1
-            }
-            contentItem: FluText {
-                text: followBtn.text
-                font: followBtn.font
-                color: root.isFollowing ? "#FFFFFF" : "#FFFFFF"
-            }
-            onClicked: {
-                closePopups()
-                if (root.mid !== "") {
-                    InteractionManager.followUser(root.mid, root.isFollowing ? 2 : 1)
-                }
-            }
-            visible: root.mid !== ""
-        }
-
+        // 必须声明在按钮之前（z 序垫底）：hoverEnabled 的 MouseArea 会
+        // 独占悬停事件，盖在按钮上方会吞掉按钮的 hovered 导致悬停动效失效
         MouseArea {
             anchors.fill: parent
             hoverEnabled: true
             acceptedButtons: Qt.NoButton
             onPositionChanged: { if (root.controlsVisible) hideControlsTimer.restart() }
+        }
+
+        // 未关注：FluFilledButton（主题色实底，醒目）；已关注：FluButton
+        //（普通灰底，低调）。两种状态视觉差异明显
+        Loader {
+            anchors.right: parent.right
+            anchors.top: parent.top
+            anchors.rightMargin: Theme.spacingMedium
+            anchors.topMargin: Theme.spacingMedium
+            sourceComponent: root.isFollowing ? followPlainBtn : followFilledBtn
+            active: root.mid !== ""
+        }
+        Component {
+            id: followFilledBtn
+            FluFilledButton {
+                text: "+ 关注"
+                font: FluTextStyle.Caption
+                onClicked: {
+                    closePopups()
+                    if (root.mid !== "") {
+                        InteractionManager.followUser(root.mid, 1)
+                    }
+                }
+            }
+        }
+        Component {
+            id: followPlainBtn
+            FluButton {
+                text: "已关注"
+                font: FluTextStyle.Caption
+                onClicked: {
+                    closePopups()
+                    if (root.mid !== "") {
+                        InteractionManager.followUser(root.mid, 2)
+                    }
+                }
+            }
         }
     }
 
@@ -1334,6 +1358,7 @@ Rectangle {
     // radius 使底部两角为圆角（与视频播放页控制栏一致）；顶部两角处于
     // 渐变透明区（顶部不透明度仅 0~12%），圆角裁切不可见，视觉上等效
     // "仅底部圆角"
+    // 渐变：后 45% 保持 80% 黑，让按钮深色衬底更早开始、覆盖整行控件
     Rectangle {
         id: controlBar
         anchors.left: parent.left
@@ -1343,9 +1368,13 @@ Rectangle {
         radius: 6
         gradient: Gradient {
             GradientStop { position: 0.0; color: "transparent" }
+            GradientStop { position: 0.55; color: "#CC000000" }
             GradientStop { position: 1.0; color: "#CC000000" }
         }
         opacity: root.controlsVisible ? 1 : 0
+        // 同 topBar：跟随 opacity 而非 controlsVisible，避免 enabled 瞬间
+        // 翻 false 抽掉按钮阴影/描边产生残影；完全透明后才禁用（拦截幽灵点击）
+        enabled: opacity > 0
         Behavior on opacity {
             NumberAnimation {
                 duration: Theme.animationFast
@@ -1357,6 +1386,15 @@ Rectangle {
         // MouseArea 抢事件）：悬停期间不触发自动隐藏
         HoverHandler { id: controlBarHover }
 
+        // 必须声明在按钮之前（z 序垫底）：hoverEnabled 的 MouseArea 会
+        // 独占悬停事件，盖在按钮上方会吞掉按钮的 hovered 导致悬停动效失效
+        MouseArea {
+            anchors.fill: parent
+            hoverEnabled: true
+            acceptedButtons: Qt.NoButton
+            onPositionChanged: root.playerMouseActivity()
+        }
+
         RowLayout {
             anchors.fill: parent
             anchors.leftMargin: Theme.spacingMedium
@@ -1367,6 +1405,8 @@ Rectangle {
                 iconSource: FluentIcons.Sync
                 iconSize: Theme.iconSizeMedium
                 iconColor: "white"
+                hoverColor: "#26FFFFFF"   // 15% 白：黑底上可见但不刺眼
+                pressedColor: "#40FFFFFF"
                 Layout.alignment: Qt.AlignVCenter
                 onClicked: {
                     closePopups()
@@ -1386,6 +1426,8 @@ Rectangle {
                 }
                 iconSize: Theme.iconSizeMedium
                 iconColor: "white"
+                hoverColor: "#26FFFFFF"
+                pressedColor: "#40FFFFFF"
                 Layout.alignment: Qt.AlignVCenter
                 onClicked: {
                     var wasOpen = volumePopup.opened
@@ -1399,6 +1441,8 @@ Rectangle {
                 iconSource: FluentIcons.Subtitles
                 iconSize: Theme.iconSizeMedium
                 iconColor: "white"
+                hoverColor: "#26FFFFFF"
+                pressedColor: "#40FFFFFF"
                 Layout.alignment: Qt.AlignVCenter
                 onClicked: {
                     var wasOpen = danmakuPopup.opened
@@ -1411,7 +1455,18 @@ Rectangle {
             FluMenuBar {
                 Layout.alignment: Qt.AlignVCenter
                 delegate: FluMenuBarItem {
+                    id: mbItem
                     textColor: "white"
+                    // 覆写背景：原版悬停色 FluTheme.itemHoverColor（6% 白）在黑色
+                    // 控制栏上不可见，改为与 FluIconButton 一致的 15%/25% 白。
+                    // 注意：原组件内部的 control id 外部不可见，须用自身 id 引用
+                    background: Rectangle {
+                        implicitWidth: 30
+                        implicitHeight: 30
+                        radius: 3
+                        color: mbItem.pressed ? "#40FFFFFF"
+                                              : (mbItem.highlighted ? "#26FFFFFF" : "transparent")
+                    }
                 }
                 FluMenu {
                     id: qualityMenu
@@ -1444,6 +1499,8 @@ Rectangle {
                 iconSource: FluentIcons.Info
                 iconSize: Theme.iconSizeMedium
                 iconColor: "white"
+                hoverColor: "#26FFFFFF"
+                pressedColor: "#40FFFFFF"
                 Layout.alignment: Qt.AlignVCenter
                 onClicked: {
                     closePopups()
@@ -1471,6 +1528,8 @@ Rectangle {
                 iconSource: root.isMiniWindow ? FluentIcons.ClosePane : FluentIcons.OpenInNewWindow
                 iconSize: Theme.iconSizeMedium
                 iconColor: "white"
+                hoverColor: "#26FFFFFF"
+                pressedColor: "#40FFFFFF"
                 Layout.alignment: Qt.AlignVCenter
                 onClicked: {
                     closePopups()
@@ -1483,20 +1542,14 @@ Rectangle {
                 iconSource: FluentIcons.BackToWindow
                 iconSize: Theme.iconSizeMedium
                 iconColor: "white"
+                hoverColor: "#26FFFFFF"
+                pressedColor: "#40FFFFFF"
                 Layout.alignment: Qt.AlignVCenter
                 onClicked: {
                     closePopups()
                     root.closeRequested()
                 }
             }
-        }
-
-        // 鼠标悬停在控制栏上时保持显示
-        MouseArea {
-            anchors.fill: parent
-            hoverEnabled: true
-            acceptedButtons: Qt.NoButton
-            onPositionChanged: root.playerMouseActivity()
         }
     }
 

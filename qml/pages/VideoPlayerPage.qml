@@ -3316,7 +3316,20 @@ Rectangle {
                         anchors.top: parent.top
                         anchors.topMargin: 2
                         enabled: pageRoot.controlsVisible
-                        delegate: FluMenuBarItem { textColor: "#FFFFFF" }
+                        delegate: FluMenuBarItem {
+    id: mbItem
+    textColor: "#FFFFFF"
+    // 覆写背景：原版悬停色 FluTheme.itemHoverColor（6% 白）在黑色
+    // 控制栏上不可见，改为与 FluIconButton 一致的 15%/25% 白。
+    // 注意：原组件内部的 control id 外部不可见，须用自身 id 引用
+    background: Rectangle {
+        implicitWidth: 30
+        implicitHeight: 30
+        radius: 3
+        color: mbItem.pressed ? "#40FFFFFF"
+                              : (mbItem.highlighted ? "#26FFFFFF" : "transparent")
+    }
+}
                         FluMenu {
                             id: chapterMenu
                             // 标题超长截断：上限 = 播放器宽 - 边距/预留，靠 elide 无法
@@ -3358,8 +3371,8 @@ Rectangle {
                     visible: pageRoot.controlsVisible
                     gradient: Gradient {
                         GradientStop { position: 0.0; color: "transparent" }
-                        GradientStop { position: 0.55; color: "transparent" }
-                        GradientStop { position: 0.85; color: "#80000000" }
+                        GradientStop { position: 0.4; color: "transparent" }
+                        GradientStop { position: 0.75; color: "#80000000" }
                         GradientStop { position: 1.0; color: "#CC000000" }
                     }
 
@@ -3548,6 +3561,8 @@ Rectangle {
                                 iconSource: pageRoot.isPlaying ? FluentIcons.Pause : FluentIcons.Play
                                 iconSize: 18
                                 iconColor: "#FFFFFF"
+                                hoverColor: "#26FFFFFF"   // 15% 白：黑底上可见但不刺眼
+                                pressedColor: "#40FFFFFF"
                                 onClicked: {
                                     closePopups()
                                     if (mpvPlayer.playing) {
@@ -3586,6 +3601,8 @@ Rectangle {
                                     iconSource: pageRoot.isFullScreen ? FluentIcons.BackToWindow : FluentIcons.FullScreen
                                     iconSize: 16
                                     iconColor: "#FFFFFF"
+                                    hoverColor: "#26FFFFFF"
+                                    pressedColor: "#40FFFFFF"
                                     onClicked: {
                                         closePopups()
                                         pageRoot.isFullScreen = !pageRoot.isFullScreen
@@ -3598,6 +3615,8 @@ Rectangle {
                                     iconSource: pageRoot.isMiniWindow ? FluentIcons.ClosePane : FluentIcons.OpenInNewWindow
                                     iconSize: 16
                                     iconColor: "#FFFFFF"
+                                    hoverColor: "#26FFFFFF"
+                                    pressedColor: "#40FFFFFF"
                                     onClicked: {
                                         closePopups()
                                         if (pageRoot.isMiniWindow) pageRoot.exitMiniWindow()
@@ -3610,6 +3629,8 @@ Rectangle {
                                     iconSource: FluentIcons.Info
                                     iconSize: 16
                                     iconColor: "#FFFFFF"
+                                    hoverColor: "#26FFFFFF"
+                                    pressedColor: "#40FFFFFF"
                                     onClicked: {
                                         closePopups()
                                         if (mpvPlayer.hasVideo) {
@@ -3624,6 +3645,8 @@ Rectangle {
                                     iconSource: FluentIcons.Subtitles
                                     iconSize: 16
                                     iconColor: "#FFFFFF"
+                                    hoverColor: "#26FFFFFF"
+                                    pressedColor: "#40FFFFFF"
                                     onClicked: {
                                         var wasOpen = danmakuPopup.opened
                                         closePopups()
@@ -3641,6 +3664,8 @@ Rectangle {
                                     }
                                     iconSize: 16
                                     iconColor: "#FFFFFF"
+                                    hoverColor: "#26FFFFFF"
+                                    pressedColor: "#40FFFFFF"
                                     onClicked: {
                                         var wasOpen = volumePopup.opened
                                         closePopups()
@@ -3650,7 +3675,20 @@ Rectangle {
 
                                 FluMenuBar {
                                     Layout.alignment: Qt.AlignVCenter
-                                    delegate: FluMenuBarItem { textColor: "#FFFFFF" }
+                                    delegate: FluMenuBarItem {
+    id: mbItem
+    textColor: "#FFFFFF"
+    // 覆写背景：原版悬停色 FluTheme.itemHoverColor（6% 白）在黑色
+    // 控制栏上不可见，改为与 FluIconButton 一致的 15%/25% 白。
+    // 注意：原组件内部的 control id 外部不可见，须用自身 id 引用
+    background: Rectangle {
+        implicitWidth: 30
+        implicitHeight: 30
+        radius: 3
+        color: mbItem.pressed ? "#40FFFFFF"
+                              : (mbItem.highlighted ? "#26FFFFFF" : "transparent")
+    }
+}
                                     FluMenu {
                                         id: speedMenu
                                         title: pageRoot.currentSpeed
@@ -3665,7 +3703,20 @@ Rectangle {
 
                                 FluMenuBar {
                                     Layout.alignment: Qt.AlignVCenter
-                                    delegate: FluMenuBarItem { textColor: "#FFFFFF" }
+                                    delegate: FluMenuBarItem {
+    id: mbItem
+    textColor: "#FFFFFF"
+    // 覆写背景：原版悬停色 FluTheme.itemHoverColor（6% 白）在黑色
+    // 控制栏上不可见，改为与 FluIconButton 一致的 15%/25% 白。
+    // 注意：原组件内部的 control id 外部不可见，须用自身 id 引用
+    background: Rectangle {
+        implicitWidth: 30
+        implicitHeight: 30
+        radius: 3
+        color: mbItem.pressed ? "#40FFFFFF"
+                              : (mbItem.highlighted ? "#26FFFFFF" : "transparent")
+    }
+}
                                     FluMenu {
                                         id: codecMenu
                                         title: pageRoot.currentCodecName
@@ -3706,7 +3757,20 @@ Rectangle {
 
                                 FluMenuBar {
                                     Layout.alignment: Qt.AlignVCenter
-                                    delegate: FluMenuBarItem { textColor: "#FFFFFF" }
+                                    delegate: FluMenuBarItem {
+    id: mbItem
+    textColor: "#FFFFFF"
+    // 覆写背景：原版悬停色 FluTheme.itemHoverColor（6% 白）在黑色
+    // 控制栏上不可见，改为与 FluIconButton 一致的 15%/25% 白。
+    // 注意：原组件内部的 control id 外部不可见，须用自身 id 引用
+    background: Rectangle {
+        implicitWidth: 30
+        implicitHeight: 30
+        radius: 3
+        color: mbItem.pressed ? "#40FFFFFF"
+                              : (mbItem.highlighted ? "#26FFFFFF" : "transparent")
+    }
+}
                                     FluMenu {
                                         id: qualityMenu
                                         title: pageRoot.currentQuality || "清晰度"
@@ -4200,15 +4264,38 @@ Rectangle {
                             }
                         }
 
-                        FluButton {
-                            text: pageRoot.isFollowing ? "已关注" : "+ 关注"
+                        // 未关注：FluFilledButton（主题色实底，醒目）；已关注：
+                        // FluButton（普通灰底，低调）。与直播播放页关注按钮一致
+                        Loader {
                             Layout.preferredWidth: 70
                             Layout.preferredHeight: 30
-                            onClicked: {
-                                if (pageRoot.mid === "") return
-                                if (!pageRoot.requireLogin()) return
-                                InteractionManager.followUser(pageRoot.mid, pageRoot.isFollowing ? 2 : 1)
-                                pageRoot.isFollowing = !pageRoot.isFollowing
+                            sourceComponent: pageRoot.isFollowing ? followPlainBtn : followFilledBtn
+
+                            Component {
+                                id: followFilledBtn
+                                FluFilledButton {
+                                    text: "+ 关注"
+                                    anchors.fill: parent
+                                    onClicked: {
+                                        if (pageRoot.mid === "") return
+                                        if (!pageRoot.requireLogin()) return
+                                        InteractionManager.followUser(pageRoot.mid, 1)
+                                        pageRoot.isFollowing = true
+                                    }
+                                }
+                            }
+                            Component {
+                                id: followPlainBtn
+                                FluButton {
+                                    text: "已关注"
+                                    anchors.fill: parent
+                                    onClicked: {
+                                        if (pageRoot.mid === "") return
+                                        if (!pageRoot.requireLogin()) return
+                                        InteractionManager.followUser(pageRoot.mid, 2)
+                                        pageRoot.isFollowing = false
+                                    }
+                                }
                             }
                         }
 
