@@ -38,6 +38,7 @@ Rectangle {
     property real danmakuOpacity: 1.0
     property int danmakuRangeIndex: 3 // 0=1/4屏, 1=半屏, 2=3/4屏, 3=全屏
     property int danmakuSpeedIndex: 1 // 0=慢, 1=中, 2=快
+    property int danmakuOutlineStyle: 0 // 描边样式：0=描边 1=重墨 2=45°投影（与视频页共用三档）
 
     // 弹幕速度倍率映射：0=慢(0.7x), 1=中(1.0x), 2=快(1.4x)
     function _danmakuSpeedScale(idx) { return [0.7, 1.0, 1.4][idx] || 1.0 }
@@ -501,6 +502,7 @@ Rectangle {
         root.danmakuOpacity = Settings.getReal("live/danmaku/opacity", 1.0)
         root.danmakuRangeIndex = Settings.getInt("live/danmaku/rangeIndex", 3)
         root.danmakuSpeedIndex = Settings.getInt("live/danmaku/speedIndex", 1)
+        root.danmakuOutlineStyle = Settings.getInt("live/danmaku/outlineStyle", 0)
     }
 
     function savePlayerSettings() {
@@ -512,6 +514,7 @@ Rectangle {
         Settings.setReal("live/danmaku/opacity", root.danmakuOpacity)
         Settings.setInt("live/danmaku/rangeIndex", root.danmakuRangeIndex)
         Settings.setInt("live/danmaku/speedIndex", root.danmakuSpeedIndex)
+        Settings.setInt("live/danmaku/outlineStyle", root.danmakuOutlineStyle)
     }
 
     // 供外部在卸载前主动停止播放，避免延迟销毁期间仍有声音输出
@@ -1054,6 +1057,7 @@ Rectangle {
         danmakuEnabled: root.danmakuEnabled
         opacityValue: root.danmakuOpacity
         fontSizeScale: root.danmakuSize
+        outlineStyle: root.danmakuOutlineStyle
         speedScale: root._danmakuSpeedScale(root.danmakuSpeedIndex)
         // 显示范围：弹幕从顶部开始向下排列，范围越小底部空出越多
         // 0=1/4屏, 1=半屏, 2=3/4屏, 3=全屏
@@ -1663,7 +1667,9 @@ Rectangle {
                     model: optionValues.map(
                         function(v) { return v === 0 ? "不限制" : v + " fps" })
                     function syncIndex() {
-                        var saved = Settings.getInt("video/danmaku/fpsLimit", 60)
+                        // live 命名空间（与页面内其他弹幕设置一致）；曾误用
+                        // video/danmaku/fpsLimit 导致与视频页互相覆盖
+                        var saved = Settings.getInt("live/danmaku/fpsLimit", 60)
                         var idx = optionValues.indexOf(saved)
                         if (idx < 0)
                             idx = optionValues.indexOf(60)
@@ -1673,7 +1679,30 @@ Rectangle {
                     onOptionValuesChanged: syncIndex()
                     onActivated: function(index) {
                         FramePacer.setTargetRate(optionValues[index])
-                        Settings.setInt("video/danmaku/fpsLimit", optionValues[index])
+                        Settings.setInt("live/danmaku/fpsLimit", optionValues[index])
+                    }
+                }
+            }
+
+            // 弹幕描边样式（对齐 B 站三档，与视频页同款）
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 8
+
+                FluText {
+                    text: "描边样式"
+                    font: FluTextStyle.Body
+                    color: "#FFFFFF"
+                }
+
+                Item { Layout.fillWidth: true }
+
+                FluComboBox {
+                    model: ["描边", "重墨", "45°投影"]
+                    currentIndex: root.danmakuOutlineStyle
+                    onActivated: function(index) {
+                        root.danmakuOutlineStyle = index
+                        savePlayerSettings()
                     }
                 }
             }
