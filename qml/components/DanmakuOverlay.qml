@@ -82,30 +82,52 @@ Item {
 
     // 轨道分配与速度计算保持原逻辑不变（仅在发射时执行一次，非每帧热点）
     // dmFontSize：可选，B站弹幕字号字段（25=普通 18=小字），以 25 为基准换算缩放
-    function addDanmaku(text, color, type, dmFontSize) {
+    // emoticonUrl/emoticonSize：可选，直播纯表情弹幕（text 可为空；size 1=小 2=大）
+    // emoticons：可选，文本+表情混排（元素 {text,url,size}，text 为文本内占位符）
+    function addDanmaku(text, color, type, dmFontSize, emoticonUrl, emoticonSize, emoticons) {
         if (!danmakuEnabled) return
-        if (text === undefined || text === null || text === "") return
+        var emoList = (emoticons !== undefined && emoticons !== null) ? emoticons : []
+        var hasEmo = (emoticonUrl !== undefined && emoticonUrl !== null && emoticonUrl !== "")
+                     || emoList.length > 0
+        if ((text === undefined || text === null || text === "") && !hasEmo) return
         if (width <= 0 || height <= 0) return
 
         var dType = type || 1
         var colorStr = color || "#ffffff"
         var now = _canvas.currentMs()   // 与弹幕位置共用 C++ 单调时钟
+        var emoSize = (emoticonSize === 2) ? 2 : 1
 
         // 单条字号缩放：未传/非法值时为 1.0；限制在合理范围防止异常数据撑爆纹理
         var dmScale = (dmFontSize > 0) ? Math.max(0.5, Math.min(2.0, dmFontSize / 25.0)) : 1.0
 
         var fontSize = baseFontSize * fontSizeScale * dmScale
         var charWidth = fontSize * 0.85
-        var textWidth = text.length * charWidth + 30
+        // 宽度粗估（轨道占用时长用）：纯表情按平均纵横比 1.2 估算；
+        // 混排 = 文本宽 + 各表情宽（各自按尺寸系数估高、纵横比 1.2 估宽）
+        var emoWidth = 0
+        var emoFactor = 1.0
+        if (emoticonUrl !== undefined && emoticonUrl !== null && emoticonUrl !== "") {
+            var f0 = (emoSize === 2) ? 1.8 : 1.15
+            emoFactor = Math.max(emoFactor, f0)
+            emoWidth += 1.2 * _canvas.lineHeight * dmScale * f0
+        }
+        for (var e = 0; e < emoList.length; e++) {
+            var fe = (emoList[e].size === 2) ? 1.8 : 1.15
+            emoFactor = Math.max(emoFactor, fe)
+            emoWidth += 1.2 * _canvas.lineHeight * dmScale * fe
+        }
+        var textWidth = text.length * charWidth + emoWidth + 30
 
         var baseDistance = width + 200
         var pixelSpeed = baseDistance / (scrollDuration / speedScale)
         var duration = (width + textWidth) / pixelSpeed
         var occupyTime = (width + textWidth) / pixelSpeed + 200
 
-        // 大字号弹幕（B站 2.0x）渲染高度超过一条轨道时按实际高度跨轨道占用，
+        // 大字号弹幕/大表情渲染高度超过一条轨道时按实际高度跨轨道占用，
         // 占据的每条轨道都刷新占用时刻，相邻轨道弹幕不会与之重叠
-        var span = Math.max(1, Math.ceil((_canvas.lineHeight * dmScale) / effTrackHeight))
+        // （表情高度系数须与 C++ emoticonLogicalSize 保持一致）
+        var contentH = _canvas.lineHeight * dmScale * emoFactor
+        var span = Math.max(1, Math.ceil(contentH / effTrackHeight))
         var vBase = span * effTrackHeight   // 跨轨道区域总高（C++ 垂直居中基准）
 
         var trackIdx = -1
@@ -137,7 +159,9 @@ Item {
             if (trackIdx < 0) return
             for (var s = 0; s < span; s++) _tracks[trackIdx + s] = now + occupyTime
             yPos = Math.round(height * areaOffsetRatio) + trackIdx * effTrackHeight + 4
-            _canvas.appendScroll(text, colorStr, yPos, pixelSpeed, now, dmScale, vBase)
+            _canvas.appendScroll(text, colorStr, yPos, pixelSpeed, now, dmScale, vBase,
+                                 (emoticonUrl !== undefined && emoticonUrl !== null) ? emoticonUrl : "",
+                                 emoSize, emoList)
         }
     }
 

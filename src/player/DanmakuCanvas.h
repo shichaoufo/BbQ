@@ -11,6 +11,7 @@
 #include <QElapsedTimer>
 #include <QPointer>
 #include <QStringList>
+#include <QVariantList>
 #include <atomic>
 #include <QSGTexture>
 #include <QMutex>
@@ -22,6 +23,8 @@ class QQuickWindow;
 class QRhi;
 class QRhiTexture;
 class QRhiResourceUpdateBatch;
+class QPainter;
+class QFontMetrics;
 
 /**
  * @brief 图集子区域纹理：全部弹幕位图共存于一张大 QRhiTexture（图集），
@@ -122,9 +125,19 @@ public:
     /// fontScale：单条弹幕字号缩放（B站 XML fontSize 字段换算，25 号字 = 1.0）
     /// vCenterBase：垂直居中基准高度（跨轨道占用时为 span 条轨道总高，
     ///              0 = 使用 trackHeight 属性，单轨道弹幕的默认）
+    /// emoticonUrl：直播纯表情弹幕图（空 = 普通文本/混排弹幕；text 可为空）。
+    ///              图未就绪时弹幕延迟激活（等 EmoticonCache::ready），
+    ///              下载失败/超时 8s 丢弃
+    /// emoticonSize：1=小表情（约 1.15 倍行高） 2=大表情（约 1.8 倍行高）
+    /// emoticons：文本+表情混排（如 "1[哇]"），元素为 map{text,url,size}，
+    ///            text 是文本内的占位符（会被图片替换）。任一图未就绪时
+    ///            整条延迟激活；失败/超时的表情降级为普通文本占位符
     Q_INVOKABLE void appendScroll(const QString &text, const QString &color,
                                   qreal yPos, qreal pixelSpeed, qint64 nowMs,
-                                  qreal fontScale = 1.0, qreal vCenterBase = 0.0);
+                                  qreal fontScale = 1.0, qreal vCenterBase = 0.0,
+                                  const QString &emoticonUrl = QString(),
+                                  int emoticonSize = 1,
+                                  const QVariantList &emoticons = QVariantList());
     /// 顶部/底部固定弹幕：durationMs 后消失，水平居中（vCenterBase 同上）
     Q_INVOKABLE void appendFixed(const QString &text, const QString &color,
                                  qreal yPos, qint64 durationMs, qint64 nowMs,
@@ -189,6 +202,13 @@ private:
     friend class AtlasSubTexture;   // commitTextureOperations → flushAtlasUploads
 
     /// 在屏弹幕（GUI 线程侧状态；QSG 节点只准在 updatePaintNode 内碰）
+    /// 行内表情（文本+表情混排，如 "1[哇]"）：key 为文本占位符
+    struct InlineEmo {
+        QString key;      ///< 文本内的占位符（如 "[哇]"），渲染时被图片替换
+        QString url;      ///< 表情图 URL（EmoticonCache 键）
+        int     size = 1; ///< 1=小表情（1.15 倍行高） 2=大表情（1.8 倍行高）
+        bool    failed = false;   ///< 下载失败/超时 → 占位符按普通文本渲染（降级）
+    };
     struct LiveItem {
         QString text;
         QColor  color;
@@ -205,6 +225,9 @@ private:
         qreal   height = 0;      ///< 逻辑像素高（实测）
         qreal   fontScale = 1.0; ///< 单条字号缩放（B站 fontSize 字段）
         qreal   vCenterBase = 0; ///< 垂直居中基准高度（跨轨道 span 总高；0=用 trackHeight）
+        QString emoticonUrl;     ///< 直播纯表情弹幕图 URL（空 = 文本/混排弹幕）
+        int     emoticonSize = 1;///< 1=小表情 2=大表情（决定行内渲染高度）
+        QVector<InlineEmo> inlineEmos;   ///< 文本+表情混排（空 = 非混排）
         int     slot = -1;       ///< 节点池槽位
         bool    textureReady = false;
     };
@@ -227,6 +250,20 @@ private:
     static QStringList fontFamilies();      ///< 弹幕字体回退链（外接字体优先，雅黑/黑体兜底）
     void   measure(const QString &text, qreal fontScale, qreal &outW, qreal &outH) const;
     QImage renderImage(const QString &text, const QColor &color, qreal dpr, qreal fontScale) const;
+    /// 按当前描边样式在 (x, baseline) 绘制一段文本（renderImage/renderMixed 共用）
+    void   drawStyledText(QPainter &p, const QString &text, qreal x, qreal baseline,
+                          const QFont &font, const QFontMetrics &fm,
+                          const QColor &color, int extent) const;
+    /// 文本+表情混排：把文本按占位符切分为 文本段/表情段 序列
+    struct MixedRun { bool isEmo = false; QString text; int emoIdx = -1; };
+    QVector<MixedRun> splitMixedRuns(const QString &text, const QVector<InlineEmo> &emos) const;
+    void   measureMixed(const QString &text, const QVector<InlineEmo> &emos,
+                        qreal fontScale, qreal &outW, qreal &outH) const;
+    QImage renderMixed(const QString &text, const QVector<InlineEmo> &emos,
+                       const QColor &color, qreal dpr, qreal fontScale) const;
+    /// 表情弹幕逻辑尺寸（图未就绪时按方形估算，宽上限 4 倍高防超宽图集）
+    QSizeF emoticonLogicalSize(const QImage &src, qreal fontScale, int emoticonSize) const;
+    QImage renderEmoticonImage(const QImage &src, qreal dpr, qreal fontScale, int emoticonSize) const;
     int    logicalFontSize() const { return qRound(m_baseFontSize * m_fontSizeScale); }
     int    outlineExtent(int fontSize) const;  ///< 当前描边样式的外扩像素（随样式三档变化）
     qreal  calcLineHeight() const;          ///< 当前字号档下单条弹幕渲染高度（含描边行距）

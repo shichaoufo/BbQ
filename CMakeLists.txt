@@ -101,6 +101,7 @@ set(PROJECT_SOURCES
     src/danmaku/DanmakuSettings.cpp
     src/danmaku/LiveDanmakuManager.cpp
     src/danmaku/VideoDanmakuManager.cpp
+    src/danmaku/EmoticonCache.cpp
     src/player/DanmakuCanvas.cpp
     src/player/FramePacer.cpp
     res/res.qrc
@@ -136,6 +137,7 @@ set(PROJECT_HEADERS
     src/danmaku/DanmakuSettings.h
     src/danmaku/LiveDanmakuManager.h
     src/danmaku/VideoDanmakuManager.h
+    src/danmaku/EmoticonCache.h
     src/player/DanmakuCanvas.h
     src/player/FramePacer.h
 )

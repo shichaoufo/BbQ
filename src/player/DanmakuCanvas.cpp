@@ -1,5 +1,6 @@
 #include "DanmakuCanvas.h"
 #include "FramePacer.h"
+#include "EmoticonCache.h"
 
 #include <QCoreApplication>
 #include <QQuickWindow>
@@ -213,6 +214,10 @@ DanmakuCanvas::DanmakuCanvas(QQuickItem *parent)
     m_clock.start();
     m_swapClock.start();   // 呈现时刻记录专用时钟：只 start 一次，此后跨线程只读
     m_lineHeight = calcLineHeight();
+
+    // 表情图就绪 → 重试延迟激活的表情弹幕（未就绪时激活分支跳过烘焙）
+    connect(EmoticonCache::instance(), &EmoticonCache::ready,
+            this, [this]() { update(); });
 }
 
 DanmakuCanvas::~DanmakuCanvas()
@@ -253,9 +258,24 @@ DanmakuCanvas::~DanmakuCanvas()
 // ---------------------------------------------------------------------------
 void DanmakuCanvas::appendScroll(const QString &text, const QString &color,
                                  qreal yPos, qreal pixelSpeed, qint64 nowMs,
-                                 qreal fontScale, qreal vCenterBase)
+                                 qreal fontScale, qreal vCenterBase,
+                                 const QString &emoticonUrl, int emoticonSize,
+                                 const QVariantList &emoticons)
 {
-    if (text.isEmpty() || !m_danmakuEnabled)
+    // 混排表情列表 → InlineEmo（占位符须实际出现在文本中才有效）
+    QVector<InlineEmo> inlineEmos;
+    for (const QVariant &v : emoticons) {
+        const QVariantMap m = v.toMap();
+        InlineEmo ie;
+        ie.key  = m.value(QStringLiteral("text")).toString();
+        ie.url  = m.value(QStringLiteral("url")).toString();
+        ie.size = m.value(QStringLiteral("size")).toInt() == 2 ? 2 : 1;
+        if (!ie.key.isEmpty() && !ie.url.isEmpty() && text.contains(ie.key))
+            inlineEmos.append(ie);
+    }
+
+    if ((text.isEmpty() && emoticonUrl.isEmpty() && inlineEmos.isEmpty())
+            || !m_danmakuEnabled)
         return;
     if (m_live.size() >= m_maxItems)
         evictOldest();
@@ -269,10 +289,24 @@ void DanmakuCanvas::appendScroll(const QString &text, const QString &color,
     it.yPos = yPos;
     it.pixelSpeed = pixelSpeed;
     it.vCenterBase = vCenterBase;
+    it.emoticonUrl = emoticonUrl;
+    it.emoticonSize = emoticonSize;
+    it.inlineEmos = inlineEmos;
     // 反算 speedScale=1 的基准速度，供后续调速做进度保持
     it.baseSpeed = m_speedScale > 0 ? pixelSpeed / m_speedScale : pixelSpeed;
     it.fontScale = fontScale > 0 ? fontScale : 1.0;
-    measure(text, it.fontScale, it.width, it.height);
+    if (!emoticonUrl.isEmpty()) {
+        // 纯表情弹幕：尺寸由图片纵横比决定（图未就绪先按方形估算）
+        const QSizeF sz = emoticonLogicalSize(EmoticonCache::instance()->image(emoticonUrl),
+                                              it.fontScale, emoticonSize);
+        it.width = sz.width();
+        it.height = sz.height();
+    } else if (!inlineEmos.isEmpty()) {
+        // 混排：文本段按字体度量、表情段按图尺寸累加（未就绪按方形估算）
+        measureMixed(text, inlineEmos, it.fontScale, it.width, it.height);
+    } else {
+        measure(text, it.fontScale, it.width, it.height);
+    }
     m_live.append(it);
     emit activeCountChanged();
     kickstart();
@@ -955,11 +989,60 @@ QSGNode *DanmakuCanvas::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData *)
         }
 
         // ---- 字号/DPR 变化：实测尺寸随之更新 ----
-        if (m_fontDirty)
-            measure(it.text, it.fontScale, it.width, it.height);
+        if (m_fontDirty) {
+            if (!it.emoticonUrl.isEmpty()) {
+                const QSizeF sz = emoticonLogicalSize(
+                            EmoticonCache::instance()->image(it.emoticonUrl),
+                            it.fontScale, it.emoticonSize);
+                it.width = sz.width();
+                it.height = sz.height();
+            } else if (!it.inlineEmos.isEmpty()) {
+                measureMixed(it.text, it.inlineEmos, it.fontScale, it.width, it.height);
+            } else {
+                measure(it.text, it.fontScale, it.width, it.height);
+            }
+        }
 
         // ---- 首次上屏 / 纹理重建 ----
         if (!it.textureReady || m_fontDirty) {
+            // 表情图就绪检查（纯表情 / 混排）。图未就绪 → 本帧不烘焙不占
+            // 预算不占槽位（尚未绘制，无闪烁），等 EmoticonCache::ready
+            // 触发 update() 重试；下载失败或等待超时 8s：
+            //   纯表情 → 丢弃（表情是整条弹幕的全部内容，无文本可降级）
+            //   混排   → 该表情降级为普通文本占位符，其余内容正常渲染
+            if (!it.textureReady) {
+                if (!it.emoticonUrl.isEmpty()) {
+                    if (!EmoticonCache::instance()->isReady(it.emoticonUrl)) {
+                        if (EmoticonCache::instance()->isFailed(it.emoticonUrl)
+                                || m_now - it.startMs > 8000) {
+                            m_live.removeAt(i);
+                            countsDirty = true;
+                        } else {
+                            // 入队侧已 prefetch；此处兜底（幂等，磁盘命中会立即 ready）
+                            EmoticonCache::instance()->prefetch(it.emoticonUrl);
+                        }
+                        continue;
+                    }
+                } else if (!it.inlineEmos.isEmpty()) {
+                    bool waitingEmo = false;
+                    for (auto &emo : it.inlineEmos) {
+                        if (emo.failed || EmoticonCache::instance()->isReady(emo.url))
+                            continue;
+                        if (EmoticonCache::instance()->isFailed(emo.url)
+                                || m_now - it.startMs > 8000) {
+                            emo.failed = true;   // 降级：占位符按普通文本渲染
+                        } else {
+                            EmoticonCache::instance()->prefetch(emo.url);
+                            waitingEmo = true;
+                        }
+                    }
+                    if (waitingEmo)
+                        continue;
+                    // 全部就绪/降级 → 用实测图尺寸覆盖入队时的方形估算
+                    measureMixed(it.text, it.inlineEmos, it.fontScale, it.width, it.height);
+                }
+            }
+
             // 单帧纹理激活预算：弹幕高峰（如直播高能时刻）分批上屏，
             // 避免一帧内多次烘焙造成尖刺帧
             if (!m_fontDirty && activations >= kMaxActivationsPerFrame)
@@ -975,7 +1058,14 @@ QSGNode *DanmakuCanvas::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData *)
 
             // 烘焙（物理像素）+ pad 环绕：bilinear 采样半径 1px，防止
             // 图集内相邻弹幕位图边缘互相渗色
-            QImage img = renderImage(it.text, it.color, dpr, it.fontScale);
+            QImage img;
+            if (!it.emoticonUrl.isEmpty())
+                img = renderEmoticonImage(EmoticonCache::instance()->image(it.emoticonUrl),
+                                          dpr, it.fontScale, it.emoticonSize);
+            else if (!it.inlineEmos.isEmpty())
+                img = renderMixed(it.text, it.inlineEmos, it.color, dpr, it.fontScale);
+            else
+                img = renderImage(it.text, it.color, dpr, it.fontScale);
             QImage padded(img.width() + 2 * kAtlasPad, img.height() + 2 * kAtlasPad,
                           QImage::Format_RGBA8888_Premultiplied);
             padded.fill(Qt::transparent);
@@ -1232,9 +1322,23 @@ QImage DanmakuCanvas::renderImage(const QString &text, const QColor &color, qrea
     // 与原版一致：关闭抗锯齿换取速度
     p.setRenderHint(QPainter::TextAntialiasing, true);
     p.setRenderHint(QPainter::Antialiasing, false);
-    p.setFont(font);
 
-    const int baseline = extent + fm.ascent();
+    drawStyledText(p, text, extent, extent + fm.ascent(), font, fm, color, extent);
+    p.end();
+
+    return image;
+}
+
+// ---------------------------------------------------------------------------
+// 按当前描边样式绘制一段文本（renderImage 与混排 renderMixed 共用，
+// 参数与原 renderImage 内联版本逐行一致，观感无变化）
+// ---------------------------------------------------------------------------
+void DanmakuCanvas::drawStyledText(QPainter &p, const QString &text, qreal x,
+                                   qreal baseline, const QFont &font,
+                                   const QFontMetrics &fm, const QColor &color,
+                                   int extent) const
+{
+    p.setFont(font);
     switch (m_outlineStyle) {
     case 1: {
         // 重墨：环形描边——第 1 环（8 方向 1px）恒画，大字号（extent≥3）
@@ -1247,12 +1351,12 @@ QImage DanmakuCanvas::renderImage(const QString &text, const QColor &color, qrea
                 for (int dy = -r; dy <= r; ++dy) {
                     if ((dx == 0 && dy == 0) || qMax(qAbs(dx), qAbs(dy)) != r)
                         continue;   // 只画第 r 环（边框环），内环跳过
-                    p.drawText(extent + dx, baseline + dy, text);
+                    p.drawText(QPointF(x + dx, baseline + dy), text);
                 }
             }
         }
         p.setPen(color);
-        p.drawText(extent, baseline, text);
+        p.drawText(QPointF(x, baseline), text);
         break;
     }
     case 2: {
@@ -1260,31 +1364,203 @@ QImage DanmakuCanvas::renderImage(const QString &text, const QColor &color, qrea
         // 本体加最细 1px 描边（半透明，同描边档配色）：浅色弹幕在亮画面
         // 上本体边缘易糊进背景，细边兜住轮廓，观感仍保持"轻"
         p.setPen(QColor(0, 0, 0, 160));
-        p.drawText(extent + extent, baseline + extent, text);
+        p.drawText(QPointF(x + extent, baseline + extent), text);
         p.setPen(QColor(0, 0, 0, 217));
-        p.drawText(extent, baseline - 1, text);
-        p.drawText(extent, baseline + 1, text);
-        p.drawText(extent - 1, baseline, text);
-        p.drawText(extent + 1, baseline, text);
+        p.drawText(QPointF(x, baseline - 1), text);
+        p.drawText(QPointF(x, baseline + 1), text);
+        p.drawText(QPointF(x - 1, baseline), text);
+        p.drawText(QPointF(x + 1, baseline), text);
         p.setPen(color);
-        p.drawText(extent, baseline, text);
+        p.drawText(QPointF(x, baseline), text);
         break;
     }
     default: {
         // 描边：4 方向偏移（沿用原版参数）
         const QColor outlineColor(0, 0, 0, 217);
         p.setPen(outlineColor);
-        p.drawText(extent, baseline - 1, text);
-        p.drawText(extent, baseline + 1, text);
-        p.drawText(extent - 1, baseline, text);
-        p.drawText(extent + 1, baseline, text);
+        p.drawText(QPointF(x, baseline - 1), text);
+        p.drawText(QPointF(x, baseline + 1), text);
+        p.drawText(QPointF(x - 1, baseline), text);
+        p.drawText(QPointF(x + 1, baseline), text);
 
         p.setPen(color);
-        p.drawText(extent, baseline, text);
+        p.drawText(QPointF(x, baseline), text);
         break;
     }
     }
-    p.end();
+}
 
+// ---------------------------------------------------------------------------
+// 文本+表情混排（直播专有，如 "1[哇]"）：
+//   文本按占位符切分为 文本段/表情段 序列，表情段渲染为行内图片
+//   （小表情 1.15 倍行高、大表情 1.8 倍行高，垂直方向在总高内居中）
+//   measureMixed 与 renderMixed 共用切分逻辑；逻辑/物理两套度量分别
+//   计算（与文本弹幕 measure/renderImage 同样的对应关系）
+// ---------------------------------------------------------------------------
+QVector<DanmakuCanvas::MixedRun> DanmakuCanvas::splitMixedRuns(
+        const QString &text, const QVector<InlineEmo> &emos) const
+{
+    QVector<MixedRun> runs;
+    int segStart = 0;
+    int pos = 0;
+    while (pos < text.length()) {
+        bool matched = false;
+        for (int e = 0; e < emos.size(); ++e) {
+            const InlineEmo &emo = emos[e];
+            if (emo.failed || emo.key.isEmpty())
+                continue;
+            if (text.mid(pos, emo.key.length()) == emo.key) {
+                if (pos > segStart)
+                    runs.append({false, text.mid(segStart, pos - segStart), -1});
+                runs.append({true, QString(), e});
+                pos += emo.key.length();
+                segStart = pos;
+                matched = true;
+                break;
+            }
+        }
+        if (!matched)
+            ++pos;
+    }
+    if (pos > segStart)
+        runs.append({false, text.mid(segStart, pos - segStart), -1});
+    return runs;
+}
+
+void DanmakuCanvas::measureMixed(const QString &text, const QVector<InlineEmo> &emos,
+                                 qreal fontScale, qreal &outW, qreal &outH) const
+{
+    const int logicalSize = qMax(1, qRound(logicalFontSize() * fontScale));
+    QFont font;
+    font.setFamilies(fontFamilies());   // 与 renderMixed/measure 同链，防截断
+    font.setPixelSize(logicalSize);
+    const QFontMetrics fm(font);
+    const int extent = outlineExtent(logicalSize);
+    const qreal textH = fm.ascent() + fm.descent() + extent * 2;
+
+    qreal w = extent * 2;   // 左右描边外扩（与 renderMixed 位图分配一致）
+    qreal h = textH;
+    const QVector<MixedRun> runs = splitMixedRuns(text, emos);
+    for (const MixedRun &run : runs) {
+        if (run.isEmo) {
+            const InlineEmo &emo = emos[run.emoIdx];
+            const QSizeF sz = emoticonLogicalSize(
+                        EmoticonCache::instance()->image(emo.url), fontScale, emo.size);
+            w += sz.width();
+            h = qMax(h, sz.height());
+        } else {
+            w += fm.horizontalAdvance(run.text);
+        }
+    }
+    outW = w;
+    outH = h;
+}
+
+QImage DanmakuCanvas::renderMixed(const QString &text, const QVector<InlineEmo> &emos,
+                                  const QColor &color, qreal dpr, qreal fontScale) const
+{
+    if (dpr <= 0) dpr = 1.0;
+    const int physicalFontSize = qMax(1, qRound(logicalFontSize() * fontScale * dpr));
+
+    QFont font;
+    font.setFamilies(fontFamilies());
+    font.setPixelSize(physicalFontSize);
+    const QFontMetrics fm(font);
+    const int extent = outlineExtent(physicalFontSize);
+    const qreal textH = fm.ascent() + fm.descent() + extent * 2;
+
+    // 布局（物理像素）：文本段按物理字体度量，表情段按逻辑尺寸×dpr
+    // （与 renderEmoticonImage 同规则，节点 rect 以位图尺寸为准）
+    const QVector<MixedRun> runs = splitMixedRuns(text, emos);
+    QVector<QSizeF> emoSizes(emos.size());
+    qreal w = extent * 2;
+    qreal h = textH;
+    for (const MixedRun &run : runs) {
+        if (run.isEmo) {
+            const InlineEmo &emo = emos[run.emoIdx];
+            const QSizeF logical = emoticonLogicalSize(
+                        EmoticonCache::instance()->image(emo.url), fontScale, emo.size);
+            const QSizeF physical(logical.width() * dpr, logical.height() * dpr);
+            emoSizes[run.emoIdx] = physical;
+            w += physical.width();
+            h = qMax(h, physical.height());
+        } else {
+            w += fm.horizontalAdvance(run.text);
+        }
+    }
+
+    QImage image(qMax(1, qRound(w)), qMax(1, qRound(h)),
+                 QImage::Format_RGBA8888_Premultiplied);
+    image.fill(Qt::transparent);
+
+    QPainter p(&image);
+    p.setRenderHint(QPainter::TextAntialiasing, true);
+    p.setRenderHint(QPainter::Antialiasing, false);
+    p.setRenderHint(QPainter::SmoothPixmapTransform, true);
+
+    // 文本在总高内垂直居中：大表情撑高整条时文本随之居中
+    const qreal textY = (h - textH) / 2.0;
+    const qreal baseline = textY + extent + fm.ascent();
+
+    qreal x = extent;
+    for (const MixedRun &run : runs) {
+        if (run.isEmo) {
+            const QSizeF sz = emoSizes[run.emoIdx];
+            // 表情是裸图不描边（B 站同款），在总高内垂直居中
+            p.drawImage(QRectF(x, (h - sz.height()) / 2.0, sz.width(), sz.height()),
+                        EmoticonCache::instance()->image(emos[run.emoIdx].url));
+            x += sz.width();
+        } else {
+            drawStyledText(p, run.text, x, baseline, font, fm, color, extent);
+            x += fm.horizontalAdvance(run.text);
+        }
+    }
+    p.end();
+    return image;
+}
+
+// ---------------------------------------------------------------------------
+// 表情弹幕：尺寸测量与预渲染（直播专有）
+//   小表情：约 1.15 倍行高的行内图（B 站直播观感，略高于文字）
+//   大表情：约 1.8 倍行高，跨轨道占用（QML 侧轨道 span 已按同比例计算）
+//   宽度按原图纵横比等比缩放，上限 4 倍高（防超宽图撑爆图集/屏幕）
+// ---------------------------------------------------------------------------
+QSizeF DanmakuCanvas::emoticonLogicalSize(const QImage &src, qreal fontScale, int emoticonSize) const
+{
+    const int logicalSize = qMax(1, qRound(logicalFontSize() * fontScale));
+    QFont font;
+    font.setFamilies(fontFamilies());
+    font.setPixelSize(logicalSize);
+    const QFontMetrics fm(font);
+    const int extent = outlineExtent(logicalSize);
+    const qreal textH = fm.ascent() + fm.descent() + extent * 2;
+
+    const qreal h = textH * (emoticonSize == 2 ? 1.8 : 1.15);
+    if (src.isNull() || src.height() <= 0)
+        return QSizeF(h, h);   // 图未就绪：方形估算（就绪后由实测尺寸覆盖）
+    qreal w = h * qreal(src.width()) / qreal(src.height());
+    const qreal maxW = h * 4.0;
+    if (w > maxW)
+        w = maxW;
+    return QSizeF(w, h);
+}
+
+QImage DanmakuCanvas::renderEmoticonImage(const QImage &src, qreal dpr, qreal fontScale, int emoticonSize) const
+{
+    if (dpr <= 0) dpr = 1.0;
+    // 物理尺寸与 emoticonLogicalSize 严格一致（it.width/height 参与
+    // 位置计算，measure/render 脱节会导致表情错位，同文本弹幕约束）
+    const QSizeF logical = emoticonLogicalSize(src, fontScale, emoticonSize);
+
+    QImage image(qMax(1, qRound(logical.width() * dpr)),
+                 qMax(1, qRound(logical.height() * dpr)),
+                 QImage::Format_RGBA8888_Premultiplied);
+    image.fill(Qt::transparent);
+
+    // 表情是裸图不描边（B 站同款）；SmoothPixmapTransform 缩放平滑
+    QPainter p(&image);
+    p.setRenderHint(QPainter::SmoothPixmapTransform, true);
+    p.drawImage(QRectF(0, 0, image.width(), image.height()), src);
+    p.end();
     return image;
 }

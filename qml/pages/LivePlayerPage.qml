@@ -898,7 +898,9 @@ Rectangle {
         // 50ms 合批后的弹幕批次（C++ 侧聚合，一批仅一次信号）
         function onDanmakuBatchReceived(batch) {
             for (var i = 0; i < batch.length; i++)
-                danmakuOverlay.addDanmaku(batch[i].text, batch[i].color, batch[i].type)
+                danmakuOverlay.addDanmaku(batch[i].text, batch[i].color, batch[i].type,
+                                          0, batch[i].emoticonUrl || "", batch[i].emoticonSize || 1,
+                                          batch[i].emoticons || [])
         }
         function onSuperChatReceived(username, face, message, price, scTime, bgColor, bgBottomColor) {
             root._scQueue.push({ username: username, face: face, message: message,

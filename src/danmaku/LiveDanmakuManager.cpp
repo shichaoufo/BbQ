@@ -1,5 +1,6 @@
 #include "LiveDanmakuManager.h"
 #include "LoginManager.h"
+#include "EmoticonCache.h"
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonArray>
@@ -439,6 +440,9 @@ void LiveDanmakuManager::parsePacket(const QByteArray &data)
                             QJsonArray info = obj["info"].toArray();
 
                             LiveDanmakuItem danmaku;
+                            QString dmEmoUrl;          // 纯表情弹幕图（空 = 文本/混排）
+                            int dmEmoSize = 1;         // 1=小表情 2=大表情
+                            QVariantList dmEmoticons;  // 混排表情（text+url+size）
                             danmaku.type = 1;
                             danmaku.color = QColor(255, 255, 255);
 
@@ -471,6 +475,55 @@ void LiveDanmakuManager::parsePacket(const QByteArray &data)
                                 if (basicInfo.size() > 4) {
                                     danmaku.timestamp = basicInfo[4].toVariant().toLongLong();
                                 }
+                                // 混排表情：info[0][15].extra（JSON 字符串）内的
+                                // emots 字典，key 为文本占位符（如 "[哇]"），
+                                // value 含 url/size。文本中的占位符由渲染层
+                                // 替换为行内图片
+                                if (basicInfo.size() > 15) {
+                                    const QString extraStr = basicInfo[15].toObject()
+                                                                 ["extra"].toString();
+                                    if (!extraStr.isEmpty()) {
+                                        const QJsonDocument extraDoc =
+                                                QJsonDocument::fromJson(extraStr.toUtf8());
+                                        if (extraDoc.isObject()) {
+                                            const QJsonObject emots = extraDoc.object()
+                                                                       ["emots"].toObject();
+                                            for (auto eIt = emots.begin();
+                                                 eIt != emots.end(); ++eIt) {
+                                                const QJsonObject emo = eIt.value().toObject();
+                                                const QString url = emo["url"].toString();
+                                                const QString key = eIt.key();
+                                                if (url.isEmpty() || key.isEmpty())
+                                                    continue;
+                                                const int size = emo["size"].toInt(1) == 2 ? 2 : 1;
+                                                EmoticonCache::instance()->prefetch(url);
+                                                if (danmaku.text.contains(key)) {
+                                                    // 混排：占位符在文本内
+                                                    QVariantMap em;
+                                                    em["text"] = key;
+                                                    em["url"] = url;
+                                                    em["size"] = size;
+                                                    dmEmoticons.append(em);
+                                                } else if (dmEmoUrl.isEmpty()
+                                                           && !danmaku.text.contains('[')) {
+                                                    // 纯表情（文本为空/不含占位符）
+                                                    dmEmoUrl = url;
+                                                    dmEmoSize = size;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                // 兼容旧字段 info[0][13] emoticon 对象（纯表情）
+                                if (dmEmoUrl.isEmpty() && basicInfo.size() > 13) {
+                                    QJsonObject emo = basicInfo[13].toObject();
+                                    const QString emoUrl = emo["url"].toString();
+                                    if (!emoUrl.isEmpty()) {
+                                        dmEmoUrl = emoUrl;
+                                        dmEmoSize = emo["size"].toInt(1);
+                                        EmoticonCache::instance()->prefetch(emoUrl);
+                                    }
+                                }
                             }
 
                             // 50ms 合批发射：缓冲累积，超阈值立即冲刷（防超高峰值时延迟无限累积）
@@ -479,6 +532,12 @@ void LiveDanmakuManager::parsePacket(const QByteArray &data)
                             dm["nickname"] = danmaku.nickname;
                             dm["color"] = danmaku.color.name();
                             dm["type"] = danmaku.type;
+                            if (!dmEmoUrl.isEmpty()) {
+                                dm["emoticonUrl"] = dmEmoUrl;
+                                dm["emoticonSize"] = dmEmoSize;
+                            }
+                            if (!dmEmoticons.isEmpty())
+                                dm["emoticons"] = dmEmoticons;
                             m_pendingDanmaku.append(dm);
                             if (m_pendingDanmaku.size() >= 300) {
                                 flushDanmakuBatch();
