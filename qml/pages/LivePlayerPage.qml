@@ -1,4 +1,4 @@
-﻿import QtQuick 2.15
+import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
 import QtQuick.Window 2.15
@@ -159,6 +159,11 @@ Rectangle {
         if (!App.miniPlayerMode) return   // 变身失败（无主窗口等），保持原状
 
         root.isMiniWindow = true
+        // 进小窗主动清掉 SC 横幅与未消费队列：banner 挂在主窗口 Overlay 上，
+        // 不随播放器 reparent，窗口收缩后会飘在错误位置（onSuperChatReceived
+        // 对小窗期间的 SC 直接 return，这里的清理只兜底"进小窗前已在显示"的）
+        root._scQueue = []
+        try { scInfoBar.clearAllInfo() } catch (e) {}
         // 同窗口 reparent：迷你 UI 层挂到宿主，播放器与弹幕层挂到迷你 UI 层。
         // anchors.fill: parent 绑定自动重新求值，各项填满新父级
         miniUiRoot.parent = App.miniPlayerHost
