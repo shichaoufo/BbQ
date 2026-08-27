@@ -250,10 +250,12 @@ private:
     static QStringList fontFamilies();      ///< 弹幕字体回退链（外接字体优先，雅黑/黑体兜底）
     void   measure(const QString &text, qreal fontScale, qreal &outW, qreal &outH) const;
     QImage renderImage(const QString &text, const QColor &color, qreal dpr, qreal fontScale) const;
-    /// 按当前描边样式在 (x, baseline) 绘制一段文本（renderImage/renderMixed 共用）
+    /// 按当前描边样式在 (x, baseline) 绘制一段文本（renderImage/renderMixed 共用）。
+    /// dpr：设备缩放倍率——描边/细边的偏移量按 dpr 缩放（1 逻辑像素 = dpr 物理
+    /// 像素），保证不同缩放倍率的屏幕上描边逻辑粗细一致（1080P@100% 为基准）
     void   drawStyledText(QPainter &p, const QString &text, qreal x, qreal baseline,
                           const QFont &font, const QFontMetrics &fm,
-                          const QColor &color, int extent) const;
+                          const QColor &color, int extent, qreal dpr) const;
     /// 文本+表情混排：把文本按占位符切分为 文本段/表情段 序列
     struct MixedRun { bool isEmo = false; QString text; int emoIdx = -1; };
     QVector<MixedRun> splitMixedRuns(const QString &text, const QVector<InlineEmo> &emos) const;

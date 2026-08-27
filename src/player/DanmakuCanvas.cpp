@@ -1323,35 +1323,45 @@ QImage DanmakuCanvas::renderImage(const QString &text, const QColor &color, qrea
     p.setRenderHint(QPainter::TextAntialiasing, true);
     p.setRenderHint(QPainter::Antialiasing, false);
 
-    drawStyledText(p, text, extent, extent + fm.ascent(), font, fm, color, extent);
+    drawStyledText(p, text, extent, extent + fm.ascent(), font, fm, color, extent, dpr);
     p.end();
 
     return image;
 }
 
 // ---------------------------------------------------------------------------
-// 按当前描边样式绘制一段文本（renderImage 与混排 renderMixed 共用，
-// 参数与原 renderImage 内联版本逐行一致，观感无变化）
+// 按当前描边样式绘制一段文本（renderImage 与混排 renderMixed 共用）
+//
+// 描边粗细与 DPR 的关系：本函数工作在物理像素位图上，文字随 dpr 放大，
+// 但视觉上"1 逻辑像素"的描边 = dpr 物理像素。因此所有偏移量乘以 u(=dpr)：
+//   - 描边档 4 方向偏移、投影档兜底细边：u
+//   - 重墨档环形半径步进：u（第 r 环偏移 r*u）
+//   - 投影档影子偏移：extent（按物理字号比例，天然含 dpr，无需再乘）
+// 基准观感为 1080P@100%（dpr=1，偏移即 1 物理像素）；2K@125%/150% 等
+// 屏幕上描边逻辑粗细与基准一致，不再随缩放变细。
+// 重墨档"是否补第 2 环"按逻辑字号判断（物理 extent 跨屏恒等换算）。
 // ---------------------------------------------------------------------------
 void DanmakuCanvas::drawStyledText(QPainter &p, const QString &text, qreal x,
                                    qreal baseline, const QFont &font,
                                    const QFontMetrics &fm, const QColor &color,
-                                   int extent) const
+                                   int extent, qreal dpr) const
 {
+    const qreal u = qMax(1.0, dpr);   // 1 逻辑像素对应的物理像素数
     p.setFont(font);
     switch (m_outlineStyle) {
     case 1: {
-        // 重墨：环形描边——第 1 环（8 方向 1px）恒画，大字号（extent≥3）
-        // 补第 2 环。边宽小字号 ~1.5px、大字号 ~2.5px，纯黑不透明，
+        // 重墨：环形描边——第 1 环（8 方向 u）恒画，大逻辑字号（extent≥3）
+        // 补第 2 环。边宽小字号 ~1.5 逻辑px、大字号 ~2.5 逻辑px，纯黑不透明，
         // 对比描边档是"稍厚 + 更黑"（B 站同款观感，不夸张）
         p.setPen(QColor(0, 0, 0, 255));
-        const int rings = extent >= 3 ? 2 : 1;
+        const int logicalSize = qMax(1, qRound(qreal(font.pixelSize()) / u));
+        const int rings = outlineExtent(logicalSize) >= 3 ? 2 : 1;
         for (int r = 1; r <= rings; ++r) {
             for (int dx = -r; dx <= r; ++dx) {
                 for (int dy = -r; dy <= r; ++dy) {
                     if ((dx == 0 && dy == 0) || qMax(qAbs(dx), qAbs(dy)) != r)
                         continue;   // 只画第 r 环（边框环），内环跳过
-                    p.drawText(QPointF(x + dx, baseline + dy), text);
+                    p.drawText(QPointF(x + dx * u, baseline + dy * u), text);
                 }
             }
         }
@@ -1361,27 +1371,27 @@ void DanmakuCanvas::drawStyledText(QPainter &p, const QString &text, qreal x,
     }
     case 2: {
         // 45° 投影：本体 + 右下偏移半透明影（B 站网页端同款，无真模糊）。
-        // 本体加最细 1px 描边（半透明，同描边档配色）：浅色弹幕在亮画面
-        // 上本体边缘易糊进背景，细边兜住轮廓，观感仍保持"轻"
+        // 本体加最细 1 逻辑px 描边（半透明，同描边档配色）：浅色弹幕在亮
+        // 画面上本体边缘易糊进背景，细边兜住轮廓，观感仍保持"轻"
         p.setPen(QColor(0, 0, 0, 160));
         p.drawText(QPointF(x + extent, baseline + extent), text);
         p.setPen(QColor(0, 0, 0, 217));
-        p.drawText(QPointF(x, baseline - 1), text);
-        p.drawText(QPointF(x, baseline + 1), text);
-        p.drawText(QPointF(x - 1, baseline), text);
-        p.drawText(QPointF(x + 1, baseline), text);
+        p.drawText(QPointF(x, baseline - u), text);
+        p.drawText(QPointF(x, baseline + u), text);
+        p.drawText(QPointF(x - u, baseline), text);
+        p.drawText(QPointF(x + u, baseline), text);
         p.setPen(color);
         p.drawText(QPointF(x, baseline), text);
         break;
     }
     default: {
-        // 描边：4 方向偏移（沿用原版参数）
+        // 描边：4 方向偏移（偏移量随 dpr 缩放，基准 1080P@100% 为 1 物理px）
         const QColor outlineColor(0, 0, 0, 217);
         p.setPen(outlineColor);
-        p.drawText(QPointF(x, baseline - 1), text);
-        p.drawText(QPointF(x, baseline + 1), text);
-        p.drawText(QPointF(x - 1, baseline), text);
-        p.drawText(QPointF(x + 1, baseline), text);
+        p.drawText(QPointF(x, baseline - u), text);
+        p.drawText(QPointF(x, baseline + u), text);
+        p.drawText(QPointF(x - u, baseline), text);
+        p.drawText(QPointF(x + u, baseline), text);
 
         p.setPen(color);
         p.drawText(QPointF(x, baseline), text);
@@ -1511,7 +1521,7 @@ QImage DanmakuCanvas::renderMixed(const QString &text, const QVector<InlineEmo> 
                         EmoticonCache::instance()->image(emos[run.emoIdx].url));
             x += sz.width();
         } else {
-            drawStyledText(p, run.text, x, baseline, font, fm, color, extent);
+            drawStyledText(p, run.text, x, baseline, font, fm, color, extent, dpr);
             x += fm.horizontalAdvance(run.text);
         }
     }
