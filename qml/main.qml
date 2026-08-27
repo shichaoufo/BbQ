@@ -18,6 +18,17 @@ FluWindow {
     color: "black"
     flags: Qt.Window
 
+    // 启动动画方案（替代此前的 opacity 淡入模拟）：FluWindow 默认在
+    // Component.onCompleted 里立即 show()，窗口先以默认几何显示、再跳到
+    // 保存的几何。现在改为 autoVisible: false 暂不显示，等几何恢复完成
+    // 后由 geometryTimer 调 show()——Windows 系统原生的窗口打开动画
+    // （与其他软件打开时相同的缩放+淡入）就会在最终位置尺寸上自然播放。
+    // 副作用：几何在窗口隐藏期间调整，不产生任何可见跳变；且隐藏窗口
+    // 不接收鼠标事件，高 DPI 启动竞态（见 geometryTimer 注释）进一步规避。
+    // autoCenter 一并关闭：无保存几何时的居中由 applyWindowGeometry 负责。
+    autoVisible: false
+    autoCenter: false
+
     // 默认尺寸，按首页能完整显示 2 行 3 列视频卡片计算，
     // 在 Component.onCompleted 中会根据屏幕可用空间和 DPI 缩放进行限制
     // defaultWidth 需 ≥ minimumWidth(1120)，否则启动时会被钳制
@@ -118,9 +129,12 @@ FluWindow {
         // 主题按钮图标/文案与恢复后的主题同步
         app_bar.buttonDark.iconSource = FluTheme.dark ? FluentIcons.QuietHours : FluentIcons.Brightness
         app_bar.buttonDark.text = FluTheme.dark ? app_bar.darkText : app_bar.lightText
-        if (!applyWindowGeometry()) {
-            geometryTimer.start()
-        }
+        // 启动流程（autoVisible: false，见上方注释）：本阶段窗口保持隐藏，
+        // 由 geometryTimer 延迟 150ms 恢复保存的几何后再 show()——规避
+        // 高 DPI 启动竞态（曾在 150% 缩放机器触发 Qt 6.9.3 hover 递归
+        // 分发崩溃，见 BbQ_crash.log），且 show() 时系统原生打开动画在
+        // 最终几何上播放，无默认尺寸→恢复尺寸的可见跳变。
+        geometryTimer.start()
         // 弹幕驱动链自动测试（DANMAKU_AUTOTEST=1）：不依赖视频/交互，
         // 每 1.5s 发射一条滚动弹幕，配合 DANMAKU_DIAG=1 观察定时器链条是否持续
         if (App.environmentVariable("DANMAKU_AUTOTEST") === "1")
@@ -129,10 +143,25 @@ FluWindow {
 
     Timer {
         id: geometryTimer
-        interval: 100
-        repeat: false
+        interval: 150
+        repeat: true
+        // 启动流程：autoVisible:false 暂不显示窗口 → 本定时器恢复保存的
+        // 几何（延迟 150ms 规避高 DPI 启动竞态：原先在 onCompleted 里同步
+        // 恢复，窗口未显示、QML 场景树仍在构建，DIP 换算与几何变更、首个
+        // hover 分发挤在同一窗口期，曾在 150% 缩放机器上触发 Qt 6.9.3
+        // hover 递归分发崩溃，见 BbQ_crash.log）→ 几何落位后 show()，
+        // Windows 原生窗口打开动画在最终几何上播放。
+        // 重试：屏幕可用区域未就绪时 applyWindowGeometry 返回 false，
+        // 上限约 10 次（1.5s），放弃后兜底 show()（以默认几何居中显示），
+        // 绝不让窗口永远不显示。
+        property int attempts: 0
         onTriggered: {
-            applyWindowGeometry()
+            attempts++
+            if (applyWindowGeometry() || attempts >= 10) {
+                stop()
+                attempts = 0
+                window.show()
+            }
         }
     }
 
