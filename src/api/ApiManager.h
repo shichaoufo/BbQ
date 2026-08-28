@@ -71,6 +71,7 @@ signals:
     void liveDanmuInfoReceived(const QByteArray &data);
     void liveDanmakuSendResult(const QByteArray &data);      // 发送弹幕（文字/表情）响应
     void liveEmoticonsReceived(const QByteArray &data);      // 表情包列表响应
+    void videoDanmakuSendResult(const QByteArray &data);     // 视频弹幕发送响应
     void userUploadedVideosReceived(const QByteArray &data);
     void relatedVideosReceived(const QByteArray &data);
     void historyListReceived(const QByteArray &data);
@@ -110,6 +111,11 @@ public:
                                              const QString &emoticonText);
     // 获取直播间可用表情包列表（web-ucenter 接口，带 cookie）
     Q_INVOKABLE void getLiveEmoticons(const QString &roomId);
+
+    // ===== 视频弹幕发送（Web 路线：cookie + csrf，经 /x/v2/dm/post）=====
+    // colorDecimal: 十进制颜色值（如 16777215=白色）；progressMs: 当前播放进度（毫秒，弹幕落点）
+    Q_INVOKABLE void sendVideoDanmaku(const QString &cid, const QString &bvid, const QString &text,
+                                      int colorDecimal, int progressMs);
 
     // WBI签名推荐API（与wiliwili一致）
     Q_INVOKABLE void getWbiRecommendVideos(int page = 1, int pageSize = 30, int freshType = 0, int xNum = 3, int yNum = 4);

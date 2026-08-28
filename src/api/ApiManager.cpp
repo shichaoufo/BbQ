@@ -1877,6 +1877,62 @@ void ApiManager::getLiveEmoticons(const QString &roomId)
     });
 }
 
+void ApiManager::sendVideoDanmaku(const QString &cid, const QString &bvid, const QString &text,
+                                  int colorDecimal, int progressMs)
+{
+    // 视频弹幕：POST /x/v2/dm/post（B 站网页端原生接口，cookie+csrf）。
+    // progress 为当前播放进度（毫秒，服务端以此定位弹幕落点）；
+    // mode=1 滚动 / fontsize=25 / pool=0 普通 / type=1 普通弹幕
+    QString cookies = LoginManager::instance()->getCookies();
+    QString csrf = getCSRFToken();
+    if (cookies.isEmpty() || csrf.isEmpty()) {
+        emit videoDanmakuSendResult(QByteArray("{\"code\":-101,\"message\":\"未登录\"}"));
+        return;
+    }
+
+    QUrlQuery query;
+    query.addQueryItem("type", "1");
+    query.addQueryItem("oid", cid);
+    query.addQueryItem("msg", text);
+    query.addQueryItem("bvid", bvid);
+    query.addQueryItem("progress", QString::number(progressMs));
+    query.addQueryItem("color", QString::number(colorDecimal));
+    query.addQueryItem("fontsize", "25");
+    query.addQueryItem("pool", "0");
+    query.addQueryItem("mode", "1");
+    query.addQueryItem("plat", "1");
+    query.addQueryItem("csrf_token", csrf);
+    query.addQueryItem("csrf", csrf);
+
+    QUrl qurl("https://api.bilibili.com/x/v2/dm/post");
+    QNetworkRequest request(qurl);
+    request.setHeader(QNetworkRequest::ContentTypeHeader, "application/x-www-form-urlencoded");
+    request.setRawHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
+    request.setRawHeader("Referer", QString("https://www.bilibili.com/video/%1").arg(bvid).toUtf8());
+    request.setRawHeader("Origin", "https://www.bilibili.com");
+    request.setRawHeader("Accept", "application/json, text/plain, */*");
+    request.setRawHeader("Cookie", cookies.toUtf8());
+
+    QSslConfiguration config = QSslConfiguration::defaultConfiguration();
+    config.setPeerVerifyMode(QSslSocket::VerifyNone);
+    request.setSslConfiguration(config);
+
+    QNetworkReply *reply = m_networkManager->post(request, query.toString(QUrl::FullyEncoded).toUtf8());
+    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        if (reply->error() != QNetworkReply::NoError) {
+            qWarning() << "[ApiManager] sendVideoDanmaku network error:" << reply->errorString();
+            emit videoDanmakuSendResult(QByteArray("{\"code\":-1,\"message\":\"network error: "
+                                                   + reply->errorString().toUtf8() + "\"}"));
+            reply->deleteLater();
+            return;
+        }
+        QByteArray data = reply->readAll();
+        qDebug() << "[ApiManager] sendVideoDanmaku response:" << data.left(500);
+        emit videoDanmakuSendResult(data);
+        reply->deleteLater();
+    });
+}
+
 QString ApiManager::getCSRFToken()
 {
     QString cookies = LoginManager::instance()->getCookies();

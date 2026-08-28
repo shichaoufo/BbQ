@@ -796,6 +796,28 @@ Rectangle {
         return controlBarHover.hovered
             || volumePopup.opened || danmakuPopup.opened
             || speedMenu.opened || codecMenu.opened || qualityMenu.opened
+            || danmakuInput.activeFocus     // 弹幕输入中不隐藏（失焦即恢复倒计时）
+            || colorPickerDialogOpen()       // 取色对话框为模态（挂窗口 Overlay），
+                                             // 鼠标事件到不了播放区，必须豁免隐藏
+    }
+
+    // FluColorPicker 未暴露内部弹窗的 opened 状态：从其实例的非可视
+    // 子对象（resources，兜底扫 data）里找到 Popup 动态读取 opened。
+    // 该函数由定时器轮询调用，无需绑定响应
+    function colorPickerDialogOpen() {
+        var lists = []
+        try { lists.push(danmakuColorPicker.resources) } catch (e) {}
+        try { lists.push(danmakuColorPicker.data) } catch (e) {}
+        for (var k = 0; k < lists.length; k++) {
+            var res = lists[k]
+            if (!res || !res.length) continue
+            for (var i = 0; i < res.length; i++) {
+                var r = res[i]
+                if (r && "opened" in r)
+                    return r.opened
+            }
+        }
+        return false
     }
 
     function onVideoDanmakuLoaded(list) {
@@ -1156,6 +1178,31 @@ Rectangle {
         }
     }
 
+    // 视频弹幕发送响应：code=0 成功，非 0 展示错误信息
+    Connections {
+        target: Api
+        function onVideoDanmakuSendResult(data) {
+            pageRoot._danmakuSending = false
+            _danmakuSendGuard.stop()
+            try {
+                var dataStr = typeof data === "string" ? data : data.toString()
+                var resp = JSON.parse(dataStr)
+                if (resp.code === 0) {
+                    // 成功后清空输入框；弹幕经服务器入库，重新加载
+                    // 视频或刷新页面后可见（不做本地立即上屏，与
+                    // danmakuList 的静态加载模型保持一致）
+                    danmakuInput.text = ""
+                } else {
+                    var errMsg = resp.message || ("错误码: " + resp.code)
+                    if (resp.code === -101) errMsg = "请先登录后发送弹幕"
+                    pageInfoBar.showWarning("发送失败: " + errMsg)
+                }
+            } catch (e) {
+                pageInfoBar.showWarning("发送失败: 响应解析错误")
+            }
+        }
+    }
+
     Component.onDestruction: {
         closePopups()
         // 小窗模式下被销毁（外部代码直接关页面的兜底路径）：退出小窗模式，
@@ -1439,6 +1486,39 @@ Rectangle {
             return false
         }
         return true
+    }
+
+    // ===== 发送弹幕 =====
+    // 发送中防抖；当前弹幕颜色（QML color → 十进制接口参数）
+    property bool _danmakuSending: false
+    property color danmakuColor: "#FFFFFF"
+
+    function sendVideoDanmaku(text) {
+        if (pageRoot._danmakuSending) return
+        var msg = (text || "").trim()
+        if (msg === "") return
+        if (!Login.isLoggedIn) {
+            pageInfoBar.showWarning("请先登录后发送弹幕")
+            return
+        }
+        if (pageRoot.cid === "") return
+        pageRoot._danmakuSending = true
+        // 颜色转十进制（忽略透明度）：R*65536 + G*256 + B
+        var colorDecimal = Math.round(pageRoot.danmakuColor.r * 255) * 65536
+                        + Math.round(pageRoot.danmakuColor.g * 255) * 256
+                        + Math.round(pageRoot.danmakuColor.b * 255)
+        // 弹幕落点：当前播放进度。progress 参数单位为毫秒
+        //（mpvPlayer.position 本身即毫秒，直接使用；传秒会被记到
+        //  秒/1000 处即 00:00 附近）
+        var progress = Math.max(0, mpvPlayer.position)
+        Api.sendVideoDanmaku(pageRoot.cid, pageRoot.bvid, msg, colorDecimal, progress)
+        _danmakuSendGuard.restart()
+    }
+
+    Timer {
+        id: _danmakuSendGuard
+        interval: 1500
+        onTriggered: pageRoot._danmakuSending = false
     }
 
     function loadData() {
@@ -3586,6 +3666,58 @@ Rectangle {
                                 font: FluTextStyle.Caption
                                 color: "#FFFFFF"
                                 Layout.alignment: Qt.AlignVCenter
+                            }
+
+                            // ===== 弹幕输入框（与直播播放器同款深色定制样式）=====
+                            // 文字保留：仅发送成功才 clear（见 onVideoDanmakuSendResult），
+                            // 失焦/控制栏隐藏都不清空；输入中经 controlOverlayActive()
+                            // 豁免自动隐藏。小窗模式（480px）空间不足，隐藏
+                            FluTextBox {
+                                id: danmakuInput
+                                visible: !pageRoot.isMiniWindow
+                                Layout.preferredWidth: 200
+                                Layout.maximumWidth: 240
+                                Layout.alignment: Qt.AlignVCenter
+                                placeholderText: "发个弹幕见证当下"
+                                font: FluTextStyle.Caption
+                                iconSource: FluentIcons.Send   // 输入框内右侧发送提示（Enter 发送）
+                                cleanEnabled: true             // 非空时自动显示清空键（组件内置）
+                                maximumLength: 100             // B 站视频弹幕长度限制
+                                normalColor: "white"
+                                placeholderNormalColor: "#99FFFFFF"
+                                placeholderFocusColor: "#99FFFFFF"
+                                background: Rectangle {
+                                    implicitHeight: 30
+                                    radius: 4
+                                    color: danmakuInput.activeFocus ? "#59000000" : "#40000000"
+                                    border.width: 1
+                                    border.color: danmakuInput.activeFocus
+                                                   ? FluTheme.primaryColor : "#33FFFFFF"
+                                }
+                                onCommit: (text) => pageRoot.sendVideoDanmaku(text)
+                                Keys.onPressed: (event) => {
+                                    // 中文输入法组合期间回车是"上屏候选词"，
+                                    // Qt 已处理，无需干预；Esc 交还焦点
+                                    if (event.key === Qt.Key_Escape) {
+                                        danmakuInput.focus = false
+                                        event.accepted = true
+                                    }
+                                }
+                            }
+
+                            // 弹幕颜色选择（FluColorPicker：内置取色面板，
+                            // 按钮中央色块实时反映当前弹幕颜色）。小窗模式下隐藏
+                            FluColorPicker {
+                                id: danmakuColorPicker
+                                visible: !pageRoot.isMiniWindow
+                                width: 30
+                                height: 30
+                                current: pageRoot.danmakuColor
+                                titleText: "弹幕颜色"
+                                cancelText: "取消"
+                                okText: "确定"
+                                Layout.alignment: Qt.AlignVCenter
+                                onAccepted: pageRoot.danmakuColor = current
                             }
 
                             Item { Layout.fillWidth: true }
