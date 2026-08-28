@@ -3675,8 +3675,8 @@ Rectangle {
                             FluTextBox {
                                 id: danmakuInput
                                 visible: !pageRoot.isMiniWindow
-                                Layout.preferredWidth: 200
-                                Layout.maximumWidth: 240
+                                Layout.preferredWidth: 180
+                                Layout.maximumWidth: 200
                                 Layout.alignment: Qt.AlignVCenter
                                 placeholderText: "发个弹幕见证当下"
                                 font: FluTextStyle.Caption

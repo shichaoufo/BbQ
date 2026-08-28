@@ -31,8 +31,8 @@ FluWindow {
 
     // 默认尺寸，按首页能完整显示 2 行 3 列视频卡片计算，
     // 在 Component.onCompleted 中会根据屏幕可用空间和 DPI 缩放进行限制
-    // defaultWidth 需 ≥ minimumWidth(1120)，否则启动时会被钳制
-    property int defaultWidth: 1136
+    // defaultWidth 需 ≥ minimumWidth(1280)，否则启动时会被钳制
+    property int defaultWidth: 1296
     property int defaultHeight: 700
 
     width: defaultWidth
@@ -41,7 +41,9 @@ FluWindow {
     // 但 FluComboBox/FluAutoSuggestBox 的实际渲染宽度（含 padding/border/indicator）
     // 比 Layout.minimumWidth 大，实测 SearchPage 宽度 1016px 仍会截断搜索框。
     // 因此取 1120（SearchPage 可用 1070px），留足余量。
-    minimumWidth: 1120
+    // 播放页控制栏加入弹幕输入框（180px）+ 颜色选择后内容变宽，
+    // 最小宽度提升到 1280，避免最小窗口下控制栏按钮超出播放器范围。
+    minimumWidth: 1280
     minimumHeight: 640
     launchMode: FluWindowType.SingleTask
     fitsAppBarWindows: true
