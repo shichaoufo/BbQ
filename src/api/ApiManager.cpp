@@ -1725,6 +1725,158 @@ void ApiManager::reportLiveHistory(const QString &roomId)
     });
 }
 
+// ===== 直播间发送弹幕（Web 路线：cookie + csrf）=====
+// 最初按 biliuwp-lite 走 App 签名路线（appkey + access_key），但本客户端
+// 的 Web 扫码登录（passport-login/web/qrcode/poll）只下发 cookie、不产生
+// access_token，空 access_key 导致服务器一律 -101。改走 Web 路线：
+// 文字走 /msg/send（B 站网页直播原生接口），大表情走
+// /xlive/app-room/v1/dM/sendmsg（网页端表情包同款，接受 cookie+csrf），
+// 直播域带 cookie 的 POST 已由 reportLiveHistory 验证可用（同走
+// m_networkManager，与 playurl 隔离）
+void ApiManager::sendLiveDanmakuPost(const QString &url, const QUrlQuery &query,
+                                     const QString &roomId)
+{
+    // 未登录/无 cookie 直接返回错误（QML 侧有前置拦截，此处兜底）
+    QString cookies = LoginManager::instance()->getCookies();
+    QString csrf = getCSRFToken();
+    if (cookies.isEmpty() || csrf.isEmpty()) {
+        emit liveDanmakuSendResult(QByteArray("{\"code\":-101,\"message\":\"未登录\"}"));
+        return;
+    }
+
+    QByteArray postData = query.toString(QUrl::FullyEncoded).toUtf8();
+
+    QUrl qurl(url);
+    QNetworkRequest request(qurl);
+    request.setHeader(QNetworkRequest::ContentTypeHeader, "application/x-www-form-urlencoded");
+    request.setRawHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
+    request.setRawHeader("Referer", QString("https://live.bilibili.com/%1").arg(roomId).toUtf8());
+    request.setRawHeader("Origin", "https://live.bilibili.com");
+    request.setRawHeader("Accept", "application/json, text/plain, */*");
+    request.setRawHeader("Cookie", cookies.toUtf8());
+
+    QSslConfiguration config = QSslConfiguration::defaultConfiguration();
+    config.setPeerVerifyMode(QSslSocket::VerifyNone);
+    request.setSslConfiguration(config);
+
+    QNetworkReply *reply = m_networkManager->post(request, postData);
+    connect(reply, &QNetworkReply::finished, this, [this, reply, roomId]() {
+        if (reply->error() != QNetworkReply::NoError) {
+            qWarning() << "[ApiManager] sendLiveDanmaku network error room" << roomId
+                       << ":" << reply->errorString();
+            emit liveDanmakuSendResult(QByteArray("{\"code\":-1,\"message\":\"network error: "
+                                                  + reply->errorString().toUtf8() + "\"}"));
+            reply->deleteLater();
+            return;
+        }
+        QByteArray data = reply->readAll();
+        qDebug() << "[ApiManager] sendLiveDanmaku response:" << data.left(500);
+        emit liveDanmakuSendResult(data);
+        reply->deleteLater();
+    });
+}
+
+void ApiManager::sendLiveDanmaku(const QString &roomId, const QString &text)
+{
+    // 文字弹幕：/msg/send，字段与 B 站网页端一致
+    // color=16777215(白色) fontsize=25 mode=1(滚动) rnd=毫秒时间戳
+    QString csrf = getCSRFToken();
+    QUrlQuery query;
+    query.addQueryItem("bubble", "0");
+    query.addQueryItem("msg", text);
+    query.addQueryItem("color", "16777215");
+    query.addQueryItem("mode", "1");
+    query.addQueryItem("fontsize", "25");
+    query.addQueryItem("rnd", QString::number(QDateTime::currentMSecsSinceEpoch()));
+    query.addQueryItem("roomid", roomId);
+    query.addQueryItem("csrf_token", csrf);
+    query.addQueryItem("csrf", csrf);
+
+    sendLiveDanmakuPost("https://api.live.bilibili.com/msg/send", query, roomId);
+}
+
+void ApiManager::sendLiveDanmakuEmoticon(const QString &roomId, const QString &emoticonUnique,
+                                         const QString &emoticonText)
+{
+    // 大表情：dM/sendmsg（网页端表情包同款端点，cookie+csrf 认证）。
+    // 字段集与网页端/biliuwp 一致：msg=emoticon_unique，extra 内含
+    // content/emoticon_unique/dm_type；mid 取当前登录用户（服务器也会
+    // 从 cookie 校验）
+    LoginManager *loginMgr = LoginManager::instance();
+    QString csrf = getCSRFToken();
+    qint64 ms = QDateTime::currentMSecsSinceEpoch();
+    qint64 sec = QDateTime::currentSecsSinceEpoch();
+
+    QJsonObject extraObj;
+    extraObj["content"] = emoticonText;
+    extraObj["emoticon_unique"] = emoticonUnique;
+    extraObj["dm_type"] = 1;
+    QString extra = QString::fromUtf8(QJsonDocument(extraObj).toJson(QJsonDocument::Compact));
+
+    QUrlQuery query;
+    query.addQueryItem("cid", roomId);
+    query.addQueryItem("mid", QString::number(loginMgr->getCurrentUser().mid));
+    query.addQueryItem("msg", emoticonUnique);
+    query.addQueryItem("dm_type", "1");
+    query.addQueryItem("extra", extra);
+    query.addQueryItem("ts", QString::number(sec));
+    query.addQueryItem("rnd", QString::number(ms));
+    query.addQueryItem("mode", "1");
+    query.addQueryItem("pool", "0");
+    query.addQueryItem("type", "json");
+    query.addQueryItem("color", "16777215");
+    query.addQueryItem("fontsize", "25");
+    query.addQueryItem("playTime", "0.0");
+    query.addQueryItem("csrf_token", csrf);
+    query.addQueryItem("csrf", csrf);
+
+    sendLiveDanmakuPost("https://api.live.bilibili.com/xlive/app-room/v1/dM/sendmsg",
+                        query, roomId);
+}
+
+void ApiManager::getLiveEmoticons(const QString &roomId)
+{
+    QString cookies = LoginManager::instance()->getCookies();
+    if (cookies.isEmpty()) {
+        emit liveEmoticonsReceived(QByteArray("{\"code\":-101,\"message\":\"未登录\"}"));
+        return;
+    }
+
+    // web-ucenter 接口本就是 Web 端使用，带 cookie 即可（无需 App 签名）。
+    // platform=pc 为必带参数（不带时服务器返回空数据）；
+    // room_id 必须为真实房间号（非短号），调用方已保证
+    QString url = QString("https://api.live.bilibili.com/xlive/web-ucenter/v2/emoticon/GetEmoticons?platform=pc&room_id=%1")
+                      .arg(roomId);
+
+    QUrl qurl(url);
+    QNetworkRequest request(qurl);
+    request.setRawHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
+    request.setRawHeader("Referer", QString("https://live.bilibili.com/%1").arg(roomId).toUtf8());
+    request.setRawHeader("Accept", "application/json, text/plain, */*");
+    request.setRawHeader("Cookie", cookies.toUtf8());
+
+    QSslConfiguration config = QSslConfiguration::defaultConfiguration();
+    config.setPeerVerifyMode(QSslSocket::VerifyNone);
+    request.setSslConfiguration(config);
+
+    QNetworkReply *reply = m_networkManager->get(request);
+    connect(reply, &QNetworkReply::finished, this, [this, reply, roomId]() {
+        if (reply->error() != QNetworkReply::NoError) {
+            qWarning() << "[ApiManager] getLiveEmoticons network error room" << roomId
+                       << ":" << reply->errorString();
+            // 网络失败也发信号（code=-1），QML 侧据此结束"加载中"状态
+            emit liveEmoticonsReceived(QByteArray("{\"code\":-1,\"message\":\"network error: "
+                                                  + reply->errorString().toUtf8() + "\"}"));
+            reply->deleteLater();
+            return;
+        }
+        QByteArray data = reply->readAll();
+        qDebug() << "[ApiManager] getLiveEmoticons response:" << data.left(500);
+        emit liveEmoticonsReceived(data);
+        reply->deleteLater();
+    });
+}
+
 QString ApiManager::getCSRFToken()
 {
     QString cookies = LoginManager::instance()->getCookies();

@@ -69,6 +69,8 @@ signals:
     void liveStreamInfoReceived(const QByteArray &data);
     void liveRoomInfoReceived(const QByteArray &data);
     void liveDanmuInfoReceived(const QByteArray &data);
+    void liveDanmakuSendResult(const QByteArray &data);      // 发送弹幕（文字/表情）响应
+    void liveEmoticonsReceived(const QByteArray &data);      // 表情包列表响应
     void userUploadedVideosReceived(const QByteArray &data);
     void relatedVideosReceived(const QByteArray &data);
     void historyListReceived(const QByteArray &data);
@@ -99,6 +101,15 @@ public:
 
     // 上报直播观看记录（进入直播间时调用）
     Q_INVOKABLE void reportLiveHistory(const QString &roomId);
+
+    // ===== 直播间发送弹幕（Web 路线：cookie + csrf，经 /msg/send）=====
+    // 发送文字弹幕
+    Q_INVOKABLE void sendLiveDanmaku(const QString &roomId, const QString &text);
+    // 发送大表情弹幕（msg=emoticon_unique + dm_type/extra）
+    Q_INVOKABLE void sendLiveDanmakuEmoticon(const QString &roomId, const QString &emoticonUnique,
+                                             const QString &emoticonText);
+    // 获取直播间可用表情包列表（web-ucenter 接口，带 cookie）
+    Q_INVOKABLE void getLiveEmoticons(const QString &roomId);
 
     // WBI签名推荐API（与wiliwili一致）
     Q_INVOKABLE void getWbiRecommendVideos(int page = 1, int pageSize = 30, int freshType = 0, int xNum = 3, int yNum = 4);
@@ -142,6 +153,9 @@ private:
     QString getMustParameters();
     QString getCSRFToken();
     void getRequest(const QString &url);
+
+    // 直播弹幕发送：统一 POST 出口（带 cookie+csrf 的直播域请求）
+    void sendLiveDanmakuPost(const QString &url, const QUrlQuery &query, const QString &roomId);
 
     // 浏览器指纹生成（未登录时模拟 web 端指纹，避免 v_voucher 风控）
     static QString genBrowserUuid();

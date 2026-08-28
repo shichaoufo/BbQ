@@ -53,6 +53,28 @@ Rectangle {
     property bool loadFailed: false
     property string loadErrorMsg: ""
 
+    // ===== 发送弹幕 =====
+    // 发送中防抖：B 站限频 1条/秒，期间回车不再发请求
+    property bool _danmakuSending: false
+    // 表情包数据（GetEmoticons 响应）：[{pkgName, emoticons:[{unique, text, url}]}]
+    property var _emoticonPackages: []
+    // 平铺表情列表（面板渲染用，含 pkgName 供分类过滤）：[{unique, text, url, pkgName}]
+    property var _emoticonList: []
+    // 当前选中的分类（空串=尚未初始化，解析完成后默认选第一个包）
+    property string _emoticonFilter: ""
+    // 面板打开过一次后不再重复请求（同一房间会话内表情包不变）
+    property bool _emoticonsLoaded: false
+
+    // 分类过滤（绑定引用 _emoticonList/_emoticonFilter，二者变化自动重算）
+    function filteredEmoticons() {
+        if (_emoticonFilter === "") return _emoticonList
+        var out = []
+        for (var i = 0; i < _emoticonList.length; i++) {
+            if (_emoticonList[i].pkgName === _emoticonFilter) out.push(_emoticonList[i])
+        }
+        return out
+    }
+
     // 弹幕管理器由外部注入（LivePage 层级共享实例），不随 LivePlayerPage 销毁/重建。
     // 避免 QWebSocket（SSL 握手线程）频繁创建/销毁导致卡死。
     property var danmakuManager: null
@@ -90,15 +112,18 @@ Rectangle {
     function closePopups() {
         if (volumePopup.opened) volumePopup.close()
         if (danmakuPopup.opened) danmakuPopup.close()
+        if (emoticonPopup.opened) emoticonPopup.close()
     }
 
     // 自动隐藏豁免：鼠标悬停在控制栏区域内，或任一弹出面板/菜单
-    //（音量、弹幕设置、画质菜单，含面板内的下拉框）打开时，
-    // 控制栏与鼠标指针均不进入自动隐藏
+    //（音量、弹幕设置、画质菜单、表情面板，含面板内的下拉框）打开，
+    // 或弹幕输入框持有焦点（输入中）时，控制栏与鼠标指针均不进入自动隐藏
     function controlOverlayActive() {
         return controlBarHover.hovered
             || volumePopup.opened || danmakuPopup.opened
             || qualityMenu.opened
+            || danmakuInput.activeFocus
+            || emoticonPopup.opened
     }
 
     function showControls() {
@@ -106,6 +131,40 @@ Rectangle {
         root.cursorHidden = false
         hideControlsTimer.restart()
         hideCursorTimer.restart()
+    }
+
+    // ===== 发送弹幕 =====
+    // 前置校验：未登录直接提示，不发注定失败的请求
+    function sendLiveDanmaku(text) {
+        if (root._danmakuSending) return
+        var msg = (text || "").trim()
+        if (msg === "") return
+        if (!Login.isLoggedIn) {
+            scInfoBar.showWarning("请先登录后发送弹幕")
+            return
+        }
+        root._danmakuSending = true
+        Api.sendLiveDanmaku(String(root.roomId), msg)
+        // 1.2s 超时自复位（网络异常漏掉响应时不永久卡死）
+        _danmakuSendGuard.restart()
+    }
+
+    // 发送大表情弹幕（来自表情面板）
+    function sendLiveEmoticon(unique, text) {
+        if (root._danmakuSending) return
+        if (!Login.isLoggedIn) {
+            scInfoBar.showWarning("请先登录后发送弹幕")
+            return
+        }
+        root._danmakuSending = true
+        Api.sendLiveDanmakuEmoticon(String(root.roomId), unique, text)
+        _danmakuSendGuard.restart()
+    }
+
+    Timer {
+        id: _danmakuSendGuard
+        interval: 1200
+        onTriggered: root._danmakuSending = false
     }
 
     function toggleControls() {
@@ -484,6 +543,13 @@ Rectangle {
         // 5. 重置关注状态（新直播间需要重新获取）
         root.mid = ""
         root.isFollowing = false
+        // 6. 重置发送弹幕状态：新房间表情包重新拉取，输入框清空
+        root._emoticonsLoaded = false
+        root._emoticonPackages = []
+        root._emoticonList = []
+        root._emoticonFilter = ""
+        root._danmakuSending = false
+        danmakuInput.text = ""
 
         if (root.roomId !== "") {
             loadStream()
@@ -786,6 +852,88 @@ Rectangle {
         }
         function onLiveDanmuInfoReceived(data) {
             root.parseDanmuInfo(data)
+        }
+        // 发送弹幕响应（文字/表情共用）：code=0 成功，非 0 展示错误信息
+        function onLiveDanmakuSendResult(data) {
+            root._danmakuSending = false
+            _danmakuSendGuard.stop()
+            try {
+                var dataStr = typeof data === "string" ? data : data.toString()
+                var resp = JSON.parse(dataStr)
+                if (resp.code === 0) {
+                    // 成功后清空输入框；内容经服务端广播（DANMU_MSG）正常
+                    // 上屏显示，自己发的也会收到，无需本地回显
+                    danmakuInput.text = ""
+                } else {
+                    var errMsg = resp.message || ("错误码: " + resp.code)
+                    // -101 未登录/凭证失效：提示登录；其余直接透出后端信息
+                    if (resp.code === -101) errMsg = "请先登录后发送弹幕"
+                    scInfoBar.showWarning("发送失败: " + errMsg)
+                }
+            } catch (e) {
+                scInfoBar.showWarning("发送失败: 响应解析错误")
+            }
+        }
+        // 表情包列表响应。真实结构（实测）：data.data 为表情包数组，
+        // 每包含 emoticons 数组；表情项字段：emoticon_unique(发送标识)、
+        // emoji(触发词)、descript、url、perm(1=可发送)、width/height
+        function onLiveEmoticonsReceived(data) {
+            try {
+                var dataStr = typeof data === "string" ? data : data.toString()
+                var resp = JSON.parse(dataStr)
+                root._emoticonPackages = []
+                if (resp.code !== 0 || !resp.data) {
+                    // 失败也结束"加载中"状态并提示（下次打开面板会重新请求）
+                    root._emoticonsLoaded = true
+                    scInfoBar.showWarning("表情包加载失败: " + (resp.message || ("错误码: " + resp.code)))
+                    return
+                }
+                var pkgs = (resp.data && resp.data.data) ? resp.data.data : []
+                // 临时数组构建完毕后一次性赋值：property var 的重新赋值才
+                // 会触发视图模型重置；同时构建平铺列表供 GridView 渲染
+                var packages = []
+                var flat = []
+                for (var i = 0; i < pkgs.length; i++) {
+                    var pkg = pkgs[i]
+                    var emos = pkg["emoticons"] || []
+                    var list = []
+                    for (var j = 0; j < emos.length; j++) {
+                        var emo = emos[j]
+                        var unique = emo["emoticon_unique"] || ""
+                        var text = emo["emoji"] || emo["descript"] || ""
+                        if (unique === "" && text === "") continue
+                        // perm=1 所有人可发送；0 为锁定表情（需礼物/等级解锁）
+                        if (emo["perm"] !== undefined && emo["perm"] !== 1) continue
+                        // 黄豆类表情无 emoticon_unique：unique 留空，
+                        // 点击时走文字弹幕路径（网页端同款行为，[dog] 等
+                        // 触发词服务器会自动转为表情显示）
+                        var item = { unique: unique,
+                                     text: text,
+                                     // url 偶见被反引号包裹（异常数据），清洗掉
+                                     url: String(emo["url"] || "").replace(/`/g, ""),
+                                     pkgName: pkg["pkg_name"] || "" }
+                        list.push(item)
+                        flat.push(item)
+                    }
+                    if (list.length > 0) {
+                        packages.push({ pkgName: pkg["pkg_name"] || "", emoticons: list })
+                    }
+                }
+                root._emoticonPackages = packages
+                root._emoticonList = flat
+                // 默认选中第一个分类（无“全部”聚合视图）
+                if (packages.length > 0) {
+                    root._emoticonFilter = packages[0].pkgName
+                }
+                if (flat.length === 0) {
+                    console.warn("[LivePlayerPage] emoticons parsed empty, raw data head:",
+                                 dataStr.substring(0, 300))
+                }
+                root._emoticonsLoaded = true
+            } catch (e) {
+                console.warn("[LivePlayerPage] parse emoticons failed:", e)
+                root._emoticonsLoaded = true
+            }
         }
         function onErrorOccurred(error) {
             console.warn("[LivePlayerPage] API error:", error)
@@ -1423,9 +1571,14 @@ Rectangle {
         }
 
         RowLayout {
-            anchors.fill: parent
+            // 按钮行贴底对齐：渐变衬底高度大于按钮行时，垂直居中会把
+            // 按钮整体抬离底部，这里改为锚定底边、固定为控制栏行高
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.bottom: parent.bottom
             anchors.leftMargin: Theme.spacingMedium
             anchors.rightMargin: Theme.spacingMedium
+            height: Theme.liveControlBarHeight
             spacing: Theme.spacingMedium
 
             FluIconButton {
@@ -1442,6 +1595,74 @@ Rectangle {
             }
 
             Item { Layout.fillWidth: true }
+
+            // ===== 弹幕输入框（FluTextBox 定制深色样式）=====
+            // 文字保留：仅发送成功才 clear（见 onLiveDanmakuSendResult），
+            // 失焦/控制栏隐藏都不清空；输入中经 controlOverlayActive()
+            // 豁免自动隐藏。样式覆盖仅此实例，不影响全局主题。
+            // 小窗模式（480px）空间不足，隐藏
+            FluTextBox {
+                id: danmakuInput
+                visible: !root.isMiniWindow
+                Layout.preferredWidth: 220
+                Layout.maximumWidth: 260
+                Layout.alignment: Qt.AlignVCenter
+                placeholderText: "发个弹幕见证当下"
+                font: FluTextStyle.Caption
+                iconSource: FluentIcons.Send   // 输入框内右侧发送提示（Enter 发送）
+                cleanEnabled: true             // 非空时自动显示清空键（组件内置）
+                maximumLength: 40              // B 站直播弹幕长度限制
+                // 深色半透明定制（仅此实例，不影响全局主题）：
+                // 文字白色（normalColor 为组件公有属性），
+                // 底色半透明黑 + 细白边，聚焦时主题色描边
+                normalColor: "white"
+                placeholderNormalColor: "#99FFFFFF"
+                placeholderFocusColor: "#99FFFFFF"
+                background: Rectangle {
+                    implicitHeight: 30
+                    radius: 4
+                    color: danmakuInput.activeFocus ? "#59000000" : "#40000000"
+                    border.width: 1
+                    border.color: danmakuInput.activeFocus
+                                   ? FluTheme.primaryColor : "#33FFFFFF"
+                }
+                onCommit: (text) => root.sendLiveDanmaku(text)
+                Keys.onPressed: (event) => {
+                    // 中文输入法组合期间回车是"上屏候选词"，
+                    // Qt 已处理，这里无需干预；Esc 交还焦点
+                    if (event.key === Qt.Key_Escape) {
+                        danmakuInput.focus = false
+                        event.accepted = true
+                    }
+                }
+            }
+
+            // 表情按钮：弹出表情面板（大表情发送）。小窗模式下隐藏
+            FluIconButton {
+                id: emoticonBtn
+                visible: !root.isMiniWindow
+                iconSource: FluentIcons.Emoji2
+                iconSize: Theme.iconSizeMedium
+                iconColor: "white"
+                hoverColor: "#26FFFFFF"
+                pressedColor: "#40FFFFFF"
+                Layout.alignment: Qt.AlignVCenter
+                onClicked: {
+                    var wasOpen = emoticonPopup.opened
+                    closePopups()
+                    if (!wasOpen) {
+                        if (!root._emoticonsLoaded) {
+                            if (Login.isLoggedIn) {
+                                Api.getLiveEmoticons(String(root.roomId))
+                            } else {
+                                scInfoBar.showWarning("请先登录后发送弹幕")
+                                return
+                            }
+                        }
+                        emoticonPopup.open()
+                    }
+                }
+            }
 
             FluIconButton {
                 id: volumeBtn
@@ -1575,6 +1796,216 @@ Rectangle {
                 onClicked: {
                     closePopups()
                     root.closeRequested()
+                }
+            }
+        }
+    }
+
+    // 表情面板：GridView 统一网格 + FluScrollBar 滚动 + Pivot 风格分类栏。
+    // （FluPivot 的 tab 集合是静态子项，不支持按房间动态生成分类，
+    //  故分类栏按 Pivot 视觉规范手绘：主题色下划线高亮 + 悬停变色）
+    Popup {
+        id: emoticonPopup
+        parent: emoticonBtn
+        width: 360
+        height: 340
+        x: (parent.width - width) / 2
+        y: -height - 10
+        modal: false
+        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutsideParent
+        padding: 10
+        background: Rectangle {
+            radius: 6
+            color: "#2B2B2B"
+            border.width: 1
+            border.color: "#3A3A3A"
+        }
+
+        contentItem: Column {
+            spacing: 0
+
+            // ===== 分类栏（Pivot 风格）=====
+            Item {
+                id: emoTabContainer
+                width: parent.width
+                height: 34
+                visible: root._emoticonPackages.length > 1
+                // 滑动下划线的目标位置/宽度（由激活的 tab 项上报）
+                property real indicatorX: 0
+                property real indicatorW: 0
+                property Item activeTabItem: null
+
+                // 选中项主题色下划线：单一实例横移切换（Pivot 同款动效）
+                Rectangle {
+                    height: 3
+                    radius: 1.5
+                    y: parent.height - 3
+                    x: emoTabContainer.indicatorX
+                    width: emoTabContainer.indicatorW
+                    color: FluTheme.primaryColor
+                    visible: emoTabContainer.activeTabItem !== null
+
+                    Behavior on x {
+                        NumberAnimation { duration: 200; easing.type: Easing.OutCubic }
+                    }
+                    Behavior on width {
+                        NumberAnimation { duration: 200; easing.type: Easing.OutCubic }
+                    }
+                }
+
+                // 分类横向列表：超出宽度可拖动滚动
+                ListView {
+                    id: emoTabBar
+                    anchors.fill: parent
+                    orientation: ListView.Horizontal
+                    clip: true
+                    interactive: true
+                    boundsBehavior: Flickable.StopAtBounds
+                    spacing: 16
+                    // 分类项：各表情包名（黄豆包 pkg_name 固定为 "emoji"，
+                    // 通用/UP主/房间专属等为中文包名，由服务器返回）
+                    model: root._emoticonPackages.map(function(p) { return p.pkgName })
+                    // 列表横向拖动后下划线需跟随重算位置
+                    onContentXChanged: {
+                        if (emoTabContainer.activeTabItem) {
+                            var pos = emoTabContainer.activeTabItem.mapToItem(emoTabContainer, 0, 0)
+                            emoTabContainer.indicatorX = pos.x
+                            emoTabContainer.indicatorW = emoTabContainer.activeTabItem.width
+                        }
+                    }
+
+                    delegate: Item {
+                        id: emoTabItem
+                        width: emoTabText.width
+                        height: emoTabBar.height
+                        property bool activeTab: modelData === root._emoticonFilter
+
+                        function updateIndicator() {
+                            if (!emoTabItem.activeTab) return
+                            emoTabContainer.activeTabItem = emoTabItem
+                            var pos = emoTabItem.mapToItem(emoTabContainer, 0, 0)
+                            emoTabContainer.indicatorX = pos.x
+                            emoTabContainer.indicatorW = emoTabItem.width
+                        }
+
+                        onActiveTabChanged: updateIndicator()
+                        Component.onCompleted: updateIndicator()
+                        // 声明周期：激活项被销毁时清除引用，避免悬空
+                        Component.onDestruction: {
+                            if (emoTabContainer.activeTabItem === emoTabItem)
+                                emoTabContainer.activeTabItem = null
+                        }
+
+                        FluText {
+                            id: emoTabText
+                            anchors.centerIn: parent
+                            text: modelData
+                            font: FluTextStyle.Body
+                            color: {
+                                if (emoTabItem.activeTab) return FluTheme.primaryColor
+                                if (emoTabMouse.containsMouse) return FluTheme.dark ? "#BFBFBF" : "#8A8A8A"
+                                return "#9E9E9E"
+                            }
+                        }
+
+                        MouseArea {
+                            id: emoTabMouse
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: root._emoticonFilter = modelData
+                        }
+                    }
+                }
+            }
+
+            // ===== 表情网格 =====
+            Item {
+                width: parent.width
+                height: parent.height - (parent.children[0].visible ? 34 : 0)
+
+                // 空/加载中占位
+                FluText {
+                    visible: root._emoticonList.length === 0
+                    anchors.centerIn: parent
+                    text: root._emoticonsLoaded ? "本房间暂无可用表情" : "加载中..."
+                    font: FluTextStyle.Caption
+                    color: "#999999"
+                }
+
+                GridView {
+                    id: emoGrid
+                    anchors.fill: parent
+                    visible: root._emoticonList.length > 0
+                    clip: true
+                    cellWidth: 48
+                    cellHeight: 48
+                    model: root.filteredEmoticons()
+                    boundsBehavior: Flickable.StopAtBounds
+
+                    ScrollBar.vertical: FluScrollBar {
+                        policy: ScrollBar.AsNeeded
+                    }
+
+                    delegate: Item {
+                        width: emoGrid.cellWidth
+                        height: emoGrid.cellHeight
+
+                        Rectangle {
+                            anchors.fill: parent
+                            anchors.margins: 2
+                            radius: 4
+                            color: emoMouse.containsMouse ? "#40FFFFFF" : "transparent"
+                        }
+
+                        Image {
+                            id: emoImage
+                            anchors.centerIn: parent
+                            width: 36
+                            height: 36
+                            source: modelData.url
+                            fillMode: Image.PreserveAspectFit
+                            asynchronous: true
+                            cache: true
+                        }
+
+                        // 图片加载失败/URL 为空时降级显示触发词文本
+                        // （发送凭 unique/触发词，不依赖图 URL 可用）
+                        FluText {
+                            anchors.centerIn: parent
+                            visible: emoImage.status !== Image.Ready
+                            text: modelData.text
+                            font.pixelSize: 10
+                            color: "#CCCCCC"
+                        }
+
+                        MouseArea {
+                            id: emoMouse
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: {
+                                // 黄豆 emoji 包（pkg_name 固定为 "emoji"）：插入
+                                // 输入框与文字混合编辑，回车一起发送（网页端同款；
+                                // 此类表情 emoticon_unique 也非空，不能凭 unique 判断）
+                                if (modelData.pkgName === "emoji") {
+                                    var cur = danmakuInput.text
+                                    // 40 字上限（触发词按字符数计）
+                                    if (cur.length + modelData.text.length <= 40) {
+                                        danmakuInput.text = cur + modelData.text
+                                        danmakuInput.cursorPosition = danmakuInput.text.length
+                                        // 面板保持打开便于连续插入多个 emoji；
+                                        // 点击面板外自然关闭
+                                        danmakuInput.forceActiveFocus()
+                                    }
+                                } else {
+                                    // 大表情（通用/UP主/房间专属等）：点击即发送
+                                    emoticonPopup.close()
+                                    root.sendLiveEmoticon(modelData.unique, modelData.text)
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
