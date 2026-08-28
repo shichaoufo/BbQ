@@ -43,6 +43,10 @@ find_package(Qt6 REQUIRED COMPONENTS
     QuickEffects
 )
 
+# GuiPrivate：DanmakuCanvas 图集路径使用 QRhi private API（见下方链接处注释）。
+# Qt 6.11 起 Gui 的 cmake 配置不再隐式加载 private target，必须显式声明
+find_package(Qt6 REQUIRED COMPONENTS GuiPrivate)
+
 find_package(Qt6 COMPONENTS
     Core5Compat
     Quick5Compat
