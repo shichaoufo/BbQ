@@ -1061,6 +1061,10 @@ Rectangle {
                                           batch[i].emoticons || [])
         }
         function onSuperChatReceived(username, face, message, price, scTime, bgColor, bgBottomColor) {
+            // 小窗模式下不显示 SC：banner 挂在主窗口 Overlay 上，不随播放器
+            // reparent，小窗期间显示会飘在小窗的错误位置（进小窗时的清理
+            // 只兜底"进小窗前已在显示"的，这里的 return 挡住小窗期间新到的 SC）
+            if (root.isMiniWindow) return
             root._scQueue.push({ username: username, face: face, message: message,
                                  price: price, bgColor: bgColor, bgBottomColor: bgBottomColor })
             scInfoBar.showCustom(scBannerComponent, scTime * 1000)
