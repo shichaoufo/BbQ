@@ -318,13 +318,12 @@ void PlayUrlManager::getPlayUrl(const QString &aid, const QString &cid, int qual
 
 void PlayUrlManager::resetConnectionState()
 {
-    // 关闭视频时调用：清空两个 QNAM 的空闲连接池，下次请求走全新 TCP/TLS 连接。
-    // 依据：480P 降级绑定连接层（重启客户端必恢复，凭据沿用旧值）。
-    // 顺带清掉单条播放缓存，避免重开同一视频命中降级期的旧结果。
+    // 关闭视频时调用：清空 m_networkManager 的空闲连接池，下次请求走全新
+    // TCP/TLS 连接。依据：480P 降级绑定连接层（重启客户端必恢复，凭据沿用旧值）。
+    // playerDetail 系列请求已改用一次性 QNAM（每次请求新建/销毁），
+    // 无需在此清池。顺带清掉单条播放缓存，避免重开同一视频命中降级期的旧结果。
     qDebug() << "[PlayUrlManager] resetConnectionState - clearing HTTP connection cache";
     m_networkManager->clearConnectionCache();
-    if (m_playerDetailManager)
-        m_playerDetailManager->clearConnectionCache();
     LoginManager::instance()->resetHttpConnections();
     m_hasCachedResult = false;
     m_cachedCid.clear();
@@ -1905,24 +1904,23 @@ void PlayUrlManager::getPlayerDetailImpl(const QString &aid, const QString &cid,
         }
     }
 
-    // 独立 QNAM：与 playurl 完全隔离连接池。wbi/v2 带 Cookie 成功后连接会被
-    // 服务端风控标记，若与 playurl 共池，后续 playurl 复用该连接会被按游客
-    // 处理（最高 480P）——实测：wbi/v2 200 后下一视频 480P，wbi/v2 被 412
-    // （连接废弃）后 playurl 反而全清晰度。
-    // legacy 走浏览器风格专用池（m_historyProgressManager），避免复用刚被
-    // 风控标记/按游客处理的 wbi/v2 连接
-    QNetworkAccessManager *manager = nullptr;
-    if (useLegacyEndpoint) {
-        if (!m_historyProgressManager)
-            m_historyProgressManager = new QNetworkAccessManager(this);
-        manager = m_historyProgressManager;
-    } else {
-        if (!m_playerDetailManager)
-            m_playerDetailManager = new QNetworkAccessManager(this);
-        manager = m_playerDetailManager;
-    }
+    // 一次性 QNAM：每次请求新建网络管理器，请求结束后连同 reply 一起销毁。
+    // 之前的方案（共享池 + 每次请求前 clearConnectionCache()）无法保证新连接：
+    //   1. clearConnectionCache 只能关闭"已归还到缓存"的空闲连接，而连接在
+    //      reply finished 后是异步归还缓存的，降级链中紧接着发起的下一次请求
+    //      （guest 重试 / legacy 补救）可能复用尚未归还、已被服务端标记的
+    //      连接，被静默按游客处理（HTTP 200 + last_play_time=0），表现为
+    //      "启动后只有第一个视频能恢复历史进度"；
+    //   2. api.bilibili.com 支持 HTTP/2，同池连接多路复用，清缓存行为更不可控；
+    //   3. history/cursor 兜底路径此前完全没清缓存，且与 legacy 共池。
+    // 一次性 QNAM 物理上杜绝连接复用（含 TLS 会话复用），是根治手段；
+    // playurl 仍走 m_networkManager 共享池，480P 隔离不受影响
+    QNetworkAccessManager *manager = new QNetworkAccessManager(this);
     QNetworkReply *reply = manager->get(request);
-    connect(reply, &QNetworkReply::finished, this, [this, reply, aid, cid, bvid, asGuest, useLegacyEndpoint, fallbackViewPoints]() {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, manager, aid, cid, bvid, asGuest, useLegacyEndpoint, fallbackViewPoints]() {
+        // 一次性 QNAM：控制权回到事件循环后销毁（reply 是 manager 的子对象，
+        // 会一起清理；lambda 内后续对 reply 的读取不受影响）
+        manager->deleteLater();
         // 412 风控分层降级：
         //   wbi/v2+Cookie 412 → 游客重试（章节游客也返回）
         //   游客也 412        → 老 /x/player/v2 + Cookie（浏览器风格头）
@@ -1969,6 +1967,14 @@ void PlayUrlManager::getPlayerDetailImpl(const QString &aid, const QString &cid,
         QJsonDocument doc = QJsonDocument::fromJson(data);
         if (!doc.isObject()) {
             qWarning() << "[PlayUrlManager] player/wbi/v2 invalid JSON, size:" << data.size();
+            // 失败也 emit 空进度 + 透传章节：保证 QML 侧总能收到 playerDetailReady
+            QVariantMap failDetail;
+            failDetail["aid"] = aid;
+            failDetail["cid"] = cid;
+            failDetail["lastPlayTime"] = 0;
+            failDetail["lastPlayCid"] = "";
+            failDetail["viewPoints"] = fallbackViewPoints;
+            emit playerDetailReady(failDetail);
             reply->deleteLater();
             return;
         }
@@ -1981,6 +1987,16 @@ void PlayUrlManager::getPlayerDetailImpl(const QString &aid, const QString &cid,
             // HTTP 200 + JSON code:-412 也是风控（B 站常见形态），同样走降级链
             if (apiCode == -412) {
                 handleBanned();
+            } else {
+                // 其他 API 错误（如 -404/-101）：同样 emit 空进度 + 透传章节，
+                // 失败路径必须发完成信号，避免 QML 侧挂等
+                QVariantMap failDetail;
+                failDetail["aid"] = aid;
+                failDetail["cid"] = cid;
+                failDetail["lastPlayTime"] = 0;
+                failDetail["lastPlayCid"] = "";
+                failDetail["viewPoints"] = fallbackViewPoints;
+                emit playerDetailReady(failDetail);
             }
             reply->deleteLater();
             return;
@@ -2035,13 +2051,28 @@ void PlayUrlManager::getPlayerDetailImpl(const QString &aid, const QString &cid,
         qWarning() << "[PlayUrlManager] playerDetail:" << "lastPlayTime=" << lastPlayTime
                  << "lastPlayCid=" << lastPlayCid;
 
-        // 游客重试成功：登录态的历史进度被游客身份丢掉（last_play_time 仅
-        // 登录 Cookie 请求返回）。先走老 /x/player/v2 + Cookie 补救（同源数据，
-        // 端点/请求特征不同，被连带风控的概率低）；viewPoints 一并传递，
-        // 避免降级 emit 把 QML 侧章节覆盖为空
-        if (asGuest && lastPlayTime == 0) {
-            qWarning() << "[PlayUrlManager] guest got no progress, trying legacy /x/player/v2 with cookies";
+        // 拿到 0 进度的两种情形都补救（last_play_time 仅登录 Cookie 请求返回）：
+        //   1. 游客重试成功：登录态历史进度被游客身份丢掉
+        //   2. 带 Cookie 却被静默按游客处理：复用连接被标记的另一形态
+        //      （非 412、HTTP 200，与 480P 风控同源）
+        // 两者都先走老 /x/player/v2 + Cookie 补救（同源数据、独立连接池、
+        // 浏览器风格头，被连带风控的概率低）；viewPoints 一并传递，避免降级
+        // emit 把 QML 侧章节覆盖为空。legacy 路径自身除外，防止循环重试
+        if (lastPlayTime == 0 && !useLegacyEndpoint) {
+            qWarning() << "[PlayUrlManager] no progress (guest-degraded?), trying legacy /x/player/v2 with cookies";
             getPlayerDetailImpl(aid, cid, bvid, false, true, viewPointsList);
+            reply->deleteLater();
+            return;
+        }
+
+        // legacy 补救也拿到 0：这是"带 Cookie 却被静默按游客处理"的最后一种
+        // 形态（非 412、HTTP 200、last_play_time=0）。此前这里直接放弃导致
+        // 第二个视频从头播放；现在落到 history/cursor 最终兜底（与历史列表
+        // 页同源，登录态数据最可靠）。history/cursor 不会再回调
+        // getPlayerDetailImpl，链路在此终结，无循环风险
+        if (lastPlayTime == 0 && useLegacyEndpoint) {
+            qWarning() << "[PlayUrlManager] legacy /x/player/v2 still no progress, falling back to history/cursor";
+            getHistoryProgress(aid, cid, viewPointsList);
             reply->deleteLater();
             return;
         }
@@ -2086,12 +2117,13 @@ void PlayUrlManager::fetchHistoryCursorPage(const QString &aid, const QString &c
     qWarning() << "[PlayUrlManager] history/cursor page" << page << "request:" << params
              << "cookieLen:" << cookies.size();
 
-    // 浏览器风格专用 QNAM（m_historyProgressManager）：不复用 m_playerDetailManager，
-    // 避免搭上刚被风控 412/按游客处理的连接
-    if (!m_historyProgressManager)
-        m_historyProgressManager = new QNetworkAccessManager(this);
-    QNetworkReply *reply = m_historyProgressManager->get(request);
-    connect(reply, &QNetworkReply::finished, this, [this, reply, aid, cid, viewPoints, page]() {
+    // 一次性 QNAM：每页请求新建网络管理器，用完连同 reply 一起销毁，
+    // 物理上杜绝复用被服务端标记的连接（与 getPlayerDetailImpl 同一策略）
+    QNetworkAccessManager *manager = new QNetworkAccessManager(this);
+    QNetworkReply *reply = manager->get(request);
+    connect(reply, &QNetworkReply::finished, this, [this, reply, manager, aid, cid, viewPoints, page]() {
+        // 一次性 QNAM：控制权回到事件循环后销毁（reply 是其子对象）
+        manager->deleteLater();
         // 失败时也 emit（lastPlayTime=0 + 透传章节）：保证 QML 侧总能收到
         // playerDetailReady，章节不因降级失败而丢失
         QVariantMap failDetail;

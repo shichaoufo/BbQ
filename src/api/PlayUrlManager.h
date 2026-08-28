@@ -444,12 +444,12 @@ private:
     QVariantMap qualityInfoToMap(const QualityInfo &info) const;
 
     QNetworkAccessManager *m_networkManager;
-    // player/wbi/v2（章节/历史进度）专用 QNAM：与 playurl 隔离连接池。
-    // 该接口易被风控标记连接，复用共享连接池会把 playurl 拖累成游客 480P
-    QNetworkAccessManager *m_playerDetailManager = nullptr;
-    // 浏览器风格降级请求（老 /x/player/v2、history/cursor）专用 QNAM：
-    // 独立连接池，避免复用 m_playerDetailManager 里刚被风控标记/按游客处理的连接
-    QNetworkAccessManager *m_historyProgressManager = nullptr;
+    // 注意：player/wbi/v2（章节/历史进度）与 legacy /x/player/v2、history/cursor
+    // 降级链路不再使用共享 QNAM——共享池 + clearConnectionCache 无法保证新连接
+    // （连接在 reply finished 后异步归还缓存，紧接的下一次请求可能复用被服务端
+    // 标记的连接，被静默按游客处理）。这些请求改用一次性 QNAM（每次请求新建，
+    // 用完销毁），见 getPlayerDetailImpl / fetchHistoryCursorPage。
+    // m_networkManager 仅供 playurl 等共享路径使用，维持 480P 隔离
     QList<QualityInfo> m_qualityList;
     QMap<QString, QString> m_playUrls;
     QMap<QString, QString> m_userUploadCursorMap;  // mid -> lastAid，APP 投稿游标分页
