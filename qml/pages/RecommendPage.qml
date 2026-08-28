@@ -471,5 +471,14 @@ Rectangle {
         function onWbiRecommendVideosReceived(data) {
             root.appendApiData(data)
         }
+        // 断网等网络错误时 Api 只发 errorOccurred 不发数据信号，
+        // 不复位 recommendLoading 会让 refresh() 的 loading 守卫永久卡死
+        //（只能重启客户端）。hasMore=false 防止 fillTimer 断网时无限自动重试
+        function onErrorOccurred(error) {
+            console.warn("[RecommendPage] API error:", error)
+            if (!GlobalState.recommendLoading) return
+            GlobalState.recommendLoading = false
+            GlobalState.recommendHasMore = false
+        }
     }
 }

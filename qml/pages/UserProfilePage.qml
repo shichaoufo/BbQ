@@ -352,6 +352,14 @@ Rectangle {
                 pageRoot.videoHasMore = false
             }
         }
+        // 断网等网络错误时 Api 只发 errorOccurred 不发数据信号，
+        // 不复位 videoLoading 会让加载更多的守卫永久卡死，且占位转圈常驻
+        function onErrorOccurred(error) {
+            console.warn("[UserProfilePage] API error:", error)
+            if (!pageRoot.videoLoading) return
+            pageRoot.videoLoading = false
+            pageRoot.videoHasMore = false
+        }
     }
 
     // 关注状态返回

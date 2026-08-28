@@ -3631,6 +3631,14 @@ FluPage {
             if (!dynamic_page.visible) return
             dynamic_page.parseDynamicDetail(data)
         }
+        // 断网等网络错误时 Api 只发 errorOccurred 不发数据信号，loading 卡死
+        // 会让刷新按钮的 !loading 守卫永久失效（只能重启）
+        function onErrorOccurred(error) {
+            console.warn("[DynamicPage] API error:", error)
+            if (!dynamic_page.loading) return
+            dynamic_page.loading = false
+            dynamic_page.hasMore = false
+        }
     }
 
     Connections {

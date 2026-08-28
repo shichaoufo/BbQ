@@ -1358,6 +1358,18 @@ FluPage {
         function onSearchSuggestReceived(words) {
             search_page._applySuggestWords(words)
         }
+        // 断网等网络错误时 Api 只发 errorOccurred 不发数据信号，
+        // 不复位 loading 会让 appendSearchResults 的 loading 守卫永久卡死
+        function onErrorOccurred(error) {
+            console.warn("[SearchPage] API error:", error)
+            if (!search_page.loading) return
+            search_page.loading = false
+            search_page.hasMore = false
+            // 打断 _startSearch 的重复搜索拦截：失败请求的 requestId 永远停在
+            // pending 状态，不清零的话恢复网络后再搜同一关键词会被当作
+            // "重复提交"直接丢弃（表现：永远提示"没有找到相关内容"）
+            search_page._lastCommittedRequestId = 0
+        }
     }
 
     // ====== 页面主容器（FluFrame，与 HomePage/HistoryPage 保持一致的外框样式） ======

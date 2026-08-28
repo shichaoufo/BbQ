@@ -23,6 +23,14 @@ FluPage {
         function onHistoryListReceived(data) {
             history_page.appendHistoryData(data)
         }
+        // 断网等网络错误时 Api 只发 errorOccurred 不发数据信号，
+        // 不复位 loading 会让 loadMore 的 loading 守卫永久卡死（只能重启）
+        function onErrorOccurred(error) {
+            console.warn("[HistoryPage] API error:", error)
+            if (!history_page.loading) return
+            history_page.loading = false
+            history_page.hasMore = false
+        }
     }
 
     property bool videoVisible: false

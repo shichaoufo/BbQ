@@ -482,6 +482,14 @@ Rectangle {
                     if (catView.category !== "weekly") return
                     catView.appendWeeklyListData(data)
                 }
+                // 断网等网络错误时 Api 只发 errorOccurred 不发数据信号，
+                // 不复位 loading 会让 refresh() 的 loading 守卫永久卡死
+                function onErrorOccurred(error) {
+                    console.warn("[HotPage] API error:", error)
+                    if (!catView.loading) return
+                    catView.loading = false
+                    catView.setHasMore(false)
+                }
             }
         }
     }
