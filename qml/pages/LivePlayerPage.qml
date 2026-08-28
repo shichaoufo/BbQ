@@ -1264,18 +1264,28 @@ Rectangle {
     }
 
     // 顶部渐变阴影 + 直播标题
-    // 阴影高度独立于文字区：文字区之下再延伸 40px，渐变消失点下移，
-    // 保证标题/主播名/观看人数下有足够的深色背景衬托
+    // 阴影高度独立于文字区：文字区之下再延伸 110px，为渐变提供足够的
+    // 竖直空间展开。渐变 alpha 严格线性衰减（0.8 → 0，每 10% 一档）：
+    // 白背景下人眼感知的是灰度（1-alpha），线性 alpha 即均匀的灰度坡，
+    // 中段不额外压暗、尾段不加速，避免渐变被读成一块边界清晰的"条带"
     Rectangle {
         id: topBar
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.top: parent.top
-        height: titleColumn.height + Theme.spacingMedium * 2 + 40
+        height: titleColumn.height + Theme.spacingMedium * 2 + 110
         gradient: Gradient {
-            GradientStop { position: 0.0; color: "#CC000000" }
-            GradientStop { position: 0.45; color: "#CC000000" }
-            GradientStop { position: 1.0; color: "transparent" }
+            GradientStop { position: 0.00; color: "#CC000000" }
+            GradientStop { position: 0.10; color: "#B8000000" }
+            GradientStop { position: 0.20; color: "#A3000000" }
+            GradientStop { position: 0.30; color: "#8F000000" }
+            GradientStop { position: 0.40; color: "#7A000000" }
+            GradientStop { position: 0.50; color: "#66000000" }
+            GradientStop { position: 0.60; color: "#52000000" }
+            GradientStop { position: 0.70; color: "#3D000000" }
+            GradientStop { position: 0.80; color: "#29000000" }
+            GradientStop { position: 0.90; color: "#14000000" }
+            GradientStop { position: 1.00; color: "#00000000" }
         }
         opacity: root.controlsVisible ? 1 : 0
         // 不能直接绑 controlsVisible：enabled 瞬间翻false会立刻抽掉按钮的
@@ -1360,21 +1370,33 @@ Rectangle {
     }
 
     // 控制栏
+    // 高度 = 按钮行（liveControlBarHeight）+ 上方 55px 纯渐变区：渐变
+    // 铺展在更多像素上，与顶部标题栏对称。按钮行锚定底部（见 RowLayout），
+    // 视觉位置不变；55px 渐变区同时充当按钮上方的"悬停保持"缓冲区
+    // （悬停在按钮附近即保持控制栏不隐藏）
+    // 渐变 alpha 严格线性上升（0 → 0.8，每 10% 一档），白背景下灰度坡
+    // 均匀，无可见边界（与顶部标题栏同一套曲线，仅方向镜像）
     // radius 使底部两角为圆角（与视频播放页控制栏一致）；顶部两角处于
-    // 渐变透明区（顶部不透明度仅 0~12%），圆角裁切不可见，视觉上等效
-    // "仅底部圆角"
-    // 渐变：后 45% 保持 80% 黑，让按钮深色衬底更早开始、覆盖整行控件
+    // 渐变全透明区，圆角裁切不可见
     Rectangle {
         id: controlBar
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.bottom: parent.bottom
-        height: Theme.liveControlBarHeight
+        height: Theme.liveControlBarHeight + 55
         radius: 6
         gradient: Gradient {
-            GradientStop { position: 0.0; color: "transparent" }
-            GradientStop { position: 0.55; color: "#CC000000" }
-            GradientStop { position: 1.0; color: "#CC000000" }
+            GradientStop { position: 0.00; color: "#00000000" }
+            GradientStop { position: 0.10; color: "#14000000" }
+            GradientStop { position: 0.20; color: "#29000000" }
+            GradientStop { position: 0.30; color: "#3D000000" }
+            GradientStop { position: 0.40; color: "#52000000" }
+            GradientStop { position: 0.50; color: "#66000000" }
+            GradientStop { position: 0.60; color: "#7A000000" }
+            GradientStop { position: 0.70; color: "#8F000000" }
+            GradientStop { position: 0.80; color: "#A3000000" }
+            GradientStop { position: 0.90; color: "#B8000000" }
+            GradientStop { position: 1.00; color: "#CC000000" }
         }
         opacity: root.controlsVisible ? 1 : 0
         // 同 topBar：跟随 opacity 而非 controlsVisible，避免 enabled 瞬间
