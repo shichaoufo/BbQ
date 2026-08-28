@@ -111,6 +111,10 @@ private:
     // 会频繁错过边界，呈现节奏 ±1 vsync 抖动；放宽到 8ms 换取呈现节奏
     // 稳定，代价仅为一拍内 3ms 的额外显示延迟（无感）。
     static constexpr qint64 kArmLeadNs = 8000000;
+    // arm 尾部安全余量：短间隔档（8.33ms@240Hz+120fps）的提前量取
+    // interval − kArmTailNs，0.8ms 足以隔开相邻 tick 链（定时器到期 →
+    // update → 下一拍 arm），既避免重叠又不浪费预算
+    static constexpr qint64 kArmTailNs = 800000;
     // 空转停跳阈值：既无订阅者要帧、也无人 poke 的持续时长
     static constexpr qint64 kIdleStopNs = 250000000;
     // 启用节流的最低刷新率（60Hz 屏走原链，零回归）

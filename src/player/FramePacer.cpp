@@ -221,17 +221,21 @@ void FramePacer::tick()
 void FramePacer::arm()
 {
     // 短间隔场景（如 240Hz 屏 + 120fps 视频，interval 仅 8.33ms）：提前量
-    // 收缩到间隔 2/3，保证 tick 链自洽（update 发出后仍有 ≥1/3 间隔的渲染
-    // 裕量），否则提前量吃满间隔会每拍错过边界。取 2/3 而非 1/2：120/240Hz
-    // + 60fps 视频的 interval=16.67ms 档位，1/2 收缩后 lead 仅 8.3ms，
-    // 偶发管线尖峰（事件循环阻塞 3~5ms + 渲染 2~4ms）会令提交越过认领
-    // vblank——迟到帧被挤压成短帧，即用户感知的偶发跳帧；2/3（11.1ms）
-    // 多让出 2.8ms 裕量，显著降低迟到概率（迟到的残余影响由认领的
-    // present-time feedback 兜底吸收，见 DanmakuCanvas::presentationMs）
+    // 收缩到"间隔 − kArmTailNs"，即 update 发出后至少留出尾部余量，保证
+    // tick 链自洽（update 发出后仍有渲染裕量），否则提前量吃满间隔会每拍
+    // 错过边界。此前取 2/3：interval=8.33ms 时 lead 仅 5.55ms，GUI 分发
+    // 偶发阻塞 3~5ms + 渲染 2~4ms 即令提交越过目标 vblank——迟到帧被
+    // 挤压成短帧，即用户感知的偶发弹幕抖动（方案 1，2026-08-28 调整）。
+    // "间隔 − 0.8ms"在 8.33ms 档把分发+渲染预算从 5.55ms 提到 7.5ms，
+    // 16.67ms 档从 11.1ms 提到 15.9ms；余量 0.8ms 足以隔开相邻 tick
+    //（定时器到期 → update → 下一拍 arm 之间的最小链路），不会重叠。
+    // 间隔不足 1.6ms 的极端档退回 2/3（interval<2×tail 时减法会自噬）
     qint64 leadNs = kArmLeadNs;
     const qint64 interval = m_intervalNs.load(std::memory_order_relaxed);
     if (interval > 0)
         leadNs = qMin(leadNs, interval * 2 / 3);
+    if (interval > 2 * kArmTailNs)
+        leadNs = qMax(leadNs, interval - kArmTailNs);
     qint64 delayNs = (m_nextBoundaryNs - leadNs) - m_clock.nsecsElapsed();
     if (delayNs < 100000)
         delayNs = 100000;   // 0.1ms 下限（int 毫秒粒度的保护）

@@ -377,7 +377,12 @@ private:
     int   m_outlineStyle = 0;  ///< 0=描边 1=重墨 2=45°投影（B站网页端三档）
 
     static constexpr int kMaxSlots = 400;   ///< 同屏弹幕硬上限
-    static constexpr int kMaxActivationsPerFrame = 6;  ///< 单帧纹理激活预算（防高峰尖刺帧）
+    // 单帧纹理激活预算（防高峰尖刺帧）。2026-08-28 由 6 收紧到 3：高刷节流
+    // 档的同步阶段预算最紧（240Hz+120fps 档提前量后仅 ~7.5ms），密集期
+    // 一帧烘焙 6 条弹幕的纹理尖峰会顶穿预算、令帧错过目标 vsync（偶发
+    // 抖动的主要应用内来源）。3 条把单帧烘焙耗时削平一半以上，代价仅是
+    // 新弹幕入场晚 1~2 拍（8~16ms，不可感知）
+    static constexpr int kMaxActivationsPerFrame = 3;
 };
 
 #endif // DANMAKUCANVAS_H
