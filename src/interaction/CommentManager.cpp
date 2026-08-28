@@ -14,12 +14,33 @@ const QString CommentManager::REFERER = "https://www.bilibili.com";
 
 CommentManager::CommentManager(QObject *parent)
     : QObject(parent)
-    , m_networkManager(new QNetworkAccessManager(this))
 {
 }
 
 CommentManager::~CommentManager()
 {
+}
+
+// 一次性 QNAM：每次请求新建网络管理器，用完即毁（详见 CommentManager.h 注释）。
+// connect 顺序：先挂 onReplyFinished（读取响应、emit 结果），再挂 manager 销毁
+QNetworkReply *CommentManager::postOneShot(const QNetworkRequest &request, const QByteArray &data, const ReplyContext &ctx)
+{
+    QNetworkAccessManager *manager = new QNetworkAccessManager(this);
+    QNetworkReply *reply = manager->post(request, data);
+    m_replyContextMap[reply] = ctx;
+    connect(reply, &QNetworkReply::finished, this, &CommentManager::onReplyFinished);
+    connect(reply, &QNetworkReply::finished, manager, &QObject::deleteLater);
+    return reply;
+}
+
+QNetworkReply *CommentManager::getOneShot(const QNetworkRequest &request, const ReplyContext &ctx)
+{
+    QNetworkAccessManager *manager = new QNetworkAccessManager(this);
+    QNetworkReply *reply = manager->get(request);
+    m_replyContextMap[reply] = ctx;
+    connect(reply, &QNetworkReply::finished, this, &CommentManager::onReplyFinished);
+    connect(reply, &QNetworkReply::finished, manager, &QObject::deleteLater);
+    return reply;
 }
 
 void CommentManager::getComments(const QString &oid, int type, int pn, int ps, int sort)
@@ -59,14 +80,12 @@ void CommentManager::getComments(const QString &oid, int type, int pn, int ps, i
         request.setRawHeader(QByteArray("Cookie"), cookies.toUtf8());
     }
 
-    QNetworkReply *reply = m_networkManager->get(request);
     ReplyContext ctx;
     ctx.action = "get_comments";
     ctx.type = type;
     ctx.sort = sort;
     ctx.oid = oid;
-    m_replyContextMap[reply] = ctx;
-    connect(reply, &QNetworkReply::finished, this, &CommentManager::onReplyFinished);
+    getOneShot(request, ctx);
 }
 
 void CommentManager::getSubComments(const QString &oid, const QString &root, int pn, int ps, int type)
@@ -94,12 +113,10 @@ void CommentManager::getSubComments(const QString &oid, const QString &root, int
         request.setRawHeader(QByteArray("Cookie"), cookies.toUtf8());
     }
 
-    QNetworkReply *reply = m_networkManager->get(request);
     ReplyContext ctx;
     ctx.action = "get_sub_comments";
     ctx.pendingRootRpid = root.toLongLong();
-    m_replyContextMap[reply] = ctx;
-    connect(reply, &QNetworkReply::finished, this, &CommentManager::onReplyFinished);
+    getOneShot(request, ctx);
 }
 
 void CommentManager::sendComment(const QString &oid, const QString &content, int type,
@@ -132,11 +149,9 @@ void CommentManager::sendComment(const QString &oid, const QString &content, int
         request.setRawHeader(QByteArray("Cookie"), cookies.toUtf8());
     }
 
-    QNetworkReply *reply = m_networkManager->post(request, postData.toUtf8());
     ReplyContext ctx;
     ctx.action = "send_comment";
-    m_replyContextMap[reply] = ctx;
-    connect(reply, &QNetworkReply::finished, this, &CommentManager::onReplyFinished);
+    postOneShot(request, postData.toUtf8(), ctx);
 }
 
 void CommentManager::deleteComment(const QString &rpid, qint64 oid, int type)
@@ -161,12 +176,10 @@ void CommentManager::deleteComment(const QString &rpid, qint64 oid, int type)
         request.setRawHeader(QByteArray("Cookie"), cookies.toUtf8());
     }
 
-    QNetworkReply *reply = m_networkManager->post(request, postData.toUtf8());
     ReplyContext ctx;
     ctx.action = "delete_comment";
     ctx.pendingRootRpid = rpid.toLongLong();
-    m_replyContextMap[reply] = ctx;
-    connect(reply, &QNetworkReply::finished, this, &CommentManager::onReplyFinished);
+    postOneShot(request, postData.toUtf8(), ctx);
 }
 
 void CommentManager::likeComment(const QString &rpid, qint64 oid, int type, int action)
@@ -193,12 +206,10 @@ void CommentManager::likeComment(const QString &rpid, qint64 oid, int type, int 
         request.setRawHeader(QByteArray("Cookie"), cookies.toUtf8());
     }
 
-    QNetworkReply *reply = m_networkManager->post(request, postData.toUtf8());
     ReplyContext ctx;
     ctx.action = (action == 1) ? "like_comment" : "unlike_comment";
     ctx.pendingRootRpid = rpid.toLongLong();
-    m_replyContextMap[reply] = ctx;
-    connect(reply, &QNetworkReply::finished, this, &CommentManager::onReplyFinished);
+    postOneShot(request, postData.toUtf8(), ctx);
 }
 
 void CommentManager::hateComment(const QString &rpid, qint64 oid, int type, int action)
@@ -225,12 +236,10 @@ void CommentManager::hateComment(const QString &rpid, qint64 oid, int type, int 
         request.setRawHeader(QByteArray("Cookie"), cookies.toUtf8());
     }
 
-    QNetworkReply *reply = m_networkManager->post(request, postData.toUtf8());
     ReplyContext ctx;
     ctx.action = (action == 1) ? "hate_comment" : "unhate_comment";
     ctx.pendingRootRpid = rpid.toLongLong();
-    m_replyContextMap[reply] = ctx;
-    connect(reply, &QNetworkReply::finished, this, &CommentManager::onReplyFinished);
+    postOneShot(request, postData.toUtf8(), ctx);
 }
 
 void CommentManager::onReplyFinished()

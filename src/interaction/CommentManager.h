@@ -139,8 +139,6 @@ private:
     QVariantMap commentToMap(const Comment &comment) const;
     QString getCSRFToken();
 
-    QNetworkAccessManager *m_networkManager;
-
     // 每个网络请求对应的上下文，避免并发请求时 m_currentAction 被覆盖
     struct ReplyContext {
         QString action;
@@ -149,6 +147,14 @@ private:
         QString oid;
         qint64 pendingRootRpid = 0;
     };
+
+    // 一次性 QNAM 请求：每次请求新建网络管理器，用完即毁。
+    // 不复用共享池连接——池内连接一旦被 B 站风控标记，
+    // 复用它的请求会失败且重试仍落在同一条坏连接上，直到重启客户端。
+    // 这些请求均为低频用户触发，每次多一次 TLS 握手无感知
+    QNetworkReply *postOneShot(const QNetworkRequest &request, const QByteArray &data, const ReplyContext &ctx);
+    QNetworkReply *getOneShot(const QNetworkRequest &request, const ReplyContext &ctx);
+
     QHash<QNetworkReply*, ReplyContext> m_replyContextMap;
 
     // WBI 主接口翻页游标：key = oid_sort

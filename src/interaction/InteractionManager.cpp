@@ -20,7 +20,6 @@ const QString InteractionManager::APP_SECRET = "560c52ccd288fed045859ed18bffd973
 
 InteractionManager::InteractionManager(QObject *parent)
     : QObject(parent)
-    , m_networkManager(new QNetworkAccessManager(this))
 {
 }
 
@@ -83,6 +82,28 @@ void InteractionManager::setupRequest(QNetworkRequest &request)
 
 }
 
+// 一次性 QNAM：每次请求新建网络管理器，用完即毁（详见 InteractionManager.h 注释）。
+// connect 顺序：先挂 onReplyFinished（读取响应、emit 结果），再挂 manager 销毁
+QNetworkReply *InteractionManager::postOneShot(const QNetworkRequest &request, const QByteArray &data, const QString &action)
+{
+    QNetworkAccessManager *manager = new QNetworkAccessManager(this);
+    QNetworkReply *reply = manager->post(request, data);
+    m_replyActionMap[reply] = action;
+    connect(reply, &QNetworkReply::finished, this, &InteractionManager::onReplyFinished);
+    connect(reply, &QNetworkReply::finished, manager, &QObject::deleteLater);
+    return reply;
+}
+
+QNetworkReply *InteractionManager::getOneShot(const QNetworkRequest &request, const QString &action)
+{
+    QNetworkAccessManager *manager = new QNetworkAccessManager(this);
+    QNetworkReply *reply = manager->get(request);
+    m_replyActionMap[reply] = action;
+    connect(reply, &QNetworkReply::finished, this, &InteractionManager::onReplyFinished);
+    connect(reply, &QNetworkReply::finished, manager, &QObject::deleteLater);
+    return reply;
+}
+
 void InteractionManager::likeVideo(const QString &aid, int like)
 {
     // like=1 点赞, like=2 取消, like=3 点踩（点踩走 web 端接口）
@@ -105,9 +126,7 @@ void InteractionManager::likeVideo(const QString &aid, int like)
     setupRequest(request);
     request.setRawHeader(QByteArray("Content-Type"), QByteArray("application/x-www-form-urlencoded"));
 
-    QNetworkReply *reply = m_networkManager->post(request, postData.toUtf8());
-    m_replyActionMap[reply] = action;
-    connect(reply, &QNetworkReply::finished, this, &InteractionManager::onReplyFinished);
+    postOneShot(request, postData.toUtf8(), action);
 }
 
 void InteractionManager::unlikeVideo(const QString &aid)
@@ -145,9 +164,7 @@ void InteractionManager::dislikeVideo(const QString &aid, int targetDislike, int
         request.setRawHeader(QByteArray("Referer"), REFERER.toUtf8());
         request.setRawHeader(QByteArray("Content-Type"), QByteArray("application/x-www-form-urlencoded"));
 
-        QNetworkReply *reply = m_networkManager->post(request, body.toUtf8());
-        m_replyActionMap[reply] = action;
-        connect(reply, &QNetworkReply::finished, this, &InteractionManager::onReplyFinished);
+        postOneShot(request, body.toUtf8(), action);
         return;
     }
 
@@ -164,9 +181,7 @@ void InteractionManager::dislikeVideo(const QString &aid, int targetDislike, int
     setupRequest(request);
     request.setRawHeader(QByteArray("Content-Type"), QByteArray("application/x-www-form-urlencoded"));
 
-    QNetworkReply *reply = m_networkManager->post(request, postData.toUtf8());
-    m_replyActionMap[reply] = action;
-    connect(reply, &QNetworkReply::finished, this, &InteractionManager::onReplyFinished);
+    postOneShot(request, postData.toUtf8(), action);
 }
 
 void InteractionManager::favoriteVideo(const QString &aid, const QString &fid, int addMedia)
@@ -189,9 +204,7 @@ void InteractionManager::favoriteVideo(const QString &aid, const QString &fid, i
     setupRequest(request);
     request.setRawHeader(QByteArray("Content-Type"), QByteArray("application/x-www-form-urlencoded"));
 
-    QNetworkReply *reply = m_networkManager->post(request, postData.toUtf8());
-    m_replyActionMap[reply] = action;
-    connect(reply, &QNetworkReply::finished, this, &InteractionManager::onReplyFinished);
+    postOneShot(request, postData.toUtf8(), action);
 }
 
 void InteractionManager::unfavoriteVideo(const QString &aid, const QString &fid)
@@ -213,9 +226,7 @@ void InteractionManager::unfavoriteVideo(const QString &aid, const QString &fid)
     setupRequest(request);
     request.setRawHeader(QByteArray("Content-Type"), QByteArray("application/x-www-form-urlencoded"));
 
-    QNetworkReply *reply = m_networkManager->post(request, postData.toUtf8());
-    m_replyActionMap[reply] = action;
-    connect(reply, &QNetworkReply::finished, this, &InteractionManager::onReplyFinished);
+    postOneShot(request, postData.toUtf8(), action);
 }
 
 void InteractionManager::coinVideo(const QString &aid, const QString &bvid, int num, int selectLike)
@@ -261,9 +272,7 @@ void InteractionManager::coinVideoWeb(const QString &aid, const QString &bvid, i
     request.setRawHeader(QByteArray("Accept"), QByteArray("application/json, text/plain, */*"));
     request.setRawHeader(QByteArray("X-Requested-With"), QByteArray("XMLHttpRequest"));
 
-    QNetworkReply *reply = m_networkManager->post(request, postData.toUtf8());
-    m_replyActionMap[reply] = action;
-    connect(reply, &QNetworkReply::finished, this, &InteractionManager::onReplyFinished);
+    postOneShot(request, postData.toUtf8(), action);
 }
 
 void InteractionManager::tripleAction(const QString &aid, const QString &bvid, bool like, bool favorite, bool coin)
@@ -303,9 +312,7 @@ void InteractionManager::followUser(const QString &mid, int act)
     setupRequest(request);
     request.setRawHeader(QByteArray("Content-Type"), QByteArray("application/x-www-form-urlencoded"));
 
-    QNetworkReply *reply = m_networkManager->post(request, postData.toUtf8());
-    m_replyActionMap[reply] = action;
-    connect(reply, &QNetworkReply::finished, this, &InteractionManager::onReplyFinished);
+    postOneShot(request, postData.toUtf8(), action);
 }
 
 void InteractionManager::getVideoStatus(const QString &aid)
@@ -332,8 +339,9 @@ void InteractionManager::getVideoStatus(const QString &aid)
         if (!cookies.isEmpty()) {
             request.setRawHeader("Cookie", cookies.toUtf8());
         }
-        QNetworkReply *reply = m_networkManager->get(request);
-        connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        QNetworkAccessManager *manager = new QNetworkAccessManager(this);
+        QNetworkReply *reply = manager->get(request);
+        connect(reply, &QNetworkReply::finished, this, [this, reply, manager]() {
             QByteArray data = reply->readAll();
             if (reply->error() == QNetworkReply::NoError) {
                 QJsonDocument doc = QJsonDocument::fromJson(data);
@@ -353,6 +361,7 @@ void InteractionManager::getVideoStatus(const QString &aid)
             m_statusLikeReceived = true;
             checkAllStatusReady();
             reply->deleteLater();
+            manager->deleteLater();
         });
     }
 
@@ -368,8 +377,9 @@ void InteractionManager::getVideoStatus(const QString &aid)
         if (!cookies.isEmpty()) {
             request.setRawHeader("Cookie", cookies.toUtf8());
         }
-        QNetworkReply *reply = m_networkManager->get(request);
-        connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        QNetworkAccessManager *manager = new QNetworkAccessManager(this);
+        QNetworkReply *reply = manager->get(request);
+        connect(reply, &QNetworkReply::finished, this, [this, reply, manager]() {
             QByteArray data = reply->readAll();
             if (reply->error() == QNetworkReply::NoError) {
                 QJsonDocument doc = QJsonDocument::fromJson(data);
@@ -385,6 +395,7 @@ void InteractionManager::getVideoStatus(const QString &aid)
             m_statusCoinReceived = true;
             checkAllStatusReady();
             reply->deleteLater();
+            manager->deleteLater();
         });
     }
 
@@ -400,8 +411,9 @@ void InteractionManager::getVideoStatus(const QString &aid)
         if (!cookies.isEmpty()) {
             request.setRawHeader("Cookie", cookies.toUtf8());
         }
-        QNetworkReply *reply = m_networkManager->get(request);
-        connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        QNetworkAccessManager *manager = new QNetworkAccessManager(this);
+        QNetworkReply *reply = manager->get(request);
+        connect(reply, &QNetworkReply::finished, this, [this, reply, manager]() {
             QByteArray data = reply->readAll();
             if (reply->error() == QNetworkReply::NoError) {
                 QJsonDocument doc = QJsonDocument::fromJson(data);
@@ -417,6 +429,7 @@ void InteractionManager::getVideoStatus(const QString &aid)
             m_statusFavReceived = true;
             checkAllStatusReady();
             reply->deleteLater();
+            manager->deleteLater();
         });
     }
 }
@@ -442,9 +455,7 @@ void InteractionManager::getUserRelation(const QString &mid)
 
 
 
-    QNetworkReply *reply = m_networkManager->get(request);
-    m_replyActionMap[reply] = action;
-    connect(reply, &QNetworkReply::finished, this, &InteractionManager::onReplyFinished);
+    getOneShot(request, action);
 }
 
 void InteractionManager::getUserFollowers(const QString &mid)
@@ -465,9 +476,7 @@ void InteractionManager::getUserFollowers(const QString &mid)
         request.setRawHeader("Cookie", cookies.toUtf8());
     }
 
-    QNetworkReply *reply = m_networkManager->get(request);
-    m_replyActionMap[reply] = action;
-    connect(reply, &QNetworkReply::finished, this, &InteractionManager::onReplyFinished);
+    getOneShot(request, action);
 }
 
 void InteractionManager::getDefaultFavoriteFolder(const QString &aid)
@@ -500,9 +509,7 @@ void InteractionManager::getDefaultFavoriteFolder(const QString &aid)
         request.setRawHeader("Cookie", cookies.toUtf8());
     }
 
-    QNetworkReply *reply = m_networkManager->get(request);
-    m_replyActionMap[reply] = action;
-    connect(reply, &QNetworkReply::finished, this, &InteractionManager::onReplyFinished);
+    getOneShot(request, action);
 }
 
 void InteractionManager::reportHistory(const QString &aid, const QString &cid, int progress)
@@ -536,9 +543,9 @@ void InteractionManager::reportHistory(const QString &aid, const QString &cid, i
     setupRequest(request);
     request.setRawHeader(QByteArray("Content-Type"), QByteArray("application/x-www-form-urlencoded"));
 
-    QNetworkReply *reply = m_networkManager->post(request, postData.toUtf8());
-    m_replyActionMap[reply] = action;
-    connect(reply, &QNetworkReply::finished, this, &InteractionManager::onReplyFinished);
+    // 一次性 QNAM（见 postOneShot 注释）：历史上报每 15s 心跳一次，
+    // 同一条连接上高频重复 POST 最易被风控盯上，必须每次新建连接
+    postOneShot(request, postData.toUtf8(), action);
 }
 
 void InteractionManager::reportBangumiHistory(const QString &aid, const QString &cid, int progress, int duration, const QString &epid, const QString &sid)
@@ -569,9 +576,8 @@ void InteractionManager::reportBangumiHistory(const QString &aid, const QString 
     setupRequest(request);
     request.setRawHeader(QByteArray("Content-Type"), QByteArray("application/x-www-form-urlencoded"));
 
-    QNetworkReply *reply = m_networkManager->post(request, postData.toUtf8());
-    m_replyActionMap[reply] = action;
-    connect(reply, &QNetworkReply::finished, this, &InteractionManager::onReplyFinished);
+    // 一次性 QNAM（见 postOneShot 注释）：与 reportHistory 同一策略
+    postOneShot(request, postData.toUtf8(), action);
 }
 
 void InteractionManager::onReplyFinished()
