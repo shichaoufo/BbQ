@@ -120,6 +120,7 @@ Rectangle {
     // 或弹幕输入框持有焦点（输入中）时，控制栏与鼠标指针均不进入自动隐藏
     function controlOverlayActive() {
         return controlBarHover.hovered
+            || topBarHover.hovered
             || volumePopup.opened || danmakuPopup.opened
             || qualityMenu.opened
             || danmakuInput.activeFocus
@@ -171,6 +172,7 @@ Rectangle {
         if (root.controlsVisible) {
             root.controlsVisible = false
             closePopups()
+            hideControlsTimer.stop()
             hideCursorTimer.restart()   // 指针再静止3秒后隐藏
         } else {
             root.showControls()
@@ -717,8 +719,11 @@ Rectangle {
                 hideControlsTimer.restart()
                 return
             }
+            // 防护：鼠标已离开播放区时只隐藏控制栏，不藏播放区外的指针
+            // 小窗模式豁免：playerHoverArea 留在页面布局里，小窗有自己的离开处理
+            var mouseOutside = !root.isMiniWindow && playerHoverArea && !playerHoverArea.containsMouse
             root.controlsVisible = false
-            root.cursorHidden = true
+            if (!mouseOutside) root.cursorHidden = true
         }
     }
 
@@ -731,6 +736,10 @@ Rectangle {
                 hideCursorTimer.restart()
                 return
             }
+            // 防护：鼠标已离开播放区时不隐藏（否则会藏掉播放区外的指针）
+            // 小窗模式豁免：playerHoverArea 留在页面布局里，小窗有自己的离开处理
+            if (!root.isMiniWindow && playerHoverArea && !playerHoverArea.containsMouse)
+                return
             if (root.controlsVisible)
                 hideCursorTimer.restart()
             else
@@ -1100,15 +1109,18 @@ Rectangle {
     // 阻挡鼠标事件穿透到下方，左键切换控制栏，右击关闭播放页；
     // 同时跟踪鼠标：移动恢复指针，静止3秒自动隐藏
     MouseArea {
+        id: playerHoverArea
         anchors.fill: parent
         z: -1
         hoverEnabled: true
         acceptedButtons: Qt.LeftButton | Qt.RightButton
         onPositionChanged: root.playerMouseActivity()
-        // 鼠标离开播放区：恢复指针并停止计时
+        // 鼠标离开播放区：恢复指针、停指针计时，
+        // 但保留控制栏的自动隐藏（触发时只隐藏控制栏，不藏播放区外指针）
         onExited: {
             root.cursorHidden = false
             hideCursorTimer.stop()
+            hideControlsTimer.restart()
         }
         onClicked: function(mouse) {
             if (mouse.button === Qt.RightButton) {
@@ -1473,6 +1485,10 @@ Rectangle {
                 visible: root.streamer !== ""
             }
         }
+
+        // 悬停在顶部标题栏时保持控制栏与指针可见（与控制栏同方案：
+        // HoverHandler 被动监听，不与子控件 MouseArea 抢事件）
+        HoverHandler { id: topBarHover }
 
         // 必须声明在按钮之前（z 序垫底）：hoverEnabled 的 MouseArea 会
         // 独占悬停事件，盖在按钮上方会吞掉按钮的 hovered 导致悬停动效失效

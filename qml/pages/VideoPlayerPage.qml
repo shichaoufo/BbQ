@@ -438,9 +438,12 @@ Rectangle {
                 hideControlsTimer.restart()
                 return
             }
+            // 防护：鼠标已离开播放区时只隐藏控制栏，不藏播放区外的指针
+            // 小窗模式豁免：playerHoverArea 留在页面布局里，小窗有自己的离开处理
+            var mouseOutside = !pageRoot.isMiniWindow && playerHoverArea && !playerHoverArea.containsMouse
             if (mpvPlayer.playing) {
                 pageRoot.controlsVisible = false
-                pageRoot.cursorHidden = true
+                if (!mouseOutside) pageRoot.cursorHidden = true
             } else {
                 hideControlsTimer.restart()
             }
@@ -456,6 +459,10 @@ Rectangle {
                 hideCursorTimer.restart()
                 return
             }
+            // 防护：鼠标已离开播放区时不隐藏（否则会藏掉播放区外的指针）
+            // 小窗模式豁免：playerHoverArea 留在页面布局里，小窗有自己的离开处理
+            if (!pageRoot.isMiniWindow && playerHoverArea && !playerHoverArea.containsMouse)
+                return
             if (pageRoot.controlsVisible)
                 hideCursorTimer.restart()
             else
@@ -3185,19 +3192,23 @@ Rectangle {
 
                 // 播放区鼠标跟踪：移动恢复指针，静止3秒自动隐藏；点击切换控制栏
                 MouseArea {
+                    id: playerHoverArea
                     anchors.fill: parent
                     z: -1
                     hoverEnabled: true
                     onPositionChanged: pageRoot.playerMouseActivity()
-                    // 鼠标离开播放区（到右侧面板等）：恢复指针并停止计时
+                    // 鼠标离开播放区（到右侧面板等）：恢复指针、停指针计时，
+                    // 但保留控制栏的自动隐藏（触发时只隐藏控制栏，不藏播放区外指针）
                     onExited: {
                         pageRoot.cursorHidden = false
                         hideCursorTimer.stop()
+                        hideControlsTimer.restart()
                     }
                     onClicked: {
                         closePopups()
                         if (pageRoot.controlsVisible) {
                             pageRoot.controlsVisible = false
+                            hideControlsTimer.stop()
                             hideCursorTimer.restart()
                         } else {
                             pageRoot.controlsVisible = true
