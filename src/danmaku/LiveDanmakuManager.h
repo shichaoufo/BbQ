@@ -54,6 +54,7 @@ private slots:
     void onHeartbeatTimer();
     void onSwitchTimer();  // close() 后延迟 open 新房间，等 SSL 线程退出
     void onCleanupTimer(); // 延迟销毁旧 socket，等 SSL 后台线程完全退出
+    void onReconnectTimer(); // 意外断线后自动重连（指数退避）
     void flushDanmakuBatch(); // 50ms 合批刷新
 
 private:
@@ -69,6 +70,7 @@ private:
     QTimer *m_heartbeatTimer;
     QTimer *m_switchTimer;      // close() 后延迟 open，等 SSL 后台线程完全退出
     QTimer *m_cleanupTimer;     // 延迟销毁旧 socket 列表，确保 SSL 线程退出
+    QTimer *m_reconnectTimer;   // 意外断线自动重连（singleShot，指数退避）
     QTimer *m_batchTimer;       // 弹幕 50ms 合批定时器
     QVariantList m_pendingDanmaku;  // 待合批的弹幕缓冲
     QList<QWebSocket*> m_oldSockets;  // 待销毁的旧 socket，由 m_cleanupTimer 统一删除
@@ -80,6 +82,7 @@ private:
     int m_danmakuPort;
     QString m_danmakuToken;
     int m_pendingRoomId;        // 待切换的房间号：close() 期间和 switchTimer 期间记录
+    int m_reconnectAttempts;    // 重连尝试次数（指数退避，认证成功后归零）
 
     static const int PACKET_HEADER_SIZE = 16;
     static const int OP_HEARTBEAT = 2;

@@ -310,6 +310,15 @@ static void biliQtMessageHandler(QtMsgType type, const QMessageLogContext &conte
 {
     Q_UNUSED(context)
 
+    // 过滤已知无害的 Qt 内部噪音：
+    // "QIODevice::read (QSslSocket): device not open" —— QNetworkAccessManager
+    // 的 HTTPS keep-alive 连接被服务器按空闲超时（约 60s）关闭后，Qt 拆除
+    // 连接时对已关闭的 QSslSocket 收尾 read 触发。连接随即按需重建，
+    // 功能零影响（弹幕 WebSocket 为独立长连接，不受影响）。
+    if (msg == QStringLiteral("QIODevice::read (QSslSocket): device not open")) {
+        return;
+    }
+
     if (g_inMessageHandler) {
         return;
     }

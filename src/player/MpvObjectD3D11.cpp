@@ -372,10 +372,10 @@ void MpvObjectD3D11::applyCacheOptions()
     if (m_liveMode) {
         // 直播：小 cache 低延迟，避免延迟累积（原配置）
         mpv_set_option_string(m_mpv, "cache", "yes");
-        mpv_set_option_string(m_mpv, "cache-secs", "5");
-        mpv_set_option_string(m_mpv, "demuxer-max-bytes", "8M");
-        mpv_set_option_string(m_mpv, "demuxer-max-back-bytes", "4M");
-        mpv_set_option_string(m_mpv, "demuxer-readahead-secs", "5");
+        mpv_set_option_string(m_mpv, "cache-secs", "10");
+        mpv_set_option_string(m_mpv, "demuxer-max-bytes", "16M");
+        mpv_set_option_string(m_mpv, "demuxer-max-back-bytes", "8M");
+        mpv_set_option_string(m_mpv, "demuxer-readahead-secs", "10");
         mpv_set_option_string(m_mpv, "vf", "");
     } else {
         // 视频点播：大 cache 抗网络抖动，避免 CDN 断流时 demuxer 缓存耗尽停住
@@ -956,28 +956,39 @@ void MpvObjectD3D11::onMpvEvents()
                     m_hasVideo = hasVideo;
                     emit hasVideoChanged();
                 }
-                // Extract video native resolution to size the D3D11 texture.
+                // Extract video display resolution to size the D3D11 texture.
                 // This avoids mpv doing per-frame scaling to window size.
+                // 竖屏直播流常带旋转 metadata（编码 w/h 为横、rot=90）：
+                // 必须取 dw/dh（旋转后的显示分辨率）建纹理，否则竖屏流
+                // 会建出横纹理，mpv 渲染 letterbox 走歪（非常规路径）。
                 if (hasVideo) {
                     mpv_node *node = static_cast<mpv_node*>(prop->data);
                     if (node && node->format == MPV_FORMAT_NODE_MAP) {
                         mpv_node_list *list = node->u.list;
-                        int vw = 0, vh = 0;
+                        int vw = 0, vh = 0, dw = 0, dh = 0;
                         for (int i = 0; i < list->num; ++i) {
                             const char *key = list->keys[i];
                             if (strcmp(key, "w") == 0 && list->values[i].format == MPV_FORMAT_INT64) {
                                 vw = static_cast<int>(list->values[i].u.int64);
                             } else if (strcmp(key, "h") == 0 && list->values[i].format == MPV_FORMAT_INT64) {
                                 vh = static_cast<int>(list->values[i].u.int64);
+                            } else if (strcmp(key, "dw") == 0 && list->values[i].format == MPV_FORMAT_INT64) {
+                                dw = static_cast<int>(list->values[i].u.int64);
+                            } else if (strcmp(key, "dh") == 0 && list->values[i].format == MPV_FORMAT_INT64) {
+                                dh = static_cast<int>(list->values[i].u.int64);
                             }
                         }
-                        if (vw > 0 && vh > 0
-                            && (vw != m_videoWidth.load(std::memory_order_acquire)
-                                || vh != m_videoHeight.load(std::memory_order_acquire))) {
-                            m_videoWidth.store(vw, std::memory_order_release);
-                            m_videoHeight.store(vh, std::memory_order_release);
+                        // 优先显示分辨率（dw/dh 含旋转），回退编码分辨率
+                        int texW = (dw > 0) ? dw : vw;
+                        int texH = (dh > 0) ? dh : vh;
+                        if (texW > 0 && texH > 0
+                            && (texW != m_videoWidth.load(std::memory_order_acquire)
+                                || texH != m_videoHeight.load(std::memory_order_acquire))) {
+                            m_videoWidth.store(texW, std::memory_order_release);
+                            m_videoHeight.store(texH, std::memory_order_release);
                             m_resourcesDirty = true;
-                            qWarning() << "[MpvObjectD3D11] video native resolution:" << vw << "x" << vh;
+                            qWarning() << "[MpvObjectD3D11] video native resolution:" << texW << "x" << texH
+                                       << "(coded" << vw << "x" << vh << "display" << dw << "x" << dh << ")";
                         }
                     }
                 }
@@ -994,6 +1005,19 @@ void MpvObjectD3D11::onMpvEvents()
             break;
         }
         case MPV_EVENT_FILE_LOADED: {
+            // 直播绿屏/雪花问题确诊日志：流的编码格式与硬解方法。
+            // 已知 case：个别直播间（高清晰度）全屏绿屏+顶部雪花，调低
+            // 清晰度恢复，其他 mpv 客户端正常——嫌疑 D3D11 零拷贝互操作
+            // 对特定编码（HEVC/特殊 profile）的兼容性，此日志用于锁定
+            char *vfmt = mpv_get_property_string(m_mpv, "video-format");
+            char *vcodec = mpv_get_property_string(m_mpv, "video-codec");
+            char *hwcur = mpv_get_property_string(m_mpv, "hwdec-current");
+            qWarning() << "[MpvObjectD3D11] file loaded, video-format:" << (vfmt ? vfmt : "?")
+                       << "video-codec:" << (vcodec ? vcodec : "?")
+                       << "hwdec-current:" << (hwcur ? hwcur : "none");
+            mpv_free(vfmt);
+            mpv_free(vcodec);
+            mpv_free(hwcur);
             if (!m_audioSource.isEmpty()) {
                 QByteArray audioData = m_audioSource.toUtf8();
                 const char *cmd[] = {"audio-add", audioData.constData(), nullptr};

@@ -804,6 +804,10 @@ Rectangle {
     // 控制栏与鼠标指针均不进入自动隐藏
     function controlOverlayActive() {
         return controlBarHover.hovered
+            // 顶部渐变阴影/章节键悬停（仅控制栏可见期间豁免：阴影已隐藏时
+            // 该区域按普通播放区处理，鼠标静止后照常隐藏指针）
+            || (pageRoot.controlsVisible && topShadowHover.hovered)
+            || chapterMenu.opened          // 章节选择菜单打开时不隐藏
             || volumePopup.opened || danmakuPopup.opened
             || speedMenu.opened || codecMenu.opened || qualityMenu.opened
             || danmakuInput.activeFocus     // 弹幕输入中不隐藏（失焦即恢复倒计时）
@@ -3464,6 +3468,10 @@ Rectangle {
                         }
                     }
                     visible: pageRoot.viewPoints.length > 0
+
+                    // 顶部渐变阴影+章节键悬停检测（被动监听，不与章节键
+                    // 抢事件）：悬停期间控制栏与鼠标指针不进入自动隐藏
+                    HoverHandler { id: topShadowHover }
 
                     // 章节选择菜单（样式与控制栏清晰度菜单一致）。
                     // enabled 门控：阴影 opacity 0 时菜单不可点击（opacity 不拦截输入）

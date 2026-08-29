@@ -20,6 +20,7 @@ LiveDanmakuManager::LiveDanmakuManager(QObject *parent)
     , m_heartbeatTimer(new QTimer(this))
     , m_switchTimer(new QTimer(this))
     , m_cleanupTimer(new QTimer(this))
+    , m_reconnectTimer(new QTimer(this))
     , m_batchTimer(new QTimer(this))
     , m_roomId(0)
     , m_isConnected(false)
@@ -27,6 +28,7 @@ LiveDanmakuManager::LiveDanmakuManager(QObject *parent)
     , m_sequence(1)
     , m_danmakuPort(0)
     , m_pendingRoomId(0)
+    , m_reconnectAttempts(0)
 {
     // 命名 WebSocket，避免析构时 abort() 触发的 destroyed/disconnected
     // 信号在未命名对象上导致 Qt 打印 wildcard disconnect 警告
@@ -54,6 +56,12 @@ LiveDanmakuManager::LiveDanmakuManager(QObject *parent)
     m_cleanupTimer->setSingleShot(true);
     m_cleanupTimer->setInterval(3000);
     connect(m_cleanupTimer, &QTimer::timeout, this, &LiveDanmakuManager::onCleanupTimer);
+
+    // 意外断线自动重连：服务器踢线/网络闪断后恢复弹幕连接。
+    // singleShot + 指数退避（5s→10s→20s→30s 封顶），认证成功后归零，
+    // 避免网络长时间不可用时高频重试刷日志/耗资源
+    m_reconnectTimer->setSingleShot(true);
+    connect(m_reconnectTimer, &QTimer::timeout, this, &LiveDanmakuManager::onReconnectTimer);
 
     // 弹幕 50ms 合批：高峰时逐条发信号会让 QML 属性系统过载，
     // 聚合为批次后一批弹幕仅一次跨线程信号
@@ -88,6 +96,9 @@ void LiveDanmakuManager::teardownConnection()
     if (m_cleanupTimer) {
         m_cleanupTimer->stop();
     }
+    if (m_reconnectTimer) {
+        m_reconnectTimer->stop();
+    }
     if (m_batchTimer) {
         m_batchTimer->stop();
     }
@@ -118,6 +129,8 @@ void LiveDanmakuManager::connectRoom(int roomId)
     m_roomId = roomId;
     m_sequence = 1;
     m_isClosing = false;  // 新连接，允许接收消息
+    m_reconnectTimer->stop();  // 用户主动切换：取消挂起的自动重连
+    m_reconnectAttempts = 0;   // 新连接重置退避计数
 
     // switchTimer 正在运行（close 已完成，等 SSL 退出延迟）：
     // 只更新 pendingRoomId，timer 到期会 open 最新房间
@@ -220,6 +233,7 @@ void LiveDanmakuManager::disconnectRoom()
 {
     m_heartbeatTimer->stop();
     m_switchTimer->stop();  // 取消待切换房间，避免 onSwitchTimer 中误 open
+    m_reconnectTimer->stop();  // 用户主动断开：取消自动重连
     m_isConnected = false;
     m_isClosing = true;  // 标记正在断开，忽略残留消息
     m_pendingRoomId = 0;
@@ -268,6 +282,16 @@ void LiveDanmakuManager::onDisconnected()
         return;  // 切换流程不向外发 disconnected 信号，避免 QML 误处理
     }
 
+    // 意外断线（服务器踢线/网络闪断）：调度自动重连。
+    // 用户主动断开（m_isClosing）或从未连接过（roomId 无效）不重连
+    if (!m_isClosing && m_roomId > 0) {
+        ++m_reconnectAttempts;
+        int delay = qMin(5000 * (1 << qMin(m_reconnectAttempts - 1, 3)), 30000);
+        m_reconnectTimer->start(delay);
+        qWarning() << "[LiveDanmakuManager] unexpected disconnect, reconnect in" << delay / 1000
+                   << "s (attempt" << m_reconnectAttempts << ") room" << m_roomId;
+    }
+
     emit disconnected();
 }
 
@@ -279,6 +303,19 @@ void LiveDanmakuManager::onSwitchTimer()
         m_pendingRoomId = 0;
         openConnection();
     }
+}
+
+void LiveDanmakuManager::onReconnectTimer()
+{
+    // 定时器到期时状态可能已变化（用户切房间/关播放页）：不再重连
+    if (m_isClosing || m_roomId <= 0) {
+        return;
+    }
+    // 认证成功会停用所有路径；此处 socket 必为断开态，
+    // connectRoom 内部会走 switchTimer（500ms SSL 退出延迟）→ openConnection
+    qWarning() << "[LiveDanmakuManager] reconnecting to room" << m_roomId
+               << "(attempt" << m_reconnectAttempts << ")";
+    connectRoom(m_roomId);
 }
 
 void LiveDanmakuManager::onTextMessageReceived(const QString &message)
@@ -308,6 +345,13 @@ void LiveDanmakuManager::onError(QAbstractSocket::SocketError error)
 
 void LiveDanmakuManager::onHeartbeatTimer()
 {
+    // 连接已断开（服务器踢线等）：立即停表，避免对已关闭的
+    // QSslSocket 持续 sendBinaryMessage → "device not open" 警告
+    // 刷日志；重连由 QML 层的 disconnected 信号处理
+    if (!m_webSocket || m_webSocket->state() != QAbstractSocket::ConnectedState) {
+        m_heartbeatTimer->stop();
+        return;
+    }
     sendHeartbeat();
 }
 
@@ -378,6 +422,8 @@ void LiveDanmakuManager::parsePacket(const QByteArray &data)
                     if (code == 0) {
                         m_isConnected = true;
                         m_heartbeatTimer->start();
+                        // 重连成功：重置退避计数（下次断线从 5s 重新开始）
+                        m_reconnectAttempts = 0;
 
                         if (obj.contains("data")) {
                             QJsonObject dataObj = obj["data"].toObject();

@@ -1171,7 +1171,7 @@ Rectangle {
         MpvObject {
             id: mpvPlayer
             anchors.fill: parent
-            liveMode: true  // 直播模式：小cache低延迟（5s/8M），覆盖视频默认的大cache配置
+            liveMode: true  // 直播模式：小cache低延迟（10s/16M），覆盖视频默认的大cache配置
             volume: root.volume
             onPlayingChanged: {
                 // 检测异常停止：之前在播放，现在停止了，但还没有视频
