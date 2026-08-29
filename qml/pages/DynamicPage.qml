@@ -3665,6 +3665,8 @@ FluPage {
                 c.repliesPage = 1
                 detailCommentModel.append(c)
             }
+            // 数据就位后再复位滚动：避免“先滚回顶部、再等加载”的两段式跳动
+            detailCommentPanel.scrollToTop()
         }
         function onSubCommentsReady(rootRpid, comments) {
             var targetRpid = String(rootRpid || "")

@@ -1707,7 +1707,6 @@ Rectangle {
         if (page < 1) page = 1
         pageRoot.commentPage = page
         pageRoot.commentLoadingMore = true
-        commentFlickable.contentY = 0
         var sort = pageRoot.commentSortByHeat ? 2 : 1
         CommentManager.getComments(pageRoot.aid, 1, page, count || 20, sort)
     }
@@ -2612,6 +2611,8 @@ Rectangle {
                 c.repliesPage = 1
                 pageRoot.commentModel.append(c)
             }
+            // 数据就位后再复位滚动：避免"先滚回顶部、再等加载"的两段式跳动
+            if (commentFlickable) commentFlickable.contentY = 0
         }
         function onSubCommentsReady(rootRpid, comments) {
             var targetRpid = String(rootRpid || "")

@@ -45,6 +45,11 @@ Item {
     signal requestSubComments(string aid, string rpid, int page, int pageSize)
     signal requestSendComment(string text, string rootId, string parentId)
 
+    // 供页面在评论数据就绪后调用：旧内容保持原位，新数据渲染时已处于顶部
+    function scrollToTop() {
+        if (commentFlickable) commentFlickable.contentY = 0
+    }
+
     function escapeHtml(str) {
         return String(str).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
     }
