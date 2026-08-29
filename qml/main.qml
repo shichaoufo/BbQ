@@ -425,7 +425,6 @@ FluWindow {
             id: reveal
             target: window.containerItem()
             anchors.fill: parent
-            darkToLight: FluTheme.dark
             onAnimationFinished:{
                 loader_reveal.sourceComponent = undefined
                 window.isChangingDark = false
@@ -453,6 +452,14 @@ FluWindow {
     FluLoader{
         id:loader_reveal
         anchors.fill: parent
+        z: 100
+        Component.onCompleted: {
+            // 挂到 layout_container 而非默认的 layout_content：
+            // loader_app_bar 是 layout_content 的兄弟节点且渲染在其上，
+            // 若 reveal 留在内容区，主题翻转瞬间标题栏裸露直接跳新主题
+            // （动画期间右上角按钮/标题瞬变 = 首帧"变色"来源）
+            parent = window.containerItem()
+        }
     }
 
     function distance(x1,y1,x2,y2){
@@ -464,9 +471,6 @@ FluWindow {
             return
         }
         isChangingDark = true
-        var willBeDark = !FluTheme.dark
-        app_bar.buttonDark.iconSource = willBeDark ? FluentIcons.Brightness : FluentIcons.QuietHours
-        app_bar.buttonDark.text = willBeDark ? app_bar.lightText : app_bar.darkText
 
         if(FluTools.isMacos() || !FluTheme.animationEnabled){
             changeDark()
@@ -489,6 +493,10 @@ FluWindow {
         }else{
             FluTheme.darkMode = FluThemeType.Dark
         }
+        // 主题键图标/文案与主题同帧翻转：截图抓取时按钮保持旧状态，
+        // 避免旧主题截图里按钮已是新图标（与整屏新旧状态不一致）
+        app_bar.buttonDark.iconSource = FluTheme.dark ? FluentIcons.Brightness : FluentIcons.QuietHours
+        app_bar.buttonDark.text = FluTheme.dark ? app_bar.lightText : app_bar.darkText
         // 主题切换即时落盘：即使异常退出也能保留用户选择
         App.saveTheme(FluTheme.dark)
     }

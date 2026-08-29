@@ -10,7 +10,6 @@ class CircularReveal : public QQuickPaintedItem {
     Q_OBJECT
     Q_PROPERTY(QQuickItem *target READ target WRITE setTarget NOTIFY targetChanged)
     Q_PROPERTY(int radius READ radius WRITE setRadius NOTIFY radiusChanged)
-    Q_PROPERTY(bool darkToLight READ darkToLight WRITE setDarkToLight NOTIFY darkToLightChanged)
 public:
     explicit CircularReveal(QQuickItem *parent = nullptr);
     void paint(QPainter *painter) override;
@@ -22,13 +21,9 @@ public:
     int radius() const { return _radius; }
     void setRadius(int radius) { _radius = radius; emit radiusChanged(); }
 
-    bool darkToLight() const { return _darkToLight; }
-    void setDarkToLight(bool darkToLight) { _darkToLight = darkToLight; emit darkToLightChanged(); }
-
 signals:
     void targetChanged();
     void radiusChanged();
-    void darkToLightChanged();
     void imageChanged();
     void animationFinished();
 
@@ -42,5 +37,4 @@ private:
     QSharedPointer<QQuickItemGrabResult> _grabResult;
     QQuickItem *_target = nullptr;
     int _radius = 0;
-    bool _darkToLight = false;
 };
