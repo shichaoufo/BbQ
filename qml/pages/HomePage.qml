@@ -43,6 +43,7 @@ FluPage {
 
     FluFrame {
         id: homeFrame
+        radius: Theme.frameRadius
         anchors.fill: parent
         anchors.leftMargin: Theme.homeFrameLeftMargin
         anchors.rightMargin: Theme.homeFrameRightMargin
@@ -142,7 +143,7 @@ FluPage {
     Item {
         id: videoOverlay
         anchors.fill: homeFrame
-        anchors.margins: Theme.overlayMargin
+        anchors.margins: Theme.playerOverlayMargin
         z: 103
         visible: opacity > 0 || openVideoAnim.running || closeVideoAnim.running || switchVideoSeqAnim.running
         opacity: 0
@@ -391,7 +392,7 @@ FluPage {
     Item {
         id: userProfileOverlay
         anchors.fill: homeFrame
-        anchors.margins: Theme.overlayMargin
+        anchors.margins: Theme.playerOverlayMargin
         z: 101
         visible: opacity > 0 || openUserProfileAnim.running || closeUserProfileAnim.running
         opacity: 0

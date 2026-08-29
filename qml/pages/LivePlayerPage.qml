@@ -2,16 +2,20 @@ import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
 import QtQuick.Window 2.15
+import QtQuick.Effects
 
 import FluentUI 1.0
 import BiliQt 1.0
 
 Rectangle {
     id: root
-    color: "black"
-    radius: Theme.radiusSmall
+    color: FluTheme.backgroundColor
+    radius: 8   // 与视频播放页/用户主页一致
     antialiasing: true
     clip: true
+    // 弹出页 Frame 框线：与 FluFrame 同款 1px 分割线边框，主题自适应
+    border.width: 1
+    border.color: FluTheme.dividerColor
 
     property string roomId: ""
     property string streamTitle: ""
@@ -243,14 +247,18 @@ Rectangle {
         App.exitMiniPlayerMode()
     }
 
-    // 小窗模式恢复：播放器与弹幕层挂回 playerLayer（root 的第一个子项，
-    // 专用底层容器，叠层由声明位置保证）。任何退出路径（本页按钮/右键/
-    // Esc/窗口关闭/页面销毁）都经 miniPlayerModeChanged 到这里
+    // 小窗模式恢复：播放器与弹幕层挂回 videoLayer（playerLayer 内声明
+    // 在最前的专用透明挂载层，与视频页 playerLayer 同方案）。reparent
+    // 会把项追加到目标容器子项列表末尾，但因 videoLayer 本身是
+    // playerLayer 的第一个子项，任何挂入项都在补角层（z=10）、控制栏/
+    // 顶栏（z=20）之下，叠层关系与初始声明一致，z 无需负值压底
+    // （负 z 会绘制到父项背景之下造成黑屏）。任何退出路径（本页按钮/
+    // 右键/Esc/窗口关闭/页面销毁）都经 miniPlayerModeChanged 到这里
     function _restoreFromMini() {
         if (!root.isMiniWindow) return
         root.isMiniWindow = false
-        mpvPlayer.parent = playerLayer
-        danmakuOverlay.parent = playerLayer
+        mpvPlayer.parent = videoLayer
+        danmakuOverlay.parent = videoLayer
         mpvPlayer.z = 0
         danmakuOverlay.z = 0
         miniUiRoot.visible = false
@@ -1136,61 +1144,746 @@ Rectangle {
         }
     }
 
-    // 小窗往返的 reparent 挂载点：reparent 会把项追加到目标容器子项列表
-    // 末尾，直接挂回 root 会把播放器排到控制栏/弹窗等兄弟层之后（视频盖
-    // 住控制栏）；挂回这个专用底层容器后叠层关系与初始声明完全一致
-    Item {
+    // 黑色播放容器（视频播放页 videoContainer 同款结构）：
+    // 铺满 root，播放器/弹幕/补角层/控制栏都挂在这里。root 改为
+    // backgroundColor（页面背景色），补角层填色与之同源自洽——
+    // 主题切换（CircularReveal 截图 z 序低于页面内容）不再穿帮。
+    Rectangle {
         id: playerLayer
         anchors.fill: parent
-    }
+        color: "black"
+        radius: root.radius
+        clip: true
+        anchors.margins: 3
+        // 播放器挂载层（视频页 playerLayer 同款方案）：playerLayer 的
+        // 第一个子项，始终最底层。小窗往返的 reparent 挂载点——
+        // reparent 会把项追加到目标容器子项列表末尾，直接挂回
+        // playerLayer 本体要么排到补角层（z=10）/控制栏（z=20）之后，
+        // 要么需负 z 压底；而负 z 子项会绘制到父项自身背景之下，
+        // 被容器黑色背景挡住（播放区黑屏）。挂回这个专用透明容器后，
+        // 因其声明在最前，叠层关系与初始声明完全一致，z 无需调整
+        Item {
+            id: videoLayer
+            anchors.fill: parent
+        }
 
-    // 直播播放器
-    MpvObject {
-        id: mpvPlayer
-        anchors.fill: parent
-        liveMode: true  // 直播模式：小cache低延迟（5s/8M），覆盖视频默认的大cache配置
-        volume: root.volume
-        onPlayingChanged: {
-            // 检测异常停止：之前在播放，现在停止了，但还没有视频
-            if (!playing && root._wasPlaying && root._waitingForVideo && !hasVideo) {
-                console.warn("[LivePlayerPage] mpv stopped unexpectedly without video, retrying...")
+        // 直播播放器
+        MpvObject {
+            id: mpvPlayer
+            anchors.fill: parent
+            liveMode: true  // 直播模式：小cache低延迟（5s/8M），覆盖视频默认的大cache配置
+            volume: root.volume
+            onPlayingChanged: {
+                // 检测异常停止：之前在播放，现在停止了，但还没有视频
+                if (!playing && root._wasPlaying && root._waitingForVideo && !hasVideo) {
+                    console.warn("[LivePlayerPage] mpv stopped unexpectedly without video, retrying...")
+                    root.loadRetryCount++
+                    if (root.loadRetryCount >= root.maxLoadRetries) {
+                        root.handleLoadFailure("播放失败，请点击重新加载")
+                    } else {
+                        root.tryNextCandidate()
+                    }
+                }
+                root._wasPlaying = playing
+            }
+            onErrorOccurred: {
+                console.warn("[LivePlayerPage] mpv error:", error)
                 root.loadRetryCount++
                 if (root.loadRetryCount >= root.maxLoadRetries) {
-                    root.handleLoadFailure("播放失败，请点击重新加载")
+                    root.handleLoadFailure(error)
                 } else {
                     root.tryNextCandidate()
                 }
             }
-            root._wasPlaying = playing
-        }
-        onErrorOccurred: {
-            console.warn("[LivePlayerPage] mpv error:", error)
-            root.loadRetryCount++
-            if (root.loadRetryCount >= root.maxLoadRetries) {
-                root.handleLoadFailure(error)
-            } else {
-                root.tryNextCandidate()
-            }
-        }
-        onHasVideoChanged: {
-            if (hasVideo) {
-                // 视频加载成功
-                root._waitingForVideo = false
-                root.loadRetryCount = 0
-                loadTimeoutTimer.stop()
-                // 确保视频自动播放（处理 hasVideo: true 但 playing: false 的情况）
-                if (!playing) {
-                    mpvPlayer.play()
+            onHasVideoChanged: {
+                if (hasVideo) {
+                    // 视频加载成功
+                    root._waitingForVideo = false
+                    root.loadRetryCount = 0
+                    loadTimeoutTimer.stop()
+                    // 确保视频自动播放（处理 hasVideo: true 但 playing: false 的情况）
+                    if (!playing) {
+                        mpvPlayer.play()
+                    }
+                    // 视频加载成功后延迟 1s 再加载弹幕：
+                    // 1. 错开 D3D11 硬解初始化与 SSL 握手的资源竞争
+                    // 2. 快速切换直播间时，停留不足 1s 的房间不发起弹幕连接，减少 WebSocket churn
+                    // stopPlayer/loadStream 会停止此 timer，避免过期触发
+                    danmuLoadTimer.stop()
+                    danmuLoadTimer.start()
                 }
-                // 视频加载成功后延迟 1s 再加载弹幕：
-                // 1. 错开 D3D11 硬解初始化与 SSL 握手的资源竞争
-                // 2. 快速切换直播间时，停留不足 1s 的房间不发起弹幕连接，减少 WebSocket churn
-                // stopPlayer/loadStream 会停止此 timer，避免过期触发
-                danmuLoadTimer.stop()
-                danmuLoadTimer.start()
             }
+        }
+        // 弹幕显示浮层（覆盖在视频上方，鼠标事件穿透）
+        DanmakuOverlay {
+            id: danmakuOverlay
+            anchors.fill: parent
+            danmakuEnabled: root.danmakuEnabled
+            opacityValue: root.danmakuOpacity
+            fontSizeScale: root.danmakuSize
+            outlineStyle: root.danmakuOutlineStyle
+            speedScale: root._danmakuSpeedScale(root.danmakuSpeedIndex)
+            // 显示范围：弹幕从顶部开始向下排列，范围越小底部空出越多
+            // 0=1/4屏, 1=半屏, 2=3/4屏, 3=全屏
+            displayAreaRatio: [0.25, 0.5, 0.75, 1.0][root.danmakuRangeIndex] || 1.0
+            areaOffsetRatio: 0.0
+
+
+        }
+        // 直播封面占位（流加载前显示）
+        FluImage {
+            anchors.fill: parent
+            source: GlobalState.fixImageUrl(root.cover,
+                                           parent.width * Screen.devicePixelRatio,
+                                           parent.height * Screen.devicePixelRatio,
+                                           true)
+            fillMode: Image.PreserveAspectCrop
+            visible: !mpvPlayer.hasVideo && root.cover !== "" && !root.loadFailed
+            asynchronous: true
+            cache: false
+            sourceSize: Qt.size(parent.width * Screen.devicePixelRatio,
+                                parent.height * Screen.devicePixelRatio)
+        }
+        // 加载中提示
+        Column {
+            anchors.centerIn: parent
+            spacing: 12
+            visible: root.loadingStream && !mpvPlayer.hasVideo && !root.loadFailed
+
+            FluProgressRing {
+                anchors.horizontalCenter: parent.horizontalCenter
+            }
+
+            FluText {
+                anchors.horizontalCenter: parent.horizontalCenter
+                text: "正在加载直播流..."
+                color: "#FFFFFF"
+                font: FluTextStyle.Body
+            }
+        }
+        // 加载失败提示
+        Column {
+            anchors.centerIn: parent
+            spacing: 12
+            visible: root.loadFailed
+
+            FluIcon {
+                anchors.horizontalCenter: parent.horizontalCenter
+                iconSource: FluentIcons.Error
+                iconSize: 48
+                color: "#FF4444"
+            }
+
+            FluText {
+                anchors.horizontalCenter: parent.horizontalCenter
+                text: "直播加载失败"
+                color: "#FFFFFF"
+                font: FluTextStyle.Body
+            }
+
+            FluText {
+                anchors.horizontalCenter: parent.horizontalCenter
+                text: root.loadErrorMsg
+                color: "#AAAAAA"
+                font: FluTextStyle.Caption
+                visible: root.loadErrorMsg !== ""
+            }
+
+            FluButton {
+                anchors.horizontalCenter: parent.horizontalCenter
+                text: "重新加载"
+                onClicked: root.loadStream()
+            }
+        }
+        // 视频信息浮层（用于验证实际播放画质）
+        Rectangle {
+            id: videoInfoPanel
+            anchors.right: parent.right
+            anchors.top: parent.top
+            anchors.margins: Theme.spacingMedium
+            width: infoColumn.width + 24
+            height: infoColumn.height + 24
+            color: "#E6000000"
+            radius: 6
+            visible: root.showVideoInfo
+            z: 100
+
+            Column {
+                id: infoColumn
+                anchors.centerIn: parent
+                spacing: 6
+
+                FluText {
+                    text: "实际播放信息"
+                    font: FluTextStyle.BodyStrong
+                    color: "#FFFFFF"
+                }
+
+                Rectangle {
+                    width: infoColumn.width
+                    height: 1
+                    color: "#444444"
+                }
+
+                FluText {
+                    text: "请求清晰度: qn=" + root.currentQn + " (" + root.currentQuality + ")"
+                    font: FluTextStyle.Caption
+                    color: "#FFD700"
+                }
+
+                FluText {
+                    text: "分辨率: " + root.actualWidth + " x " + root.actualHeight
+                    font: FluTextStyle.Caption
+                    color: "#FFFFFF"
+                    visible: root.actualWidth > 0
+                }
+
+                FluText {
+                    text: "视频编码: " + (root.actualVideoCodec || "未知")
+                    font: FluTextStyle.Caption
+                    color: "#FFFFFF"
+                }
+
+                FluText {
+                    text: "视频格式: " + (root.actualVideoFormat || "未知")
+                    font: FluTextStyle.Caption
+                    color: "#FFFFFF"
+                }
+
+                FluText {
+                    text: "容器格式: " + (root.actualContainerFormat || "未知")
+                    font: FluTextStyle.Caption
+                    color: "#FFFFFF"
+                }
+
+                FluText {
+                    text: "帧率: " + (root.actualFps > 0 ? root.actualFps.toFixed(2) + " fps" : "未知")
+                    font: FluTextStyle.Caption
+                    color: "#FFFFFF"
+                }
+
+                FluText {
+                    text: "视频码率: " + (root.actualVideoBitrate > 0 ? Math.round(root.actualVideoBitrate) + " kbps" : "未知")
+                    font: FluTextStyle.Caption
+                    color: "#FFFFFF"
+                }
+
+                FluText {
+                    text: "音频编码: " + (root.actualAudioCodec || "未知")
+                    font: FluTextStyle.Caption
+                    color: "#FFFFFF"
+                }
+
+                FluText {
+                    text: "音频码率: " + (root.actualAudioBitrate > 0 ? Math.round(root.actualAudioBitrate) + " kbps" : "未知")
+                    font: FluTextStyle.Caption
+                    color: "#FFFFFF"
+                }
+
+                Rectangle {
+                    width: infoColumn.width
+                    height: 1
+                    color: "#444444"
+                }
+
+                FluText {
+                    text: "流地址:"
+                    font: FluTextStyle.Caption
+                    color: "#AAAAAA"
+                }
+
+                FluText {
+                    width: 320
+                    text: root.actualPath
+                    font: FluTextStyle.Caption
+                    color: "#888888"
+                    wrapMode: Text.WrapAnywhere
+                    maximumLineCount: 3
+                    elide: Text.ElideRight
+                }
+            }
+
+            MouseArea {
+                anchors.fill: parent
+                acceptedButtons: Qt.NoButton
+                hoverEnabled: true
+                onPositionChanged: root.playerMouseActivity()
+            }
+        }
+        // ===== 播放区圆角补角层（与视频播放页同一套方案）=====
+        // 直播画面（mpv 方形纹理）会凸出到 playerLayer 圆弧之外的角部
+        // 区域，露出直角。两层修复（声明在播放器/弹幕之后、控制栏之前：
+        // 同 z 下按声明顺序绘制，盖住视频但不压控制栏）。
+        // 结构改为视频页同款后，cornerFix 底下是 root 的背景层
+        // （FluTheme.backgroundColor，不参与 CircularReveal 揭示动画），
+        // 填色与之间源同帧翻转，主题切换天然不穿帮
+        Item {
+            id: cornerFix
+            anchors.fill: parent
+            z: 10   // 压视频/弹幕，低于控制栏（z=20）
+
+            // (a) 直角填补：反转遮罩把"圆弧之外、外接矩形之内"的四个角
+            // 填成 root 背景色（FluTheme.backgroundColor），恢复圆角轮廓。
+            // mask 与 playerLayer 几何严格一致，textureSize 必须与
+            // sourceItem 几何一致（否则 MultiEffect 拉伸采样产生方向性
+            // 偏移 → 对角性外露）。纹理按 2x DPR 分配抗锯齿
+            Item {
+                anchors.fill: parent
+                layer.enabled: true
+                layer.samples: 4
+                layer.effect: MultiEffect {
+                    maskEnabled: true
+                    maskInverted: true
+                    maskSource: ShaderEffectSource {
+                        sourceItem: Rectangle {
+                            width: Math.max(1, cornerFix.width)
+                            height: Math.max(1, cornerFix.height)
+                            radius: playerLayer.radius
+                            color: "black"
+                        }
+                        textureSize: Qt.size(Math.max(1, cornerFix.width * Screen.devicePixelRatio * 2),
+                                             Math.max(1, cornerFix.height * Screen.devicePixelRatio * 2))
+                        hideSource: true
+                        live: true
+                    }
+                }
+                Rectangle {
+                    anchors.fill: parent
+                    color: FluTheme.backgroundColor
+                }
+            }
+
+            // (b) 圆角描边：与页面背景同色（白天纯白、黑夜纯黑、不透明），
+            // 视觉上"隐形"——压住遮罩软边处视频的隐约透出。playerLayer 的
+            // clip 会裁掉 margins:-1 外扩的 1px（该区域视频本就画不到），
+            // 不影响角部覆盖
+            Rectangle {
+                anchors.fill: parent
+                anchors.margins: -1
+                radius: playerLayer.radius
+                color: "transparent"
+                border.width: 3
+                border.color: FluTheme.dark ? Qt.rgba(0, 0, 0, 1.0) : Qt.rgba(1, 1, 1, 1.0)
+            }
+        }
+        // 顶部渐变阴影 + 直播标题
+        // 阴影高度独立于文字区：文字区之下再延伸 110px，为渐变提供足够的
+        // 竖直空间展开。渐变 alpha 严格线性衰减（0.8 → 0，每 10% 一档）：
+        // 白背景下人眼感知的是灰度（1-alpha），线性 alpha 即均匀的灰度坡，
+        // 中段不额外压暗、尾段不加速，避免渐变被读成一块边界清晰的"条带"
+        // 渐变 Rectangle 的 gradient 填充不遵循 radius（QtQuick 限制）：渐变按
+        // 外接矩形直角填充，呼出时黑色直角超出页面圆角形成黑三角。改用
+        // FluClip（OpacityMask 真圆角裁剪）承载圆角，渐变 Rectangle 只管填色
+        FluClip {
+            id: topBar
+            z: 20   // 压补角层（z=10）；reparent 回归后也稳定在视频之上
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.top: parent.top
+            height: titleColumn.height + Theme.spacingMedium * 2 + 110
+            // 仅上两角圆角，半径与页面 Frame(root.radius) 一致；
+            // 下两角直角与视频画面衔接
+            radius: [root.radius, root.radius, 0, 0]
+            opacity: root.controlsVisible ? 1 : 0
+            // 不能直接绑 controlsVisible：enabled 瞬间翻false会立刻抽掉按钮的
+            // 阴影/描边（FluControlBackground 依赖 enabled），在淡出动画中途
+            // 突变产生残影。改为跟随 opacity：淡出全程保持 enabled（阴影随
+            // 整体平滑淡出），完全透明后才禁用整棵子树，拦截幽灵点击
+            enabled: opacity > 0
+            Behavior on opacity {
+                NumberAnimation {
+                    duration: Theme.animationFast
+                    easing.type: Easing.OutCubic
+                }
+            }
+
+            Rectangle {
+                anchors.fill: parent
+                gradient: Gradient {
+                GradientStop { position: 0.00; color: "#CC000000" }
+                GradientStop { position: 0.10; color: "#B8000000" }
+                GradientStop { position: 0.20; color: "#A3000000" }
+                GradientStop { position: 0.30; color: "#8F000000" }
+                GradientStop { position: 0.40; color: "#7A000000" }
+                GradientStop { position: 0.50; color: "#66000000" }
+                GradientStop { position: 0.60; color: "#52000000" }
+                GradientStop { position: 0.70; color: "#3D000000" }
+                GradientStop { position: 0.80; color: "#29000000" }
+                GradientStop { position: 0.90; color: "#14000000" }
+                GradientStop { position: 1.00; color: "#00000000" }
+            }
+            }
+
+            Column {
+                id: titleColumn
+                anchors.left: parent.left
+                anchors.top: parent.top
+                anchors.leftMargin: Theme.spacingMedium
+                anchors.topMargin: Theme.spacingMedium
+                spacing: 4
+
+                FluText {
+                    text: root.streamTitle || "直播间标题"
+                    font: FluTextStyle.Body
+                    color: "white"
+                }
+
+                FluText {
+                    text: root.streamer ? (root.streamer + "  ·  " + root.formatOnline(root.onlineCount) + "人观看") : ""
+                    font: FluTextStyle.Caption
+                    color: "#CCCCCC"
+                    visible: root.streamer !== ""
+                }
+            }
+
+            // 悬停在顶部标题栏时保持控制栏与指针可见（与控制栏同方案：
+            // HoverHandler 被动监听，不与子控件 MouseArea 抢事件）
+            HoverHandler { id: topBarHover }
+
+            // 必须声明在按钮之前（z 序垫底）：hoverEnabled 的 MouseArea 会
+            // 独占悬停事件，盖在按钮上方会吞掉按钮的 hovered 导致悬停动效失效
+            MouseArea {
+                anchors.fill: parent
+                hoverEnabled: true
+                acceptedButtons: Qt.NoButton
+                onPositionChanged: { if (root.controlsVisible) hideControlsTimer.restart() }
+            }
+
+            // 未关注：FluFilledButton（主题色实底，醒目）；已关注：FluButton
+            //（普通灰底，低调）。两种状态视觉差异明显
+            Loader {
+                anchors.right: parent.right
+                anchors.top: parent.top
+                anchors.rightMargin: Theme.spacingMedium
+                anchors.topMargin: Theme.spacingMedium
+                sourceComponent: root.isFollowing ? followPlainBtn : followFilledBtn
+                active: root.mid !== ""
+            }
+            Component {
+                id: followFilledBtn
+                FluFilledButton {
+                    text: "+ 关注"
+                    font: FluTextStyle.Caption
+                    onClicked: {
+                        closePopups()
+                        if (root.mid !== "") {
+                            InteractionManager.followUser(root.mid, 1)
+                        }
+                    }
+                }
+            }
+            Component {
+                id: followPlainBtn
+                FluButton {
+                    text: "已关注"
+                    font: FluTextStyle.Caption
+                    onClicked: {
+                        closePopups()
+                        if (root.mid !== "") {
+                            InteractionManager.followUser(root.mid, 2)
+                        }
+                    }
+                }
+            }
+        }
+        // 控制栏
+        // 高度 = 按钮行（liveControlBarHeight）+ 上方 55px 纯渐变区：渐变
+        // 铺展在更多像素上，与顶部标题栏对称。按钮行锚定底部（见 RowLayout），
+        // 视觉位置不变；55px 渐变区同时充当按钮上方的"悬停保持"缓冲区
+        // （悬停在按钮附近即保持控制栏不隐藏）
+        // 渐变 alpha 严格线性上升（0 → 0.8，每 10% 一档），白背景下灰度坡
+        // 均匀，无可见边界（与顶部标题栏同一套曲线，仅方向镜像）
+        // 同 topBar：FluClip 真圆角裁剪渐变栏（gradient 填充不遵循 radius）
+        FluClip {
+            id: controlBar
+            z: 20   // 压补角层（z=10）；reparent 回归后也稳定在视频之上
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.bottom: parent.bottom
+            height: Theme.liveControlBarHeight + 55
+            // 仅下两角圆角，半径与页面 Frame(root.radius) 一致；
+            // 上两角直角（处于渐变全透明区，不可见）
+            radius: [0, 0, root.radius, root.radius]
+            opacity: root.controlsVisible ? 1 : 0
+            // 同 topBar：跟随 opacity 而非 controlsVisible，避免 enabled 瞬间
+            // 翻 false 抽掉按钮阴影/描边产生残影；完全透明后才禁用（拦截幽灵点击）
+            enabled: opacity > 0
+            Behavior on opacity {
+                NumberAnimation {
+                    duration: Theme.animationFast
+                    easing.type: Easing.OutCubic
+                }
+            }
+
+            Rectangle {
+                anchors.fill: parent
+                gradient: Gradient {
+                GradientStop { position: 0.00; color: "#00000000" }
+                GradientStop { position: 0.10; color: "#14000000" }
+                GradientStop { position: 0.20; color: "#29000000" }
+                GradientStop { position: 0.30; color: "#3D000000" }
+                GradientStop { position: 0.40; color: "#52000000" }
+                GradientStop { position: 0.50; color: "#66000000" }
+                GradientStop { position: 0.60; color: "#7A000000" }
+                GradientStop { position: 0.70; color: "#8F000000" }
+                GradientStop { position: 0.80; color: "#A3000000" }
+                GradientStop { position: 0.90; color: "#B8000000" }
+                GradientStop { position: 1.00; color: "#CC000000" }
+            }
+            }
+
+            // 控制栏区域悬停检测（HoverHandler 为被动监听，不与子控件
+            // MouseArea 抢事件）：悬停期间不触发自动隐藏
+            HoverHandler { id: controlBarHover }
+
+            // 必须声明在按钮之前（z 序垫底）：hoverEnabled 的 MouseArea 会
+            // 独占悬停事件，盖在按钮上方会吞掉按钮的 hovered 导致悬停动效失效
+            MouseArea {
+                anchors.fill: parent
+                hoverEnabled: true
+                acceptedButtons: Qt.NoButton
+                onPositionChanged: root.playerMouseActivity()
+            }
+
+            RowLayout {
+                // 按钮行贴底对齐：渐变衬底高度大于按钮行时，垂直居中会把
+                // 按钮整体抬离底部，这里改为锚定底边、固定为控制栏行高
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.bottom: parent.bottom
+                anchors.leftMargin: Theme.spacingMedium
+                anchors.rightMargin: Theme.spacingMedium
+                height: Theme.liveControlBarHeight
+                spacing: Theme.spacingMedium
+
+                FluIconButton {
+                    iconSource: FluentIcons.Sync
+                    iconSize: Theme.iconSizeMedium
+                    iconColor: "white"
+                    hoverColor: "#26FFFFFF"   // 15% 白：黑底上可见但不刺眼
+                    pressedColor: "#40FFFFFF"
+                    Layout.alignment: Qt.AlignVCenter
+                    onClicked: {
+                        closePopups()
+                        root.loadStream()
+                    }
+                }
+
+                Item { Layout.fillWidth: true }
+
+                // ===== 弹幕输入框（FluTextBox 定制深色样式）=====
+                // 文字保留：仅发送成功才 clear（见 onLiveDanmakuSendResult），
+                // 失焦/控制栏隐藏都不清空；输入中经 controlOverlayActive()
+                // 豁免自动隐藏。样式覆盖仅此实例，不影响全局主题。
+                // 小窗模式（480px）空间不足，隐藏
+                FluTextBox {
+                    id: danmakuInput
+                    visible: !root.isMiniWindow
+                    Layout.preferredWidth: 220
+                    Layout.maximumWidth: 260
+                    Layout.alignment: Qt.AlignVCenter
+                    placeholderText: "发个弹幕见证当下"
+                    font: FluTextStyle.Caption
+                    iconSource: FluentIcons.Send   // 输入框内右侧发送提示（Enter 发送）
+                    cleanEnabled: true             // 非空时自动显示清空键（组件内置）
+                    maximumLength: 40              // B 站直播弹幕长度限制
+                    // 深色半透明定制（仅此实例，不影响全局主题）：
+                    // 文字白色（normalColor 为组件公有属性），
+                    // 底色半透明黑 + 细白边，聚焦时主题色描边
+                    normalColor: "white"
+                    placeholderNormalColor: "#99FFFFFF"
+                    placeholderFocusColor: "#99FFFFFF"
+                    background: Rectangle {
+                        implicitHeight: 30
+                        radius: 4
+                        color: danmakuInput.activeFocus ? "#59000000" : "#40000000"
+                        border.width: 1
+                        border.color: danmakuInput.activeFocus
+                                       ? FluTheme.primaryColor : "#33FFFFFF"
+                    }
+                    onCommit: (text) => root.sendLiveDanmaku(text)
+                    Keys.onPressed: (event) => {
+                        // 中文输入法组合期间回车是"上屏候选词"，
+                        // Qt 已处理，这里无需干预；Esc 交还焦点
+                        if (event.key === Qt.Key_Escape) {
+                            danmakuInput.focus = false
+                            event.accepted = true
+                        }
+                    }
+                }
+
+                // 表情按钮：弹出表情面板（大表情发送）。小窗模式下隐藏
+                FluIconButton {
+                    id: emoticonBtn
+                    visible: !root.isMiniWindow
+                    iconSource: FluentIcons.Emoji2
+                    iconSize: Theme.iconSizeMedium
+                    iconColor: "white"
+                    hoverColor: "#26FFFFFF"
+                    pressedColor: "#40FFFFFF"
+                    Layout.alignment: Qt.AlignVCenter
+                    onClicked: {
+                        var wasOpen = emoticonPopup.opened
+                        closePopups()
+                        if (!wasOpen) {
+                            if (!root._emoticonsLoaded) {
+                                if (Login.isLoggedIn) {
+                                    Api.getLiveEmoticons(String(root.roomId))
+                                } else {
+                                    scInfoBar.showWarning("请先登录后发送弹幕")
+                                    return
+                                }
+                            }
+                            emoticonPopup.open()
+                        }
+                    }
+                }
+
+                FluIconButton {
+                    id: volumeBtn
+                    iconSource: {
+                        if (root.volume === 0) return FluentIcons.Mute
+                        if (root.volume <= 0.33) return FluentIcons.Volume1
+                        if (root.volume <= 0.66) return FluentIcons.Volume2
+                        return FluentIcons.Volume3
+                    }
+                    iconSize: Theme.iconSizeMedium
+                    iconColor: "white"
+                    hoverColor: "#26FFFFFF"
+                    pressedColor: "#40FFFFFF"
+                    Layout.alignment: Qt.AlignVCenter
+                    onClicked: {
+                        var wasOpen = volumePopup.opened
+                        closePopups()
+                        if (!wasOpen) volumePopup.open()
+                    }
+                }
+
+                FluIconButton {
+                    id: danmakuBtn
+                    iconSource: FluentIcons.Subtitles
+                    iconSize: Theme.iconSizeMedium
+                    iconColor: "white"
+                    hoverColor: "#26FFFFFF"
+                    pressedColor: "#40FFFFFF"
+                    Layout.alignment: Qt.AlignVCenter
+                    onClicked: {
+                        var wasOpen = danmakuPopup.opened
+                        closePopups()
+                        if (!wasOpen) danmakuPopup.open()
+                    }
+                }
+
+                // 画质选项
+                FluMenuBar {
+                    Layout.alignment: Qt.AlignVCenter
+                    delegate: FluMenuBarItem {
+                        id: mbItem
+                        textColor: "white"
+                        // 覆写背景：原版悬停色 FluTheme.itemHoverColor（6% 白）在黑色
+                        // 控制栏上不可见，改为与 FluIconButton 一致的 15%/25% 白。
+                        // 注意：原组件内部的 control id 外部不可见，须用自身 id 引用
+                        background: Rectangle {
+                            implicitWidth: 30
+                            implicitHeight: 30
+                            radius: 3
+                            color: mbItem.pressed ? "#40FFFFFF"
+                                                  : (mbItem.highlighted ? "#26FFFFFF" : "transparent")
+                        }
+                    }
+                    FluMenu {
+                        id: qualityMenu
+                        title: root.currentQuality
+                        onAboutToShow: closePopups()
+                        // 动态生成画质菜单
+                        Instantiator {
+                            model: root.qualityList
+                            delegate: FluMenuItem {
+                                text: modelData.desc
+                                onTriggered: {
+                                    root.currentQuality = modelData.desc
+                                    root.currentQn = modelData.qn
+                                    root.qualityChanged(modelData.desc)
+                                    root.loadStream()
+                                }
+                            }
+                            onObjectAdded: function(index, object) {
+                                qualityMenu.addItem(object)
+                            }
+                            onObjectRemoved: function(index, object) {
+                                qualityMenu.removeItem(object)
+                            }
+                        }
+                    }
+                }
+
+                // 视频信息按钮（用于验证实际播放画质）
+                FluIconButton {
+                    iconSource: FluentIcons.Info
+                    iconSize: Theme.iconSizeMedium
+                    iconColor: "white"
+                    hoverColor: "#26FFFFFF"
+                    pressedColor: "#40FFFFFF"
+                    Layout.alignment: Qt.AlignVCenter
+                    onClicked: {
+                        closePopups()
+                        // 立即刷新一次实际参数
+                        if (mpvPlayer.hasVideo) {
+                            var info = mpvPlayer.getVideoInfo()
+                            root.actualWidth = info["width"] || 0
+                            root.actualHeight = info["height"] || 0
+                            root.actualVideoCodec = info["videoCodec"] || ""
+                            root.actualVideoFormat = info["videoFormat"] || ""
+                            root.actualContainerFormat = info["containerFormat"] || ""
+                            root.actualFps = info["fps"] || 0
+                            root.actualVideoBitrate = info["videoBitrate"] || 0
+                            root.actualAudioBitrate = info["audioBitrate"] || 0
+                            root.actualAudioCodec = info["audioCodec"] || ""
+                            root.actualPath = info["path"] || ""
+                        }
+                        root.showVideoInfo = !root.showVideoInfo
+                    }
+                }
+
+                // 小窗播放：进入/退出独立置顶小窗
+                FluIconButton {
+                    id: miniWindowBtn
+                    iconSource: root.isMiniWindow ? FluentIcons.ClosePane : FluentIcons.OpenInNewWindow
+                    iconSize: Theme.iconSizeMedium
+                    iconColor: "white"
+                    hoverColor: "#26FFFFFF"
+                    pressedColor: "#40FFFFFF"
+                    Layout.alignment: Qt.AlignVCenter
+                    onClicked: {
+                        closePopups()
+                        if (root.isMiniWindow) root.exitMiniWindow()
+                        else root.enterMiniWindow()
+                    }
+                }
+
+                FluIconButton {
+                    iconSource: FluentIcons.BackToWindow
+                    iconSize: Theme.iconSizeMedium
+                    iconColor: "white"
+                    hoverColor: "#26FFFFFF"
+                    pressedColor: "#40FFFFFF"
+                    Layout.alignment: Qt.AlignVCenter
+                    onClicked: {
+                        closePopups()
+                        root.closeRequested()
+                    }
+                }
+            }
+        }
+        // Esc 退出小窗（页面级快捷键，主窗口激活时生效）
+        //（小窗模式下页面 visible 从父级"流动"为 false，只认 isMiniWindow）
+        Shortcut {
+            sequence: "Esc"
+            enabled: root.isMiniWindow
+            onActivated: root.exitMiniWindow()
         }
     }
+
 
     // 弹幕延迟加载定时器：视频加载成功后 1s 触发 getLiveDanmuInfo
     Timer {
@@ -1226,600 +1919,13 @@ Rectangle {
     // 直播弹幕管理器（WebSocket 连接 B 站弹幕服务器）
     // 弹幕管理器由外部注入（LivePage 层级共享实例），此处不再创建。
 
-    // 弹幕显示浮层（覆盖在视频上方，鼠标事件穿透）
-    DanmakuOverlay {
-        id: danmakuOverlay
-        anchors.fill: parent
-        danmakuEnabled: root.danmakuEnabled
-        opacityValue: root.danmakuOpacity
-        fontSizeScale: root.danmakuSize
-        outlineStyle: root.danmakuOutlineStyle
-        speedScale: root._danmakuSpeedScale(root.danmakuSpeedIndex)
-        // 显示范围：弹幕从顶部开始向下排列，范围越小底部空出越多
-        // 0=1/4屏, 1=半屏, 2=3/4屏, 3=全屏
-        displayAreaRatio: [0.25, 0.5, 0.75, 1.0][root.danmakuRangeIndex] || 1.0
-        areaOffsetRatio: 0.0
 
 
-    }
 
-    // 直播封面占位（流加载前显示）
-    FluImage {
-        anchors.fill: parent
-        source: GlobalState.fixImageUrl(root.cover,
-                                       parent.width * Screen.devicePixelRatio,
-                                       parent.height * Screen.devicePixelRatio,
-                                       true)
-        fillMode: Image.PreserveAspectCrop
-        visible: !mpvPlayer.hasVideo && root.cover !== "" && !root.loadFailed
-        asynchronous: true
-        cache: false
-        sourceSize: Qt.size(parent.width * Screen.devicePixelRatio,
-                            parent.height * Screen.devicePixelRatio)
-    }
 
-    // 加载中提示
-    Column {
-        anchors.centerIn: parent
-        spacing: 12
-        visible: root.loadingStream && !mpvPlayer.hasVideo && !root.loadFailed
 
-        FluProgressRing {
-            anchors.horizontalCenter: parent.horizontalCenter
-        }
 
-        FluText {
-            anchors.horizontalCenter: parent.horizontalCenter
-            text: "正在加载直播流..."
-            color: "#FFFFFF"
-            font: FluTextStyle.Body
-        }
-    }
 
-    // 加载失败提示
-    Column {
-        anchors.centerIn: parent
-        spacing: 12
-        visible: root.loadFailed
-
-        FluIcon {
-            anchors.horizontalCenter: parent.horizontalCenter
-            iconSource: FluentIcons.Error
-            iconSize: 48
-            color: "#FF4444"
-        }
-
-        FluText {
-            anchors.horizontalCenter: parent.horizontalCenter
-            text: "直播加载失败"
-            color: "#FFFFFF"
-            font: FluTextStyle.Body
-        }
-
-        FluText {
-            anchors.horizontalCenter: parent.horizontalCenter
-            text: root.loadErrorMsg
-            color: "#AAAAAA"
-            font: FluTextStyle.Caption
-            visible: root.loadErrorMsg !== ""
-        }
-
-        FluButton {
-            anchors.horizontalCenter: parent.horizontalCenter
-            text: "重新加载"
-            onClicked: root.loadStream()
-        }
-    }
-
-    // 视频信息浮层（用于验证实际播放画质）
-    Rectangle {
-        id: videoInfoPanel
-        anchors.right: parent.right
-        anchors.top: parent.top
-        anchors.margins: Theme.spacingMedium
-        width: infoColumn.width + 24
-        height: infoColumn.height + 24
-        color: "#E6000000"
-        radius: 6
-        visible: root.showVideoInfo
-        z: 100
-
-        Column {
-            id: infoColumn
-            anchors.centerIn: parent
-            spacing: 6
-
-            FluText {
-                text: "实际播放信息"
-                font: FluTextStyle.BodyStrong
-                color: "#FFFFFF"
-            }
-
-            Rectangle {
-                width: infoColumn.width
-                height: 1
-                color: "#444444"
-            }
-
-            FluText {
-                text: "请求清晰度: qn=" + root.currentQn + " (" + root.currentQuality + ")"
-                font: FluTextStyle.Caption
-                color: "#FFD700"
-            }
-
-            FluText {
-                text: "分辨率: " + root.actualWidth + " x " + root.actualHeight
-                font: FluTextStyle.Caption
-                color: "#FFFFFF"
-                visible: root.actualWidth > 0
-            }
-
-            FluText {
-                text: "视频编码: " + (root.actualVideoCodec || "未知")
-                font: FluTextStyle.Caption
-                color: "#FFFFFF"
-            }
-
-            FluText {
-                text: "视频格式: " + (root.actualVideoFormat || "未知")
-                font: FluTextStyle.Caption
-                color: "#FFFFFF"
-            }
-
-            FluText {
-                text: "容器格式: " + (root.actualContainerFormat || "未知")
-                font: FluTextStyle.Caption
-                color: "#FFFFFF"
-            }
-
-            FluText {
-                text: "帧率: " + (root.actualFps > 0 ? root.actualFps.toFixed(2) + " fps" : "未知")
-                font: FluTextStyle.Caption
-                color: "#FFFFFF"
-            }
-
-            FluText {
-                text: "视频码率: " + (root.actualVideoBitrate > 0 ? Math.round(root.actualVideoBitrate) + " kbps" : "未知")
-                font: FluTextStyle.Caption
-                color: "#FFFFFF"
-            }
-
-            FluText {
-                text: "音频编码: " + (root.actualAudioCodec || "未知")
-                font: FluTextStyle.Caption
-                color: "#FFFFFF"
-            }
-
-            FluText {
-                text: "音频码率: " + (root.actualAudioBitrate > 0 ? Math.round(root.actualAudioBitrate) + " kbps" : "未知")
-                font: FluTextStyle.Caption
-                color: "#FFFFFF"
-            }
-
-            Rectangle {
-                width: infoColumn.width
-                height: 1
-                color: "#444444"
-            }
-
-            FluText {
-                text: "流地址:"
-                font: FluTextStyle.Caption
-                color: "#AAAAAA"
-            }
-
-            FluText {
-                width: 320
-                text: root.actualPath
-                font: FluTextStyle.Caption
-                color: "#888888"
-                wrapMode: Text.WrapAnywhere
-                maximumLineCount: 3
-                elide: Text.ElideRight
-            }
-        }
-
-        MouseArea {
-            anchors.fill: parent
-            acceptedButtons: Qt.NoButton
-            hoverEnabled: true
-            onPositionChanged: root.playerMouseActivity()
-        }
-    }
-
-    // 顶部渐变阴影 + 直播标题
-    // 阴影高度独立于文字区：文字区之下再延伸 110px，为渐变提供足够的
-    // 竖直空间展开。渐变 alpha 严格线性衰减（0.8 → 0，每 10% 一档）：
-    // 白背景下人眼感知的是灰度（1-alpha），线性 alpha 即均匀的灰度坡，
-    // 中段不额外压暗、尾段不加速，避免渐变被读成一块边界清晰的"条带"
-    Rectangle {
-        id: topBar
-        anchors.left: parent.left
-        anchors.right: parent.right
-        anchors.top: parent.top
-        height: titleColumn.height + Theme.spacingMedium * 2 + 110
-        gradient: Gradient {
-            GradientStop { position: 0.00; color: "#CC000000" }
-            GradientStop { position: 0.10; color: "#B8000000" }
-            GradientStop { position: 0.20; color: "#A3000000" }
-            GradientStop { position: 0.30; color: "#8F000000" }
-            GradientStop { position: 0.40; color: "#7A000000" }
-            GradientStop { position: 0.50; color: "#66000000" }
-            GradientStop { position: 0.60; color: "#52000000" }
-            GradientStop { position: 0.70; color: "#3D000000" }
-            GradientStop { position: 0.80; color: "#29000000" }
-            GradientStop { position: 0.90; color: "#14000000" }
-            GradientStop { position: 1.00; color: "#00000000" }
-        }
-        opacity: root.controlsVisible ? 1 : 0
-        // 不能直接绑 controlsVisible：enabled 瞬间翻false会立刻抽掉按钮的
-        // 阴影/描边（FluControlBackground 依赖 enabled），在淡出动画中途
-        // 突变产生残影。改为跟随 opacity：淡出全程保持 enabled（阴影随
-        // 整体平滑淡出），完全透明后才禁用整棵子树，拦截幽灵点击
-        enabled: opacity > 0
-        Behavior on opacity {
-            NumberAnimation {
-                duration: Theme.animationFast
-                easing.type: Easing.OutCubic
-            }
-        }
-
-        Column {
-            id: titleColumn
-            anchors.left: parent.left
-            anchors.top: parent.top
-            anchors.leftMargin: Theme.spacingMedium
-            anchors.topMargin: Theme.spacingMedium
-            spacing: 4
-
-            FluText {
-                text: root.streamTitle || "直播间标题"
-                font: FluTextStyle.Body
-                color: "white"
-            }
-
-            FluText {
-                text: root.streamer ? (root.streamer + "  ·  " + root.formatOnline(root.onlineCount) + "人观看") : ""
-                font: FluTextStyle.Caption
-                color: "#CCCCCC"
-                visible: root.streamer !== ""
-            }
-        }
-
-        // 悬停在顶部标题栏时保持控制栏与指针可见（与控制栏同方案：
-        // HoverHandler 被动监听，不与子控件 MouseArea 抢事件）
-        HoverHandler { id: topBarHover }
-
-        // 必须声明在按钮之前（z 序垫底）：hoverEnabled 的 MouseArea 会
-        // 独占悬停事件，盖在按钮上方会吞掉按钮的 hovered 导致悬停动效失效
-        MouseArea {
-            anchors.fill: parent
-            hoverEnabled: true
-            acceptedButtons: Qt.NoButton
-            onPositionChanged: { if (root.controlsVisible) hideControlsTimer.restart() }
-        }
-
-        // 未关注：FluFilledButton（主题色实底，醒目）；已关注：FluButton
-        //（普通灰底，低调）。两种状态视觉差异明显
-        Loader {
-            anchors.right: parent.right
-            anchors.top: parent.top
-            anchors.rightMargin: Theme.spacingMedium
-            anchors.topMargin: Theme.spacingMedium
-            sourceComponent: root.isFollowing ? followPlainBtn : followFilledBtn
-            active: root.mid !== ""
-        }
-        Component {
-            id: followFilledBtn
-            FluFilledButton {
-                text: "+ 关注"
-                font: FluTextStyle.Caption
-                onClicked: {
-                    closePopups()
-                    if (root.mid !== "") {
-                        InteractionManager.followUser(root.mid, 1)
-                    }
-                }
-            }
-        }
-        Component {
-            id: followPlainBtn
-            FluButton {
-                text: "已关注"
-                font: FluTextStyle.Caption
-                onClicked: {
-                    closePopups()
-                    if (root.mid !== "") {
-                        InteractionManager.followUser(root.mid, 2)
-                    }
-                }
-            }
-        }
-    }
-
-    // 控制栏
-    // 高度 = 按钮行（liveControlBarHeight）+ 上方 55px 纯渐变区：渐变
-    // 铺展在更多像素上，与顶部标题栏对称。按钮行锚定底部（见 RowLayout），
-    // 视觉位置不变；55px 渐变区同时充当按钮上方的"悬停保持"缓冲区
-    // （悬停在按钮附近即保持控制栏不隐藏）
-    // 渐变 alpha 严格线性上升（0 → 0.8，每 10% 一档），白背景下灰度坡
-    // 均匀，无可见边界（与顶部标题栏同一套曲线，仅方向镜像）
-    // radius 使底部两角为圆角（与视频播放页控制栏一致）；顶部两角处于
-    // 渐变全透明区，圆角裁切不可见
-    Rectangle {
-        id: controlBar
-        anchors.left: parent.left
-        anchors.right: parent.right
-        anchors.bottom: parent.bottom
-        height: Theme.liveControlBarHeight + 55
-        radius: 6
-        gradient: Gradient {
-            GradientStop { position: 0.00; color: "#00000000" }
-            GradientStop { position: 0.10; color: "#14000000" }
-            GradientStop { position: 0.20; color: "#29000000" }
-            GradientStop { position: 0.30; color: "#3D000000" }
-            GradientStop { position: 0.40; color: "#52000000" }
-            GradientStop { position: 0.50; color: "#66000000" }
-            GradientStop { position: 0.60; color: "#7A000000" }
-            GradientStop { position: 0.70; color: "#8F000000" }
-            GradientStop { position: 0.80; color: "#A3000000" }
-            GradientStop { position: 0.90; color: "#B8000000" }
-            GradientStop { position: 1.00; color: "#CC000000" }
-        }
-        opacity: root.controlsVisible ? 1 : 0
-        // 同 topBar：跟随 opacity 而非 controlsVisible，避免 enabled 瞬间
-        // 翻 false 抽掉按钮阴影/描边产生残影；完全透明后才禁用（拦截幽灵点击）
-        enabled: opacity > 0
-        Behavior on opacity {
-            NumberAnimation {
-                duration: Theme.animationFast
-                easing.type: Easing.OutCubic
-            }
-        }
-
-        // 控制栏区域悬停检测（HoverHandler 为被动监听，不与子控件
-        // MouseArea 抢事件）：悬停期间不触发自动隐藏
-        HoverHandler { id: controlBarHover }
-
-        // 必须声明在按钮之前（z 序垫底）：hoverEnabled 的 MouseArea 会
-        // 独占悬停事件，盖在按钮上方会吞掉按钮的 hovered 导致悬停动效失效
-        MouseArea {
-            anchors.fill: parent
-            hoverEnabled: true
-            acceptedButtons: Qt.NoButton
-            onPositionChanged: root.playerMouseActivity()
-        }
-
-        RowLayout {
-            // 按钮行贴底对齐：渐变衬底高度大于按钮行时，垂直居中会把
-            // 按钮整体抬离底部，这里改为锚定底边、固定为控制栏行高
-            anchors.left: parent.left
-            anchors.right: parent.right
-            anchors.bottom: parent.bottom
-            anchors.leftMargin: Theme.spacingMedium
-            anchors.rightMargin: Theme.spacingMedium
-            height: Theme.liveControlBarHeight
-            spacing: Theme.spacingMedium
-
-            FluIconButton {
-                iconSource: FluentIcons.Sync
-                iconSize: Theme.iconSizeMedium
-                iconColor: "white"
-                hoverColor: "#26FFFFFF"   // 15% 白：黑底上可见但不刺眼
-                pressedColor: "#40FFFFFF"
-                Layout.alignment: Qt.AlignVCenter
-                onClicked: {
-                    closePopups()
-                    root.loadStream()
-                }
-            }
-
-            Item { Layout.fillWidth: true }
-
-            // ===== 弹幕输入框（FluTextBox 定制深色样式）=====
-            // 文字保留：仅发送成功才 clear（见 onLiveDanmakuSendResult），
-            // 失焦/控制栏隐藏都不清空；输入中经 controlOverlayActive()
-            // 豁免自动隐藏。样式覆盖仅此实例，不影响全局主题。
-            // 小窗模式（480px）空间不足，隐藏
-            FluTextBox {
-                id: danmakuInput
-                visible: !root.isMiniWindow
-                Layout.preferredWidth: 220
-                Layout.maximumWidth: 260
-                Layout.alignment: Qt.AlignVCenter
-                placeholderText: "发个弹幕见证当下"
-                font: FluTextStyle.Caption
-                iconSource: FluentIcons.Send   // 输入框内右侧发送提示（Enter 发送）
-                cleanEnabled: true             // 非空时自动显示清空键（组件内置）
-                maximumLength: 40              // B 站直播弹幕长度限制
-                // 深色半透明定制（仅此实例，不影响全局主题）：
-                // 文字白色（normalColor 为组件公有属性），
-                // 底色半透明黑 + 细白边，聚焦时主题色描边
-                normalColor: "white"
-                placeholderNormalColor: "#99FFFFFF"
-                placeholderFocusColor: "#99FFFFFF"
-                background: Rectangle {
-                    implicitHeight: 30
-                    radius: 4
-                    color: danmakuInput.activeFocus ? "#59000000" : "#40000000"
-                    border.width: 1
-                    border.color: danmakuInput.activeFocus
-                                   ? FluTheme.primaryColor : "#33FFFFFF"
-                }
-                onCommit: (text) => root.sendLiveDanmaku(text)
-                Keys.onPressed: (event) => {
-                    // 中文输入法组合期间回车是"上屏候选词"，
-                    // Qt 已处理，这里无需干预；Esc 交还焦点
-                    if (event.key === Qt.Key_Escape) {
-                        danmakuInput.focus = false
-                        event.accepted = true
-                    }
-                }
-            }
-
-            // 表情按钮：弹出表情面板（大表情发送）。小窗模式下隐藏
-            FluIconButton {
-                id: emoticonBtn
-                visible: !root.isMiniWindow
-                iconSource: FluentIcons.Emoji2
-                iconSize: Theme.iconSizeMedium
-                iconColor: "white"
-                hoverColor: "#26FFFFFF"
-                pressedColor: "#40FFFFFF"
-                Layout.alignment: Qt.AlignVCenter
-                onClicked: {
-                    var wasOpen = emoticonPopup.opened
-                    closePopups()
-                    if (!wasOpen) {
-                        if (!root._emoticonsLoaded) {
-                            if (Login.isLoggedIn) {
-                                Api.getLiveEmoticons(String(root.roomId))
-                            } else {
-                                scInfoBar.showWarning("请先登录后发送弹幕")
-                                return
-                            }
-                        }
-                        emoticonPopup.open()
-                    }
-                }
-            }
-
-            FluIconButton {
-                id: volumeBtn
-                iconSource: {
-                    if (root.volume === 0) return FluentIcons.Mute
-                    if (root.volume <= 0.33) return FluentIcons.Volume1
-                    if (root.volume <= 0.66) return FluentIcons.Volume2
-                    return FluentIcons.Volume3
-                }
-                iconSize: Theme.iconSizeMedium
-                iconColor: "white"
-                hoverColor: "#26FFFFFF"
-                pressedColor: "#40FFFFFF"
-                Layout.alignment: Qt.AlignVCenter
-                onClicked: {
-                    var wasOpen = volumePopup.opened
-                    closePopups()
-                    if (!wasOpen) volumePopup.open()
-                }
-            }
-
-            FluIconButton {
-                id: danmakuBtn
-                iconSource: FluentIcons.Subtitles
-                iconSize: Theme.iconSizeMedium
-                iconColor: "white"
-                hoverColor: "#26FFFFFF"
-                pressedColor: "#40FFFFFF"
-                Layout.alignment: Qt.AlignVCenter
-                onClicked: {
-                    var wasOpen = danmakuPopup.opened
-                    closePopups()
-                    if (!wasOpen) danmakuPopup.open()
-                }
-            }
-
-            // 画质选项
-            FluMenuBar {
-                Layout.alignment: Qt.AlignVCenter
-                delegate: FluMenuBarItem {
-                    id: mbItem
-                    textColor: "white"
-                    // 覆写背景：原版悬停色 FluTheme.itemHoverColor（6% 白）在黑色
-                    // 控制栏上不可见，改为与 FluIconButton 一致的 15%/25% 白。
-                    // 注意：原组件内部的 control id 外部不可见，须用自身 id 引用
-                    background: Rectangle {
-                        implicitWidth: 30
-                        implicitHeight: 30
-                        radius: 3
-                        color: mbItem.pressed ? "#40FFFFFF"
-                                              : (mbItem.highlighted ? "#26FFFFFF" : "transparent")
-                    }
-                }
-                FluMenu {
-                    id: qualityMenu
-                    title: root.currentQuality
-                    onAboutToShow: closePopups()
-                    // 动态生成画质菜单
-                    Instantiator {
-                        model: root.qualityList
-                        delegate: FluMenuItem {
-                            text: modelData.desc
-                            onTriggered: {
-                                root.currentQuality = modelData.desc
-                                root.currentQn = modelData.qn
-                                root.qualityChanged(modelData.desc)
-                                root.loadStream()
-                            }
-                        }
-                        onObjectAdded: function(index, object) {
-                            qualityMenu.addItem(object)
-                        }
-                        onObjectRemoved: function(index, object) {
-                            qualityMenu.removeItem(object)
-                        }
-                    }
-                }
-            }
-
-            // 视频信息按钮（用于验证实际播放画质）
-            FluIconButton {
-                iconSource: FluentIcons.Info
-                iconSize: Theme.iconSizeMedium
-                iconColor: "white"
-                hoverColor: "#26FFFFFF"
-                pressedColor: "#40FFFFFF"
-                Layout.alignment: Qt.AlignVCenter
-                onClicked: {
-                    closePopups()
-                    // 立即刷新一次实际参数
-                    if (mpvPlayer.hasVideo) {
-                        var info = mpvPlayer.getVideoInfo()
-                        root.actualWidth = info["width"] || 0
-                        root.actualHeight = info["height"] || 0
-                        root.actualVideoCodec = info["videoCodec"] || ""
-                        root.actualVideoFormat = info["videoFormat"] || ""
-                        root.actualContainerFormat = info["containerFormat"] || ""
-                        root.actualFps = info["fps"] || 0
-                        root.actualVideoBitrate = info["videoBitrate"] || 0
-                        root.actualAudioBitrate = info["audioBitrate"] || 0
-                        root.actualAudioCodec = info["audioCodec"] || ""
-                        root.actualPath = info["path"] || ""
-                    }
-                    root.showVideoInfo = !root.showVideoInfo
-                }
-            }
-
-            // 小窗播放：进入/退出独立置顶小窗
-            FluIconButton {
-                id: miniWindowBtn
-                iconSource: root.isMiniWindow ? FluentIcons.ClosePane : FluentIcons.OpenInNewWindow
-                iconSize: Theme.iconSizeMedium
-                iconColor: "white"
-                hoverColor: "#26FFFFFF"
-                pressedColor: "#40FFFFFF"
-                Layout.alignment: Qt.AlignVCenter
-                onClicked: {
-                    closePopups()
-                    if (root.isMiniWindow) root.exitMiniWindow()
-                    else root.enterMiniWindow()
-                }
-            }
-
-            FluIconButton {
-                iconSource: FluentIcons.BackToWindow
-                iconSize: Theme.iconSizeMedium
-                iconColor: "white"
-                hoverColor: "#26FFFFFF"
-                pressedColor: "#40FFFFFF"
-                Layout.alignment: Qt.AlignVCenter
-                onClicked: {
-                    closePopups()
-                    root.closeRequested()
-                }
-            }
-        }
-    }
 
     // 表情面板：GridView 统一网格 + FluScrollBar 滚动 + Pivot 风格分类栏。
     // （FluPivot 的 tab 集合是静态子项，不支持按房间动态生成分类，
@@ -2330,13 +2436,6 @@ Rectangle {
         }
     }
 
-    // Esc 退出小窗（页面级快捷键，主窗口激活时生效）
-    //（小窗模式下页面 visible 从父级"流动"为 false，只认 isMiniWindow）
-    Shortcut {
-        sequence: "Esc"
-        enabled: root.isMiniWindow
-        onActivated: root.exitMiniWindow()
-    }
 
     // 小窗模式退出监听：非本页发起的退出路径（main.qml 窗口关闭拦截等）
     // 经 App.miniPlayerModeChanged 驱动本页恢复

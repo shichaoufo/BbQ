@@ -1626,6 +1626,7 @@ FluPage {
         // 左侧：UP 主列表
         FluFrame {
             id: leftFrame
+            radius: Theme.frameRadius
             Layout.preferredWidth: 260
             Layout.fillHeight: true
             padding: 0
@@ -1757,6 +1758,7 @@ FluPage {
         // 右侧：Pivot 内容
         FluFrame {
             id: rightFrame
+            radius: Theme.frameRadius
             Layout.fillWidth: true
             Layout.fillHeight: true
             padding: Theme.homeFramePadding
@@ -2497,8 +2499,14 @@ FluPage {
 
     Item {
         id: videoOverlay
+        // 与 HomePage 的 videoOverlay（fill homeFrame + margins 1）几何
+        // 一致：Frame 边距 + overlayMargin 内缩，播放器不遮 Frame 框线。
+        // 注意 anchors 单边 margin 会覆盖 margins 基数，故写成显式和
         anchors.fill: parent
-        anchors.margins: Theme.overlayMargin
+        anchors.leftMargin: Theme.homeFrameLeftMargin + Theme.playerOverlayMargin
+        anchors.rightMargin: Theme.homeFrameRightMargin + Theme.playerOverlayMargin
+        anchors.bottomMargin: Theme.homeFrameBottomMargin + Theme.playerOverlayMargin
+        anchors.topMargin: Theme.homeFrameTopMargin + Theme.playerOverlayMargin
         z: 102
         visible: opacity > 0 || openVideoAnim.running || closeVideoAnim.running || switchVideoSeqAnim.running
         opacity: 0
@@ -2711,8 +2719,13 @@ FluPage {
     // 直播播放页覆盖层
     Item {
         id: liveOverlay
+        // 基准与 videoOverlay 一致：Frame 边距 + playerOverlayMargin 内缩，
+        // 所有弹出页尺寸统一（单边 margin 覆盖 margins 基数，故写成显式和）
         anchors.fill: parent
-        anchors.margins: Theme.overlayMargin
+        anchors.leftMargin: Theme.homeFrameLeftMargin + Theme.playerOverlayMargin
+        anchors.rightMargin: Theme.homeFrameRightMargin + Theme.playerOverlayMargin
+        anchors.bottomMargin: Theme.homeFrameBottomMargin + Theme.playerOverlayMargin
+        anchors.topMargin: Theme.homeFrameTopMargin + Theme.playerOverlayMargin
         z: 102
         visible: opacity > 0 || openLiveAnim.running || closeLiveAnim.running
         opacity: 0
@@ -2840,8 +2853,13 @@ FluPage {
     // 动态详情弹窗（从下往上弹出，覆盖两个 Frame）
     Item {
         id: detailOverlay
+        // 与 videoOverlay 同几何：Frame 边距 + playerOverlayMargin 内缩，
+        // 所有弹出页尺寸统一（单边 margin 覆盖 margins 基数，故写成显式和）
         anchors.fill: parent
-        anchors.margins: Theme.overlayMargin
+        anchors.leftMargin: Theme.homeFrameLeftMargin + Theme.playerOverlayMargin
+        anchors.rightMargin: Theme.homeFrameRightMargin + Theme.playerOverlayMargin
+        anchors.bottomMargin: Theme.homeFrameBottomMargin + Theme.playerOverlayMargin
+        anchors.topMargin: Theme.homeFrameTopMargin + Theme.playerOverlayMargin
         z: 101
         visible: opacity > 0 || openDetailAnim.running || closeDetailAnim.running
         opacity: 0
@@ -2850,6 +2868,7 @@ FluPage {
             id: detailPanel
             anchors.fill: parent
             padding: 0
+            radius: Theme.frameRadius
             color: FluTheme.backgroundColor
 
             RowLayout {

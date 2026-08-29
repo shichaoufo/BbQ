@@ -13,6 +13,9 @@ Rectangle {
     color: FluTheme.backgroundColor
     radius: 8
     clip: true
+    // 弹出页 Frame 框线：与 FluFrame 同款 1px 分割线边框，主题自适应
+    border.width: 1
+    border.color: FluTheme.dividerColor
 
     property string bvid: ""
     property string aid: ""
@@ -2808,12 +2811,12 @@ Rectangle {
 
             // ---- 视频播放容器 ----
             Rectangle {
-                id: videoContainer
-                anchors.fill: parent
-                anchors.bottomMargin: pageRoot.isFullScreen ? 0 : bottomPanel.height + pageRoot.smallSpacing
-                radius: 6
-                clip: true
-                color: "#000000"
+                    id: videoContainer
+                    anchors.fill: parent
+                    anchors.bottomMargin: pageRoot.isFullScreen ? 0 : bottomPanel.height + pageRoot.smallSpacing
+                    radius: 10
+                    clip: true
+                    color: "#000000"
 
                 // 播放器层：videoContainer 的第一个子项（始终最底层）。
                 // 小窗往返的 reparent 挂载点：reparent 会把项追加到目标容器
@@ -3002,6 +3005,69 @@ Rectangle {
                             }
                         }
                     }
+                }
+
+                // 圆角修复（两层配合，缺一不可）：
+                // 视频帧 renderRect 按宽高比缩放，与容器边缘重合时（开场
+                // video-params 未到先按全尺寸渲染、或缩放窗口穿过视频宽高比
+                // 交点），方形视频角会盖住容器的圆角缺口，露出直角。
+                // (a) 填补层：反转遮罩只把"圆弧之外"的缺口区域填成页面背景色，
+                //     外轮廓恢复圆弧。颜色必须与 pageRoot 严格同源
+                //     （FluTheme.backgroundColor），纯色双主题 + CircularReveal
+                //     切换下无缝。
+                // (b) 描边层：沿圆弧内侧 3px 的灰色描边（普通 Rectangle
+                //     border，零 shader 开销）。注意描边必须"沿弧"而非
+                //     "沿外接矩形"：沿外接矩形的环带外缘是直角，加粗只会
+                //     把直角描得更大，永远出不了圆角。
+                Item {
+                    id: cornerFix
+                    anchors.fill: parent
+                    z: 10
+
+                    // (a) 直角填补（页面背景色，恢复圆角轮廓）。
+                    // mask 与容器几何严格一致，textureSize 必须与
+                    // sourceItem 几何一致（否则 MultiEffect 拉伸采样会
+                    // 产生方向性偏移 → 对角性外露）。纹理按 2x DPR
+                    // 分配抗锯齿
+                    Item {
+                        anchors.fill: parent
+                        layer.enabled: true
+                        layer.samples: 4
+                        layer.effect: MultiEffect {
+                            maskEnabled: true
+                            maskInverted: true
+                            maskSource: ShaderEffectSource {
+                                sourceItem: Rectangle {
+                                    width: Math.max(1, cornerFix.width)
+                                    height: Math.max(1, cornerFix.height)
+                                    radius: videoContainer.radius
+                                    color: "black"
+                                }
+                                textureSize: Qt.size(Math.max(1, cornerFix.width * Screen.devicePixelRatio * 2),
+                                                     Math.max(1, cornerFix.height * Screen.devicePixelRatio * 2))
+                                hideSource: true
+                                live: true
+                            }
+                        }
+                        Rectangle {
+                            anchors.fill: parent
+                            color: FluTheme.backgroundColor
+                        }
+                    }
+                }
+
+                // (b) 播放区圆角描边：圆角矩形 anchors 绑定 videoContainer
+                // 自动跟随其位置尺寸。描边颜色与页面背景同色（白天纯白、
+                // 黑夜纯黑、不透明），视觉上"隐形"——只在视频直角凸出
+                // 圆弧时将其盖住，恢复圆角轮廓
+                Rectangle {
+                    anchors.fill: videoContainer
+                    anchors.margins: -1
+                    z: 10
+                    radius: videoContainer.radius
+                    color: "transparent"
+                    border.width: 3
+                    border.color: FluTheme.dark ? Qt.rgba(0, 0, 0, 1.0) : Qt.rgba(1, 1, 1, 1.0)
                 }
 
                 // 空降助手跳过提示：自动跳过时短暂浮现于视频区顶部中央

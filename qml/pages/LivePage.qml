@@ -113,6 +113,7 @@ FluPage {
 
     FluFrame {
         id: liveFrame
+        radius: Theme.frameRadius
         anchors.fill: parent
         anchors.leftMargin: Theme.homeFrameLeftMargin
         anchors.rightMargin: Theme.homeFrameRightMargin
@@ -269,12 +270,16 @@ FluPage {
 
     Rectangle {
         id: liveOverlay
-        x: liveFrame.x + Theme.overlayMargin
-        y: open ? liveFrame.y + Theme.overlayMargin : liveFrame.y + liveFrame.height
-        width: liveFrame.width - Theme.overlayMargin * 2
-        height: liveFrame.height - Theme.overlayMargin * 2
+        // 与视频播放页同几何：Frame 内缩 playerOverlayMargin，所有弹出页尺寸统一
+        x: liveFrame.x + Theme.playerOverlayMargin
+        y: open ? liveFrame.y + Theme.playerOverlayMargin : liveFrame.y + liveFrame.height
+        width: liveFrame.width - Theme.playerOverlayMargin * 2
+        height: liveFrame.height - Theme.playerOverlayMargin * 2
         z: 30
-        color: "black"
+        // 宿主层不填色：LivePlayerPage root 自带 backgroundColor + 框线。
+        // 之前填黑色是旧结构（root 全黑）的遗留；root 圆角 8 大于本层
+        // radius 4，四角月牙区盖不住宿主，会露出黑色小圆角
+        color: "transparent"
         radius: Theme.radiusSmall
         antialiasing: true
         clip: true

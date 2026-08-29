@@ -1377,6 +1377,7 @@ FluPage {
         id: searchFrame
         // 诊断开关：隐藏整个 FluFrame 内容，用于定位卡顿源是否在页面内容
         visible: true
+        radius: Theme.frameRadius
         anchors.fill: parent
         anchors.leftMargin: Theme.homeFrameLeftMargin
         anchors.rightMargin: Theme.homeFrameRightMargin
@@ -2169,8 +2170,14 @@ FluPage {
 
     Item {
         id: videoOverlay
+        // 与 HomePage 的 videoOverlay（fill homeFrame + margins 1）几何
+        // 一致：Frame 边距 + overlayMargin 内缩，播放器不遮 Frame 框线。
+        // 注意 anchors 单边 margin 会覆盖 margins 基数，故写成显式和
         anchors.fill: parent
-        anchors.margins: Theme.overlayMargin
+        anchors.leftMargin: Theme.homeFrameLeftMargin + Theme.playerOverlayMargin
+        anchors.rightMargin: Theme.homeFrameRightMargin + Theme.playerOverlayMargin
+        anchors.bottomMargin: Theme.homeFrameBottomMargin + Theme.playerOverlayMargin
+        anchors.topMargin: Theme.homeFrameTopMargin + Theme.playerOverlayMargin
         z: 104
         visible: opacity > 0 || openVideoAnim.running || closeVideoAnim.running || switchVideoSeqAnim.running
         opacity: 0
@@ -2393,8 +2400,13 @@ FluPage {
     // ====== 直播播放器 overlay（参照 HistoryPage liveOverlay 实现） ======
     Item {
         id: liveOverlay
+        // 基准与 videoOverlay 一致：Frame 边距 + playerOverlayMargin 内缩，
+        // 所有弹出页尺寸统一（单边 margin 覆盖 margins 基数，故写成显式和）
         anchors.fill: parent
-        anchors.margins: Theme.overlayMargin
+        anchors.leftMargin: Theme.homeFrameLeftMargin + Theme.playerOverlayMargin
+        anchors.rightMargin: Theme.homeFrameRightMargin + Theme.playerOverlayMargin
+        anchors.bottomMargin: Theme.homeFrameBottomMargin + Theme.playerOverlayMargin
+        anchors.topMargin: Theme.homeFrameTopMargin + Theme.playerOverlayMargin
         z: 105
         visible: opacity > 0 || openLiveAnim.running || closeLiveAnim.running
         opacity: 0
@@ -2539,8 +2551,13 @@ FluPage {
     // ====== 用户主页 Overlay（与 HomePage 相同动画模式） ======
     Item {
         id: userProfileOverlay
+        // 与 videoOverlay 同几何：Frame 边距 + playerOverlayMargin 内缩，
+        // 所有弹出页尺寸统一（单边 margin 覆盖 margins 基数，故写成显式和）
         anchors.fill: parent
-        anchors.margins: Theme.homeFrameLeftMargin + 3
+        anchors.leftMargin: Theme.homeFrameLeftMargin + Theme.playerOverlayMargin
+        anchors.rightMargin: Theme.homeFrameRightMargin + Theme.playerOverlayMargin
+        anchors.bottomMargin: Theme.homeFrameBottomMargin + Theme.playerOverlayMargin
+        anchors.topMargin: Theme.homeFrameTopMargin + Theme.playerOverlayMargin
         z: 102
         visible: opacity > 0 || openUserProfileAnim.running || closeUserProfileAnim.running
         opacity: 0

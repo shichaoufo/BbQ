@@ -13,6 +13,9 @@ Rectangle {
     color: FluTheme.backgroundColor
     radius: 8
     clip: true
+    // 弹出页 Frame 框线：与 FluFrame 同款 1px 分割线边框，主题自适应
+    border.width: 1
+    border.color: FluTheme.dividerColor
 
     // 内嵌 12px 内边距：让内容自然回退到搜索页圆角之内，不覆盖外层 Frame 圆角；
     // 也给 GridView 顶部留出富裕空间，避免第一行卡片 hover 上浮(-8px)时被裁剪

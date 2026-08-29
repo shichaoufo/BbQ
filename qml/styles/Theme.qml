@@ -29,6 +29,10 @@ QtObject {
     readonly property int radiusLarge: 12
     readonly property int radiusXLarge: 16
 
+    // 各页面主 Frame（FluFrame）的圆角：FluFrame 库默认仅 4，
+    // 小于内部组件（radiusMedium 8 等），统一在此调大
+    readonly property int frameRadius: 8
+
     readonly property int spacingTiny: 4
     readonly property int spacingSmall: 8
     readonly property int spacingMedium: 12
@@ -80,6 +84,10 @@ QtObject {
 
     // 首页/播放器 overlay
     readonly property int overlayMargin: 1
+
+    // 所有弹出页（视频/直播/动态详情/用户主页）统一内缩：
+    // Frame 边距 5 + 本值 0 = 距页面边 5px
+    readonly property int playerOverlayMargin: 0
 
     // 首页布局
     readonly property int homeFrameLeftMargin: 5
