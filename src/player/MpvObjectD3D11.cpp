@@ -356,10 +356,24 @@ void MpvObjectD3D11::initMpv()
     // 用于计算瞬时码率
     mpv_observe_property(m_mpv, 0, "demuxer-cache-state", MPV_FORMAT_NODE);
 
+    // 播放中途无声问题确诊日志：观测音频轨选择与音频设备状态。
+    // aid 变化 = 音频轨被切/失效（如 DASH 音频流断开时 mpv 内部 deselect），
+    // audio-device 变化 = 系统默认输出设备切换（如蓝牙耳机断开回退板载声卡）
+    mpv_observe_property(m_mpv, 0, "aid", MPV_FORMAT_FLAG);
+    mpv_observe_property(m_mpv, 0, "audio-device", MPV_FORMAT_STRING);
+    mpv_observe_property(m_mpv, 0, "ao-volume", MPV_FORMAT_DOUBLE);
+
     double vol = 100.0;
     mpv_set_property(m_mpv, "volume", MPV_FORMAT_DOUBLE, &vol);
     int pauseFlag = 1;
     mpv_set_property(m_mpv, "pause", MPV_FORMAT_FLAG, &pauseFlag);
+
+    // 播放中途无声问题确诊日志：把 mpv 内部 c 日志接入 qWarning。
+    // 关注 [ao] 前缀的行（音频输出初始化/失败/重开）和
+    // [demux/audio] 行（音频流缓存/欠载），以及 audio-add 的结果。
+    // mpv_msg 按行送达，逐行原样透传即可
+    mpv_set_option_string(m_mpv, "msg-level", "all=warn,cplayer=info,ao=debug,demuxer=debug,cache=debug");
+    mpv_request_log_messages(m_mpv, "v");
 }
 
 void MpvObjectD3D11::applyCacheOptions()
@@ -1001,6 +1015,23 @@ void MpvObjectD3D11::onMpvEvents()
             } else if (strcmp(prop->name, "hwdec-current") == 0 && prop->format == MPV_FORMAT_STRING) {
                 char *hw = *static_cast<char**>(prop->data);
                 qWarning() << "[MpvObjectD3D11] hwdec-current:" << (hw ? QString::fromUtf8(hw) : QString("none"));
+            } else if (strcmp(prop->name, "aid") == 0 && prop->format == MPV_FORMAT_FLAG) {
+                // 音频轨选择状态：中途变 no = 音频轨被取消选择（无声的常见根因）
+                bool aidOn = *static_cast<int*>(prop->data) != 0;
+                qWarning() << "[MpvObjectD3D11] audio track (aid):" << (aidOn ? "selected" : "DESELECTED");
+            } else if (strcmp(prop->name, "audio-device") == 0 && prop->format == MPV_FORMAT_STRING) {
+                char *dev = *static_cast<char**>(prop->data);
+                qWarning() << "[MpvObjectD3D11] audio-device:" << (dev ? QString::fromUtf8(dev) : QString("?"));
+            }
+            break;
+        }
+        case MPV_EVENT_LOG_MESSAGE: {
+            // mpv 内部日志透传（无声问题确诊）：关注 [ao]/[demux]/[cplayer] 行
+            mpv_event_log_message *msg = static_cast<mpv_event_log_message*>(event->data);
+            if (msg && msg->text) {
+                QString line = QString::fromUtf8(msg->text).trimmed();
+                if (!line.isEmpty())
+                    qWarning() << "[mpv]" << line;
             }
             break;
         }
