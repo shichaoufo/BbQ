@@ -89,6 +89,11 @@ Rectangle {
                     sourceItem: maskRect
                     hideSource: true
                     live: true
+                    // 蒙版纹理按 DPR 超采样 2 倍，圆弧边缘在高分屏缩放
+                    // 采样下不出现锯齿（与播放器补角层同款处理）
+                    textureSize: Qt.size(
+                        Math.max(1, maskRect.width * Screen.devicePixelRatio * 2),
+                        Math.max(1, maskRect.height * Screen.devicePixelRatio * 2))
                 }
             }
 
@@ -204,14 +209,6 @@ Rectangle {
                     }
                 }
             }
-
-            Rectangle {
-                anchors.fill: parent
-                radius: coverContainer.radius
-                color: "transparent"
-                border.color: Theme.cardBorderColor
-                border.width: Theme.cardBorderWidth
-            }
         }
 
         // 标题区域固定占用 2 行高度
@@ -284,7 +281,23 @@ Rectangle {
                 wrapMode: Text.NoWrap
             }
         }
-    }
+        }
+
+        // 封面圆角描边：必须位于 coverContainer 的遮罩层（layer+mask）之外。
+        // 若作为 coverContainer 的子项，描边会被同一个圆角蒙版裁剪——外扩部分
+        // 落在蒙版裁剪线之外被裁掉，永远盖不住蒙版边缘的抗锯齿毛边。
+        // 同级叠加层不受 mask 影响，描边半内半外骑在蒙版边缘上，可完整覆盖。
+        // Column 默认位于 (0,0)，封面是其第一个子项，故此矩形与封面对齐。
+        Rectangle {
+            x: -1
+            y: -1
+            width: content.width + 2
+            height: Math.max(0, content.width * Theme.cardAspectRatio) + 2
+            radius: Theme.cardRadius
+            color: "transparent"
+            border.color: Window.active ? Theme.cardBorderActiveColor : Theme.cardBorderColor
+            border.width: Theme.cardBorderWidth
+        }
     }
 
     MouseArea {

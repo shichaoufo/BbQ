@@ -1,5 +1,6 @@
 pragma Singleton
 import QtQuick 2.15
+import FluentUI 1.0
 
 QtObject {
     readonly property color primary: "#FB7299"
@@ -62,8 +63,15 @@ QtObject {
     readonly property int cardInfoHeight: 90
     readonly property real cardAspectRatio: 9 / 16
     readonly property int cardRadius: 10
+    // 封面描边：粗描边用于盖住圆角遮罩边缘的抗锯齿毛边，刻意加粗
     readonly property int cardBorderWidth: 1
-    readonly property color cardBorderColor: "#808080"
+    // UP 徽章描边：与封面描边解耦，维持常规 1px 视觉
+    readonly property int cardBadgeBorderWidth: 1
+    // 封面描边颜色（主题感知，与 FluFrame 取色同源）。
+    // Window.active 是窗口级状态，单例拿不到，各卡片自行拼接：
+    //   border.color: Window.active ? Theme.cardBorderActiveColor : Theme.cardBorderColor
+    readonly property color cardBorderColor: FluTheme.frameColor
+    readonly property color cardBorderActiveColor: FluTheme.frameActiveColor
     readonly property int cardSpacing: 6
     readonly property int cardBadgeSpacing: 6
     readonly property int cardBadgeBottomMargin: 3

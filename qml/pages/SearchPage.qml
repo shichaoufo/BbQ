@@ -1876,6 +1876,11 @@ FluPage {
                                                 }
                                                 hideSource: true
                                                 live: false
+                                                // 蒙版纹理按 DPR 超采样 2 倍，圆弧边缘
+                                                // 在高分屏缩放采样下不出现锯齿
+                                                textureSize: Qt.size(
+                                                    Math.max(1, bgCover.width * Screen.devicePixelRatio * 2),
+                                                    Math.max(1, bgCover.height * Screen.devicePixelRatio * 2))
                                             }
                                         }
 
@@ -1928,15 +1933,18 @@ FluPage {
                                                 font.pixelSize: 12
                                             }
                                         }
+                                    }
 
-                                        // 圆角边框
-                                        Rectangle {
-                                            anchors.fill: parent
-                                            radius: bgCover.radius
-                                            color: "transparent"
-                                            border.color: Theme.cardBorderColor
-                                            border.width: Theme.cardBorderWidth
-                                        }
+                                    // 封面圆角描边：必须位于 bgCover 的遮罩层（layer+mask）
+                                    // 之外，否则被同一个圆角蒙版裁剪，外扩部分永远盖不住
+                                    // 蒙版边缘的抗锯齿毛边（同 VideoCard/LiveCard 方案）
+                                    Rectangle {
+                                        anchors.fill: parent
+                                        anchors.margins: -1
+                                        radius: Theme.cardRadius
+                                        color: "transparent"
+                                        border.color: Window.active ? Theme.cardBorderActiveColor : Theme.cardBorderColor
+                                        border.width: Theme.cardBorderWidth
                                     }
                                 }
 
