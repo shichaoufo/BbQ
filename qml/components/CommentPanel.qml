@@ -512,6 +512,8 @@ Item {
                                         panelRoot.replyRpid = model.rpid || ""
                                         panelRoot.replyRootRpid = (model.root && model.root !== "0") ? model.root : (model.rpid || "")
                                         panelRoot.replyToUser = model.uname || ""
+                                        // 点击回复即聚焦输入框，用户可直接输入
+                                        commentInput.forceActiveFocus()
                                     }
                                 }
 
@@ -797,6 +799,8 @@ Item {
                                                         panelRoot.replyRpid = modelData.rpid || ""
                                                         panelRoot.replyRootRpid = commentItem.parentModel.rpid || ""
                                                         panelRoot.replyToUser = modelData.uname || ""
+                                                        // 点击回复即聚焦输入框，用户可直接输入
+                                                        commentInput.forceActiveFocus()
                                                     }
                                                 }
 

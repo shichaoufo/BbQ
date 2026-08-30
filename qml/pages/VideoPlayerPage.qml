@@ -5162,6 +5162,8 @@ Rectangle {
                                                         pageRoot.replyRpid = model.rpid || ""
                                                         pageRoot.replyRootRpid = (model.root && model.root !== "0") ? model.root : (model.rpid || "")
                                                         pageRoot.replyToUser = model.uname || ""
+                                                        // 点击回复即聚焦输入框，用户可直接输入
+                                                        commentInput.forceActiveFocus()
                                                     }
                                                 }
 
@@ -5443,6 +5445,8 @@ Rectangle {
                                                                 pageRoot.replyRpid = modelData.rpid || ""
                                                                 pageRoot.replyRootRpid = commentItem.parentModel.rpid || ""
                                                                 pageRoot.replyToUser = modelData.uname || ""
+                                                                // 点击回复即聚焦输入框，用户可直接输入
+                                                                commentInput.forceActiveFocus()
                                                             }
                                                         }
 
