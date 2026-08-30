@@ -2297,8 +2297,10 @@ Rectangle {
                     // DWM 权威刷新率（Screen.refreshRate 高刷屏常误报 60）
                     readonly property real refreshRate: FramePacer.refreshRate
                     readonly property var optionValues: {
+                        // 等于刷新率的档位与"不限制"功能等价（vsync 钳制渲染
+                        // 上限即刷新率），严格过滤掉，避免出现冗余选项
                         var vals = [60, 100, 120, 144].filter(
-                            function(r) { return r <= refreshRate + 1 })
+                            function(r) { return r < refreshRate - 1 })
                         vals.push(0)
                         return vals
                     }

@@ -4248,12 +4248,13 @@ Rectangle {
 
                                 FluComboBox {
                                     id: danmakuFpsCombo
-                                    // 候选档位：不超过当前屏幕刷新率（+1 容差，
-                                    // 刷新率报告值常略低于名义值），0 = 不限制
+                                    // 候选档位：严格低于当前屏幕刷新率的档位才有意义——
+                                    // 等于刷新率的档位与"不限制"功能等价（vsync 钳制渲染
+                                    // 上限即刷新率），一并过滤避免出现冗余选项。0 = 不限制
                                     readonly property var optionValues: {
                                         var refresh = pageRoot.screenRefreshRate
                                         var vals = [60, 100, 120, 144].filter(
-                                            function(r) { return r <= refresh + 1 })
+                                            function(r) { return r < refresh - 1 })
                                         vals.push(0)
                                         return vals
                                     }
