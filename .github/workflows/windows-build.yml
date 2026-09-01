@@ -1,12 +1,12 @@
-# Windows 每次推送自动编译 BbQ（MinGW，与本地 Desktop_Qt_6_9_3_MinGW 环境一致）
+# Windows 每次推送自动编译 BbQ（MinGW，与本地 Qt 6.11.1 环境一致）
 #
 # 产物：BbQ-Windows-x64.zip 绿色版（exe + Qt dll + mpv.dll + FluentUI 插件），
 # 解压即用，免本地配置——用于快速分发给别人测试。
 #
 # 依赖说明：
-#   - Qt 6.9.3 win64_mingw（install-qt-action 自带 MinGW 工具链）
-#   - libmpv 使用自编译版本（含 #17764 D3D11 补丁，官方源无此补丁）：
-#     https://github.com/shichaoufo/mpv/releases/tag/d3d11
+#   - Qt 6.11.1 win64_mingw（install-qt-action 自带 MinGW 工具链）
+#   - libmpv 已内置仓库 third_party/mpv-dev（含 #17764 D3D11 补丁，
+#     头文件/导入库 + runtime 全量依赖 DLL），无需外部下载
 #   - FluentUI 官方仓库现编译（本地无改动），安装进 Qt 的 qml 目录
 #
 # 注意：runner 上 MinGW 与本地 Qt 官方 MinGW 版本可能存在小版本差异，
@@ -30,10 +30,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Qt 6.9 (MinGW 64-bit)
+      - name: Install Qt 6.11 (MinGW 64-bit)
         uses: jurplel/install-qt-action@v4
         with:
-          version: '6.9.3'
+          version: '6.11.1'
           arch: 'win64_mingw'
           modules: 'qtshadertools qtmultimedia qtwebsockets qt5compat'
           cache: true
@@ -47,25 +47,6 @@ jobs:
           qmake -query QT_INSTALL_QML
           echo "QT_PREFIX=$(qmake -query QT_INSTALL_PREFIX)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           echo "QT_QML_DIR=$(qmake -query QT_INSTALL_QML)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
-      - name: Download custom libmpv (PR#17764 D3D11 patch)
-        shell: pwsh
-        run: |
-          $zip = "$env:RUNNER_TEMP\mpv-dev.zip"
-          Invoke-WebRequest `
-            -Uri "https://github.com/shichaoufo/mpv/releases/download/d3d11/mpv-libmpv-d3d11-v0.41.0-dev-gcfc287f6f-30370549392-x86_64-w64-mingw32.zip" `
-            -OutFile $zip
-          $dest = "$env:RUNNER_TEMP\mpv-dev"
-          Expand-Archive -Path $zip -DestinationPath $dest
-          # 兼容 zip 内多套一层目录的情况
-          $inner = Get-ChildItem $dest -Directory | Select-Object -First 1
-          if ($inner -and (Test-Path "$($inner.FullName)\include")) {
-            $mpvDir = $inner.FullName
-          } else {
-            $mpvDir = $dest
-          }
-          echo "MPV_DIR=$mpvDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          Get-ChildItem $mpvDir -Recurse | Select-Object -First 20 | ForEach-Object { $_.FullName }
 
       - name: Build FluentUI
         shell: pwsh
@@ -107,8 +88,9 @@ jobs:
           $binDir = $exe.DirectoryName
           echo "BIN_DIR=$binDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           windeployqt --release --qmldir qml "$($exe.FullName)"
-          # 拷贝 mpv.dll（运行时动态加载）
-          Copy-Item "$env:MPV_DIR\*.dll" $binDir -Force
+          # 拷贝 libmpv 运行库及其 ffmpeg 全家桶依赖（仓库内置 third_party/mpv-dev）
+          Copy-Item "third_party\mpv-dev\lib\mpv-2.dll" $binDir -Force
+          Copy-Item "third_party\mpv-dev\runtime\*.dll" $binDir -Force
           Get-ChildItem $binDir | ForEach-Object { $_.Name }
 
       - name: Upload artifact

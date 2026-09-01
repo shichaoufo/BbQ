@@ -402,10 +402,12 @@ if(Vulkan_FOUND)
 endif()
 
 if(WIN32)
+    # 仓库内置 mpv-dev（含 D3D11 补丁的 libmpv + 头文件 + 导入库），
+    # 运行期依赖的 ffmpeg 全家桶 DLL 在 third_party/mpv-dev/runtime
     if(DEFINED ENV{MPV_DIR})
         set(MPV_DIR $ENV{MPV_DIR} CACHE PATH "mpv directory from environment variable")
     elseif(NOT DEFINED MPV_DIR)
-        set(MPV_DIR "" CACHE PATH "Path to mpv-dev directory")
+        set(MPV_DIR "${CMAKE_SOURCE_DIR}/third_party/mpv-dev" CACHE PATH "Path to mpv-dev directory")
     endif()
 
     if(MPV_DIR AND EXISTS ${MPV_DIR})
