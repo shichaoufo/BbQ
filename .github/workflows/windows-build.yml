@@ -4,7 +4,7 @@
 # 解压即用，免本地配置——用于快速分发给别人测试。
 #
 # 依赖说明：
-#   - Qt 6.11.1 win64_mingw（install-qt-action 自带 MinGW 工具链）
+#   - Qt 6.11.1 win64_mingw（aqt 手动安装，MinGW 用 runner 预装的 C:\mingw64）
 #   - libmpv 已内置仓库 third_party/mpv-dev（含 #17764 D3D11 补丁，
 #     头文件/导入库 + runtime 全量依赖 DLL），无需外部下载
 #   - FluentUI 官方仓库现编译（本地无改动），安装进 Qt 的 qml 目录
@@ -30,16 +30,25 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Qt 6.11 (MinGW 64-bit)
-        uses: jurplel/install-qt-action@v4
-        with:
-          version: '6.11.1'
-          arch: 'win64_mingw'
-          modules: 'qtshadertools qtmultimedia qtwebsockets qt5compat'
-          # aqtinstall 3.3.0 尚未支持 Qt 6.11 的新扁平仓库结构（上游 bug #1007），
-          # 使用包含修复的 PR #1000 dev 版；官方发版后改回 'aqtinstall==3.4.*'
-          aqtversion: 'git+https://github.com/miurahr/aqtinstall.git@refs/pull/1000/head'
-          cache: true
+      # install-qt-action 的 aqtversion 参数只接受版本号，无法安装 git 依赖，
+      # 故手动安装含 Qt 6.11 扁平仓库结构修复的 aqtinstall（上游 bug #1007 / PR #1000），
+      # 再手动执行 aqt 安装 Qt；官方发布 3.4 后可改回 `pip install "aqtinstall==3.4.*"`
+      - name: Install aqtinstall (PR#1000, Qt 6.11 repo layout fix)
+        shell: pwsh
+        run: python -m pip install --upgrade "git+https://github.com/miurahr/aqtinstall.git@refs/pull/1000/head"
+
+      - name: Install Qt 6.11.1 (MinGW 64-bit)
+        shell: pwsh
+        run: |
+          $qtDir = "$env:GITHUB_WORKSPACE\Qt"
+          python -m aqt install-qt windows desktop 6.11.1 win64_mingw `
+            --outputdir $qtDir `
+            --modules qtshadertools qtmultimedia qtwebsockets qt5compat
+          # 模拟 install-qt-action 的收尾：Qt bin 入 PATH（qmake/windeployqt），
+          # 后续步骤通过 qmake -query 拿 QT_PREFIX / QT_QML_DIR
+          Add-Content $env:GITHUB_PATH "$qtDir\6.11.1\mingw_64\bin"
+          Get-ChildItem "$qtDir\6.11.1\mingw_64\bin" -Filter "*.exe" |
+            Select-Object -First 5 | ForEach-Object { $_.Name }
 
       - name: Setup MSYS2 environment info
         shell: pwsh
