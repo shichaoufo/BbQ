@@ -1068,6 +1068,11 @@ void MpvObjectD3D11::onMpvEvents()
                 QString err = QString::fromUtf8(mpv_error_string(ef->error));
                 qWarning() << "[MpvObjectD3D11] playback error:" << err;
                 emit errorOccurred(err);
+            } else if (ef && ef->reason == MPV_END_FILE_REASON_EOF && m_liveMode) {
+                // 直播流自然结束：通常是主播推流中断（网络不稳）导致服务器侧终止流。
+                // 用户主动 stop()/切换 source 产生的是 STOP reason，不会走到这里。
+                qWarning() << "[MpvObjectD3D11] live stream EOF, notifying QML for reconnect";
+                emit liveStreamEof();
             }
             break;
         }

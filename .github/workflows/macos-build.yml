@@ -1,4 +1,5 @@
-# macOS (Apple Silicon) 每次推送自动编译 BbQ
+# macOS (Apple Silicon) 手动触发编译 BbQ（不再随 push 自动编译，
+# 避免累积 Actions 存储占用；需要 mac 版时在 Actions 页手动 Run）
 #
 # 目标：把移植过程中的"编译期"问题在 CI 上收敛（Windows 本地无法验证
 # 非 WIN 分支），并产出自包含的 BbQ.app——Qt frameworks、QML 模块、
@@ -20,11 +21,7 @@
 name: macOS Build
 
 on:
-  push:
-    branches: [ main, master ]
-  pull_request:
-    branches: [ main, master ]
-  workflow_dispatch: {}   # 允许手动触发
+  workflow_dispatch: {}   # 仅手动触发：Actions 页面 → macOS Build → Run workflow
 
 jobs:
   macos-arm64:

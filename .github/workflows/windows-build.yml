@@ -74,7 +74,8 @@ jobs:
           cmake -S $env:RUNNER_TEMP\FluentUI -B $env:RUNNER_TEMP\FluentUI\build `
             -G Ninja `
             -DCMAKE_BUILD_TYPE=Release `
-            -DCMAKE_PREFIX_PATH="$env:QT_PREFIX"
+            -DCMAKE_PREFIX_PATH="$env:QT_PREFIX" `
+            -DFLUENTUI_BUILD_EXAMPLES=OFF
           cmake --build $env:RUNNER_TEMP\FluentUI\build --parallel
           # FluentUI 构建时把插件直接链入 Qt 的 qml 目录，无需 install
           $qmlDir = "$env:QT_QML_DIR\FluentUI"

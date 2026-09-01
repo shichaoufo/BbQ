@@ -95,6 +95,9 @@ Rectangle {
     property bool _stopped: false  // stopPlayer 防重入标志，避免多次调用导致 savePlayerSettings 重复执行
     property bool _everLoaded: false  // 标记是否曾加载过流，防止未使用的实例保存默认值覆盖用户设置
     property bool _fullReloadAttempted: false  // 完整重载兜底标志：所有线路失败后重新调 API 一次，避免无限重试
+    property int _eofRetryCount: 0      // 直播中途断流（EOF）自动重连计数，重新拉到流后清零
+    property int maxEofRetries: 5        // 断流重连上限，超过则判定直播已断开并显示错误提示
+    property string _eofRoomId: ""       // 发起断流重连时的房间号，期间切换房间则取消重连
 
     // 实际播放的视频参数（来自 mpv，用于验证当前流的真实画质）
     property int actualWidth: 0
@@ -547,6 +550,8 @@ Rectangle {
         root._wasPlaying = false
         root.loadRetryCount = 0
         root._loadingInProgress = false
+        root._eofRetryCount = 0
+        eofReconnectTimer.stop()
         loadTimeoutTimer.stop()
         delayedPlayTimer.stop()
         videoInfoTimer.stop()
@@ -653,7 +658,9 @@ Rectangle {
         root.loadRetryCount = 0
         root._fullReloadAttempted = false
         root._loadingInProgress = false
+        root._eofRetryCount = 0  // 关闭播放器，取消未触发的断流重连
         root._loadGeneration++  // 递增代次，使所有 pending 的异步 API 响应（streamInfo/danmuInfo）作废
+        eofReconnectTimer.stop()
         loadTimeoutTimer.stop()
         delayedPlayTimer.stop()
         videoInfoTimer.stop()
@@ -1195,11 +1202,28 @@ Rectangle {
                     root.tryNextCandidate()
                 }
             }
+            onLiveStreamEof: {
+                // 直播中途断流（主播推流中断）：延迟自动重连，间隔 2s 起指数递增（上限 10s）
+                // 已在关闭/切房/加载流程中则交给现有重试机制，不重复处理
+                if (root._stopped || root.roomId === "" || root._loadingInProgress) return
+                root._eofRetryCount++
+                if (root._eofRetryCount > root.maxEofRetries) {
+                    console.warn("[LivePlayerPage] live stream EOF reconnect attempts exhausted")
+                    root.handleLoadFailure("直播连接已断开，请点击重新加载")
+                    return
+                }
+                console.warn("[LivePlayerPage] live stream EOF, scheduling reconnect, attempt:", root._eofRetryCount)
+                root._eofRoomId = root.roomId
+                eofReconnectTimer.interval = Math.min(2000 * Math.pow(2, root._eofRetryCount - 1), 10000)
+                eofReconnectTimer.restart()
+            }
             onHasVideoChanged: {
                 if (hasVideo) {
                     // 视频加载成功
                     root._waitingForVideo = false
                     root.loadRetryCount = 0
+                    root._eofRetryCount = 0  // 断流重连成功，重置 EOF 计数
+                    eofReconnectTimer.stop()
                     loadTimeoutTimer.stop()
                     // 确保视频自动播放（处理 hasVideo: true 但 playing: false 的情况）
                     if (!playing) {
@@ -1913,6 +1937,21 @@ Rectangle {
                     root.tryNextCandidate()
                 }
             }
+        }
+    }
+
+    // 直播断流自动重连定时器：mpv 报 EOF（主播推流中断导致服务器侧终止流）后，
+    // 延迟重新调 loadStream 拉取新流地址；间隔由 onLiveStreamEof 指数递增设置
+    Timer {
+        id: eofReconnectTimer
+        interval: 2000
+        repeat: false
+        onTriggered: {
+            // 房间已切换/播放器已关闭，取消本次重连
+            if (root._stopped || root.roomId === "" || root.roomId !== root._eofRoomId) return
+            console.warn("[LivePlayerPage] live stream EOF, reconnecting... attempt:", root._eofRetryCount)
+            root._fullReloadAttempted = false  // 每次 EOF 重连视为新一轮尝试，恢复完整重载兜底
+            root.loadStream()
         }
     }
 
