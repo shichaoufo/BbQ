@@ -36,6 +36,9 @@ jobs:
           version: '6.11.1'
           arch: 'win64_mingw'
           modules: 'qtshadertools qtmultimedia qtwebsockets qt5compat'
+          # aqtinstall 3.3.0 尚未支持 Qt 6.11 的新扁平仓库结构（上游 bug #1007），
+          # 使用包含修复的 PR #1000 dev 版；官方发版后改回 'aqtinstall==3.4.*'
+          aqtversion: 'git+https://github.com/miurahr/aqtinstall.git@refs/pull/1000/head'
           cache: true
 
       - name: Setup MSYS2 environment info
