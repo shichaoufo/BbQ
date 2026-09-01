@@ -4,7 +4,7 @@
 # 解压即用，免本地配置——用于快速分发给别人测试。
 #
 # 依赖说明：
-#   - Qt 6.11.1 win64_mingw（aqt 手动安装，MinGW 用 runner 预装的 C:\mingw64）
+#   - Qt 6.11.1 win64_mingw + Qt 配套 MinGW 13.1（aqt 手动安装）
 #   - libmpv 已内置仓库 third_party/mpv-dev（含 #17764 D3D11 补丁，
 #     头文件/导入库 + runtime 全量依赖 DLL），无需外部下载
 #   - FluentUI 官方仓库现编译（本地无改动），安装进 Qt 的 qml 目录
@@ -44,16 +44,21 @@ jobs:
           python -m aqt install-qt windows desktop 6.11.1 win64_mingw `
             --outputdir $qtDir `
             --modules qtshadertools qtmultimedia qtwebsockets qt5compat
-          # 模拟 install-qt-action 的收尾：Qt bin 入 PATH（qmake/windeployqt），
-          # 后续步骤通过 qmake -query 拿 QT_PREFIX / QT_QML_DIR
+          # 必须使用 Qt 配套的 MinGW 13.1（与本地 D:\Qt\Tools\mingw1310_64 一致）：
+          # runner 预装的 MSYS2 MinGW 15.2 CRT 与 Qt 预编译的 libQt6EntryPoint.a
+          # 不兼容（undefined reference to `__imp___argc`）
+          python -m aqt install-tool windows desktop tools_mingw1310 --outputdir $qtDir
+          # Qt bin 与配套 MinGW bin 入 PATH（GITHUB_PATH 写入的目录会排在
+          # 系统预装的 C:\mingw64 之前）
           Add-Content $env:GITHUB_PATH "$qtDir\6.11.1\mingw_64\bin"
+          Add-Content $env:GITHUB_PATH "$qtDir\Tools\mingw1310_64\bin"
           Get-ChildItem "$qtDir\6.11.1\mingw_64\bin" -Filter "*.exe" |
             Select-Object -First 5 | ForEach-Object { $_.Name }
 
-      - name: Setup MSYS2 environment info
+      - name: Verify toolchain
         shell: pwsh
         run: |
-          # install-qt-action 已把 MinGW 与 qmake 加入 PATH，打印版本供日志核对
+          # 打印工具链版本供日志核对（应为 MinGW 13.1.x，而非系统的 15.2）
           gcc --version
           qmake -query QT_INSTALL_PREFIX
           qmake -query QT_INSTALL_QML
