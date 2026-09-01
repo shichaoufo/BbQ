@@ -5124,6 +5124,9 @@ Rectangle {
 
                                                                 MouseArea {
                                                                     anchors.fill: parent
+                                                                    // z:-1 垫底：让 FluImage 加载失败时的 Reload 按钮可点击，
+                                                                    // 否则点击被图片预览事件截走
+                                                                    z: -1
                                                                     cursorShape: Qt.PointingHandCursor
                                                                     onClicked: {
                                                                         pageRoot.openCommentImagePreview(commentItem.parentModel.pictures, index)
@@ -5408,6 +5411,8 @@ Rectangle {
 
                                                                 MouseArea {
                                                                     anchors.fill: parent
+                                                                    // z:-1 垫底：让 FluImage 加载失败时的 Reload 按钮可点击
+                                                                    z: -1
                                                                     cursorShape: Qt.PointingHandCursor
                                                                     onClicked: {
                                                                         pageRoot.openCommentImagePreview(modelData.pictures, index)

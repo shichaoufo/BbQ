@@ -259,6 +259,8 @@ Rectangle {
 
     MouseArea {
         anchors.fill: parent
+        // z:-1 垫底：让 FluImage 加载失败时的 Reload 按钮可点击（见 VideoCard 同注释）
+        z: -1
         hoverEnabled: true
         onClicked: {
             root.clicked()

@@ -293,6 +293,9 @@ Rectangle {
 
     MouseArea {
         anchors.fill: parent
+        // z:-1 垫底：图片加载失败时 FluImage 的 Reload 按钮需在 MouseArea 之上，
+        // 否则点击被卡片打开事件截走（与 DynamicPage 转发卡片同模式）
+        z: -1
         hoverEnabled: true
         cursorShape: Qt.PointingHandCursor
         onClicked: {
