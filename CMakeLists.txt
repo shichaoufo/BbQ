@@ -414,6 +414,22 @@ if(WIN32)
         include_directories(${MPV_DIR}/include ${MPV_DIR}/include/mpv)
         target_link_directories(${PROJECT_NAME} PRIVATE ${MPV_DIR}/lib)
         target_link_libraries(${PROJECT_NAME} PRIVATE mpv-2)
+
+        # 编译后把 libmpv 主 DLL 及其运行期依赖（ffmpeg 全家桶等）拷贝到
+        # exe 输出目录，免去手动复制。
+        # 注意：MinGW 导入库 libmpv-2.dll.a 使 exe 运行期按 "libmpv-2.dll"
+        # 名字加载，而仓库里的 DLL 叫 mpv-2.dll，拷贝时需重命名。
+        if(EXISTS ${MPV_DIR}/lib/mpv-2.dll)
+            add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    ${MPV_DIR}/lib/mpv-2.dll
+                    $<TARGET_FILE_DIR:${PROJECT_NAME}>/libmpv-2.dll
+                COMMAND ${CMAKE_COMMAND} -E copy_directory
+                    ${MPV_DIR}/runtime
+                    $<TARGET_FILE_DIR:${PROJECT_NAME}>
+                COMMENT "Deploying libmpv runtime DLLs to output directory..."
+            )
+        endif()
     else()
         message(WARNING "libmpv not found, video player will be disabled")
         add_compile_definitions(NO_MPV=1)
