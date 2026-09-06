@@ -43,7 +43,7 @@ jobs:
           $qtDir = "$env:GITHUB_WORKSPACE\Qt"
           python -m aqt install-qt windows desktop 6.11.1 win64_mingw `
             --outputdir $qtDir `
-            --modules qtshadertools qtmultimedia qtwebsockets qt5compat
+            --modules qtshadertools qtmultimedia qtwebsockets qt5compat qtimageformats
           # 必须使用 Qt 配套的 MinGW 13.1（与本地 D:\Qt\Tools\mingw1310_64 一致）：
           # runner 预装的 MSYS2 MinGW 15.2 CRT 与 Qt 预编译的 libQt6EntryPoint.a
           # 不兼容（undefined reference to `__imp___argc`）

@@ -430,6 +430,23 @@ if(WIN32)
                 COMMENT "Deploying libmpv runtime DLLs to output directory..."
             )
         endif()
+
+        # 部署 Qt 图片解码插件（GIF/WebP 动图必需）：开发机上 Qt 会回退到安装目录
+        # 找到插件，分发到无 Qt 环境的机器上缺插件则动图全部无法解码
+        # QT6_INSTALL_PLUGINS 是相对路径，需从 Qt6::Core 的位置推导绝对路径
+        get_target_property(_qt_core_lib Qt6::Core IMPORTED_LOCATION)
+        if(_qt_core_lib)
+            get_filename_component(_qt_lib_dir "${_qt_core_lib}" DIRECTORY)
+            set(_qt_plugins_dir "${_qt_lib_dir}/../plugins/imageformats")
+            if(EXISTS ${_qt_plugins_dir})
+                add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+                    COMMAND ${CMAKE_COMMAND} -E copy_directory
+                        ${_qt_plugins_dir}
+                        $<TARGET_FILE_DIR:${PROJECT_NAME}>/imageformats
+                    COMMENT "Deploying Qt imageformat plugins..."
+                )
+            endif()
+        endif()
     else()
         message(WARNING "libmpv not found, video player will be disabled")
         add_compile_definitions(NO_MPV=1)

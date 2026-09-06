@@ -23,23 +23,29 @@ Item {
 
     onSourceChanged: reset()
 
-    Item {
-        id: content
+    // 动图/静态图二选一按需创建（与 DynamicPage 内嵌图片的 Loader 模式一致）：
+    // 不能让静态 Image 与 AnimatedImage 同时挂同一 URL——静态 Image 会先解码
+    // GIF/WebP 首帧并与动画实例并存，预览模式下动图因此显示为静止首帧。
+    Loader {
+        id: imageLoader
         anchors.centerIn: parent
         width: root.width
         height: root.height
+        sourceComponent: root.animated ? animatedImageComponent : staticImageComponent
+    }
 
+    Component {
+        id: staticImageComponent
         Image {
-            id: image
             anchors.centerIn: parent
-            width: parent.width
-            height: parent.height
+            width: root.width
+            height: root.height
             source: root.source
             fillMode: Image.PreserveAspectFit
             asynchronous: true
             cache: true
             smooth: true
-            visible: !root.animated && status === Image.Ready
+            visible: status === Image.Ready
 
             scale: root._scale
             transform: Translate {
@@ -47,18 +53,20 @@ Item {
                 y: root._offsetY
             }
         }
+    }
 
+    Component {
+        id: animatedImageComponent
         AnimatedImage {
-            id: animatedImage
             anchors.centerIn: parent
-            width: parent.width
-            height: parent.height
+            width: root.width
+            height: root.height
+            source: root.source
             fillMode: Image.PreserveAspectFit
             cache: true
             smooth: true
             playing: true
-            visible: root.animated
-            source: root.source
+            visible: status === AnimatedImage.Ready
 
             scale: root._scale
             transform: Translate {

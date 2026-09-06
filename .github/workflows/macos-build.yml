@@ -37,7 +37,9 @@ jobs:
         with:
           version: '6.9.3'
           arch: 'clang_64'
-          modules: 'qtshadertools qtmultimedia qtwebsockets qt5compat'
+          # qtimageformats：qwebp 等 Qt 基础包不含的图片解码插件（B站动态图
+          # 大量为 webp，缺它则全部无法解码）
+          modules: 'qtshadertools qtmultimedia qtwebsockets qt5compat qtimageformats'
           cache: true
 
       # qmake 由 install-qt-action 加入 PATH；用 -query 拿权威安装路径，
