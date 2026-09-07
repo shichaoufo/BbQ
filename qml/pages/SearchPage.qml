@@ -2603,7 +2603,11 @@ FluPage {
             Loader {
                 id: userProfileLoader
                 anchors.fill: parent
-                active: userProfileOverlay.visible && userProfileOverlay._profileCreated
+                // 守卫：切导航栏时 search_page.visible=false 会使 overlay 的
+                // visible 从父级"流动"为 false，若不守卫会立即卸载销毁用户主
+                // 页实例，切回导航时重新加载。userProfileVisible 是逻辑状态，
+                // 不受父级隐藏影响（与 videoOverlay 的小窗守卫同一模式）
+                active: (userProfileOverlay.visible || search_page.userProfileVisible) && userProfileOverlay._profileCreated
                 sourceComponent: userProfileComponent
             }
         }
