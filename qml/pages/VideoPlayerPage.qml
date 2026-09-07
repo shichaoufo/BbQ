@@ -673,8 +673,21 @@ Rectangle {
         })
     }
 
-    // 将评论中的跳转链接（如购物链接）替换为蓝色可读标题，不保留可点击超链接。
+    // 判断 jump_url 的 key 是否为可跳转的视频链接，返回 BV/av 号（大写 BV）或空串。
+    // 仅静态识别两类：bilibili.com/video/BVxxx|avxxx 直链、b23.tv/BVxxx|avxxx 直书短链
+    //（b23.tv 随机码短链目标不确定，mall/link 外链为商品页，均不跳转）。
+    function videoIdFromJumpKey(key) {
+        if (!key) return ""
+        var m = key.match(/bilibili\.com\/video\/(BV[0-9A-Za-z]{10}|av[0-9]+)/i)
+        if (m) return m[1]
+        m = key.match(/b23\.tv\/(BV[0-9A-Za-z]{10}|av[0-9]+)(?:[/?#]|$)/i)
+        if (m) return m[1]
+        return ""
+    }
+
     // 返回结果已经过 HTML 转义，可直接用于 RichText。
+    // 视频类链接（bilibili.com/video 直链 / b23.tv 直书短链）替换为可点击链接，
+    // 其余（商品外链、搜索热词等）仅染蓝不可点击。
     function replaceJumpUrls(htmlText, jumpUrls) {
         if (!jumpUrls) return pageRoot.escapeHtml(htmlText)
         var keys = Object.keys(jumpUrls)
@@ -690,7 +703,12 @@ Rectangle {
                 var key = keys[i]
                 if (htmlText.substring(pos, pos + key.length) === key) {
                     var title = jumpUrls[key] || key
-                    result += '<span style="color:#00A1D6;">' + pageRoot.escapeHtml(title) + '</span>'
+                    var videoId = pageRoot.videoIdFromJumpKey(key)
+                    if (videoId !== "") {
+                        result += '<a href="video:' + pageRoot.escapeHtml(videoId) + '" style="color:#00A1D6;text-decoration:none;">' + pageRoot.escapeHtml(title) + '</a>'
+                    } else {
+                        result += '<span style="color:#00A1D6;">' + pageRoot.escapeHtml(title) + '</span>'
+                    }
                     pos += key.length
                     matched = true
                     break
@@ -704,10 +722,10 @@ Rectangle {
         return result
     }
 
-    // 将评论中的时间戳（MM:SS 或 HH:MM:SS）替换为蓝色可点击链接，点击后跳转播放进度。
-    // 输入必须是已经过 HTML 转义的文本。
+    // 将评论中的时间戳（MM:SS 或 HH:MM:SS，冒号支持半角/全角）替换为蓝色可点击链接，
+    // 点击后跳转播放进度。输入必须是已经过 HTML 转义的文本。
     function replaceTimeStamps(htmlText) {
-        return htmlText.replace(/(\d{1,2}):(\d{2})(?::(\d{2}))?/g, function(match, p1, p2, p3) {
+        return htmlText.replace(/(\d{1,2})[：:](\d{2})(?:[：:](\d{2}))?/g, function(match, p1, p2, p3) {
             var hours = 0, minutes = 0, seconds = 0
             if (p3 !== undefined && p3 !== "") {
                 hours = parseInt(p1, 10)
@@ -727,24 +745,97 @@ Rectangle {
         })
     }
 
-    function formatCommentContent(content, emotes, isReply, jumpUrls) {
-        var text
-        if (isReply && content && content.startsWith("回复 @")) {
-            var idx1 = content.indexOf("：")
-            var idx2 = content.indexOf(":")
-            var idx = idx1 >= 0 ? idx1 : idx2
-            if (idx >= 0) {
-                var prefix = content.substring(0, idx + 1)
-                var rest = content.substring(idx + 1)
-                var gray = FluTheme.fontSecondaryColor
-                var primary = FluTheme.fontPrimaryColor
-                text = '<span style="color:' + gray + ';">' + pageRoot.escapeHtml(prefix) + '</span>'
-                     + '<span style="color:' + primary + ';">' + pageRoot.replaceTimeStamps(pageRoot.replaceJumpUrls(rest, jumpUrls)) + '</span>'
-            } else {
-                text = pageRoot.replaceTimeStamps(pageRoot.replaceJumpUrls(content, jumpUrls))
+    // 用候选用户名集合切分楼中楼的"回复 @xxx"前缀：优先在候选集合中做最长前缀
+    // 匹配（候选 = 根评论作者 + 已加载子评论作者，服务端不单独下发被回复者），
+    // 匹配失败再回退到首个冒号启发式。返回 {prefix, rest} 或 null。
+    function splitReplyPrefix(content, candidateNames) {
+        if (!content || !content.startsWith("回复 @")) return null
+        var after = content.substring(4) // "@xxx..." 部分
+        // 最长前缀匹配：昵称可含任意字符（包括冒号/空格），最长优先避免截断
+        var best = -1
+        if (candidateNames && candidateNames.length > 0) {
+            for (var i = 0; i < candidateNames.length; i++) {
+                var n = candidateNames[i]
+                if (!n || n.length < 1) continue
+                if (after.startsWith("@" + n) && n.length > best) {
+                    best = n.length
+                }
             }
+        }
+        if (best >= 0) {
+            // 吃掉紧随其后的可选"空格+冒号+空格"分隔组合（实测真实格式
+            // 为"回复 @名字 :正文"，冒号前带一个空格，冒号可全角/半角）
+            var rest = content.substring(4 + best + 1)
+            var consumed = 0
+            while (rest.length > consumed && rest[consumed] === " ") consumed++
+            if (rest.length > consumed && (rest[consumed] === "：" || rest[consumed] === ":")) consumed++
+            while (rest.length > consumed && rest[consumed] === " ") consumed++
+            rest = rest.substring(consumed)
+            return { prefix: content.substring(0, 4 + best + 1 + consumed), rest: rest }
+        }
+        // 回退：首个冒号（含位置取最早出现的，修复半角分隔符+正文含全角冒号时
+        // 误把正文切进前缀的缺陷）
+        var idx1 = content.indexOf("：")
+        var idx2 = content.indexOf(":")
+        var idx = -1
+        if (idx1 >= 0 && idx2 >= 0) idx = Math.min(idx1, idx2)
+        else idx = Math.max(idx1, idx2)
+        if (idx < 0) return null
+        return { prefix: content.substring(0, idx + 1), rest: content.substring(idx + 1) }
+    }
+
+    // 取评论的 @提及名单。主评论经 ListModel 存储时数组角色会失效
+    //（数组被转成嵌套模型对象，.length 失效），统一序列化为 atNamesJson
+    // 字符串；楼中楼经 repliesJson JSON 往返，atNames 可能仍是数组（旧
+    // 数据）或 atNamesJson（新发评论），两者兼容。
+    function atNamesOf(m) {
+        if (!m) return []
+        if (m.atNamesJson !== undefined && m.atNamesJson !== null) {
+            return JSON.parse(m.atNamesJson || "[]")
+        }
+        return m.atNames || []
+    }
+
+    // 将正文中所有出现的 token 替换为染蓝 span（非重叠、顺序扫描，
+    // 不会重复匹配已插入的 span 内容）
+    function colorAllOccurrences(htmlText, token) {
+        var out = ""
+        var pos = 0
+        var idx = htmlText.indexOf(token)
+        while (idx >= 0) {
+            out += htmlText.substring(pos, idx)
+                + '<span style="color:#00A1D6;">' + token + '</span>'
+            pos = idx + token.length
+            idx = htmlText.indexOf(token, pos)
+        }
+        return out + htmlText.substring(pos)
+    }
+
+    // 将正文中的 @提及（@昵称）染蓝（与链接同色）。
+    // 仅用服务端 content.members 数据精确匹配（@面板插入的真提及），
+    // 手打 @ 服务端不登记、此处也不染——与官方客户端行为完全一致。
+    // 输入必须是已经过 HTML 转义的文本。
+    function replaceAtMentions(htmlText, atNames) {
+        if (!atNames || atNames.length === 0) return htmlText
+        for (var i = 0; i < atNames.length; i++) {
+            var n = atNames[i]
+            if (!n || n.length < 1) continue
+            // 名字需与已转义文本做同样转义后匹配
+            htmlText = pageRoot.colorAllOccurrences(htmlText, "@" + pageRoot.escapeHtml(n))
+        }
+        return htmlText
+    }
+
+    function formatCommentContent(content, emotes, isReply, jumpUrls, candidateNames, atNames) {
+        var text
+        var sp = isReply ? pageRoot.splitReplyPrefix(content, candidateNames) : null
+        if (sp) {
+            var gray = FluTheme.fontSecondaryColor
+            var primary = FluTheme.fontPrimaryColor
+            text = '<span style="color:' + gray + ';">' + pageRoot.escapeHtml(sp.prefix) + '</span>'
+                 + '<span style="color:' + primary + ';">' + pageRoot.replaceAtMentions(pageRoot.replaceTimeStamps(pageRoot.replaceJumpUrls(sp.rest, jumpUrls)), atNames) + '</span>'
         } else {
-            text = pageRoot.replaceTimeStamps(pageRoot.replaceJumpUrls(content || "", jumpUrls))
+            text = pageRoot.replaceAtMentions(pageRoot.replaceTimeStamps(pageRoot.replaceJumpUrls(content || "", jumpUrls)), atNames)
         }
         return pageRoot.replaceEmotesInHtml(text, emotes)
     }
@@ -1840,6 +1931,37 @@ Rectangle {
         return Math.floor(diff / 31536000) + "年前"
     }
     
+    // av 号转 BV 号（B站公开算法，mcfx 逆向，纯本地计算无网络请求）。
+    // 仅适用于 2020-03 前的旧号段（av < 2^31），新视频评论里 av 形态极少，
+    // 失配时换算结果无效但不崩溃（openVideo 请求会返回错误）。
+    function avToBvid(avNum) {
+        var table = "fZodR9XQDSUm21yCkr6zBqiveYah8bt4xsWpHnJE7jL5VG3guMTKNPAwcF"
+        var tr = {}
+        for (var i = 0; i < 58; i++) tr[table[i]] = i
+        var s = [11, 10, 3, 8, 4, 6]
+        var xor = 177451812
+        var add = 8728348608
+        var x = (avNum ^ xor) + add
+        var r = ['B', 'V', '1', ' ', '4', ' ', '1', ' ', '7', ' ', ' ', ' ']
+        for (var j = 0; j < 6; j++) {
+            r[s[j]] = table[Math.floor(x / Math.pow(58, j)) % 58]
+        }
+        return r.join("")
+    }
+
+    // 评论中的视频链接跳转：videoId 为 BVxxx 或 avxxx（来自 videoIdFromJumpKey）。
+    // av 号本地换算成 BV 后统一走 App.openVideo 广播，由可见页面打开播放页。
+    function openVideoFromComment(videoId) {
+        if (!videoId || videoId === "") return
+        if (videoId.startsWith("BV")) {
+            App.openVideo(videoId, "")
+        } else if (/^av\d+$/i.test(videoId)) {
+            var avNum = parseInt(videoId.substring(2), 10)
+            var bvid = pageRoot.avToBvid(avNum)
+            if (bvid) App.openVideo(bvid, "")
+        }
+    }
+
     // 切换到指定分集
     function switchEpisode(aid, cid, bvid) {
         
@@ -2623,6 +2745,10 @@ Rectangle {
                 c.repliesExpanded = false
                 c.repliesJson = JSON.stringify([])
                 c.repliesPage = 1
+                // atNames 数组同理：ListModel 会把数组角色转成嵌套模型对象
+                //（.length 失效导致染色循环不执行），序列化为 JSON 字符串
+                c.atNamesJson = JSON.stringify(c.atNames || [])
+                delete c.atNames
                 pageRoot.commentModel.append(c)
             }
             // 数据就位后再复位滚动：避免"先滚回顶部、再等加载"的两段式跳动
@@ -2654,6 +2780,9 @@ Rectangle {
             comment.repliesExpanded = false
             comment.repliesJson = JSON.stringify([])
             comment.repliesPage = 1
+            // atNames 数组过 ListModel 会变嵌套模型对象，序列化（同上）
+            comment.atNamesJson = JSON.stringify(comment.atNames || [])
+            delete comment.atNames
 
             var rootId = String(root || "")
             if (rootId === "" || rootId === "0") {
@@ -5034,7 +5163,7 @@ Rectangle {
                                                     }
 
                                                     FluText {
-                                                        text: pageRoot.formatCommentContent(model.content, model.emotes, false, model.jumpUrls)
+                                                        text: pageRoot.formatCommentContent(model.content, model.emotes, false, model.jumpUrls, null, pageRoot.atNamesOf(model))
                                                         font: FluTextStyle.Body
                                                         color: FluTheme.fontPrimaryColor
                                                         textFormat: Text.RichText
@@ -5047,6 +5176,8 @@ Rectangle {
                                                             if (link.indexOf("timestamp:") === 0) {
                                                                 var ms = parseInt(link.substring("timestamp:".length), 10)
                                                                 mpvPlayer.seek(ms)
+                                                            } else if (link.indexOf("video:") === 0) {
+                                                                pageRoot.openVideoFromComment(link.substring("video:".length))
                                                             }
                                                         }
                                                     }
@@ -5265,6 +5396,16 @@ Rectangle {
                                         spacing: 8
                                         visible: model.repliesExpanded
                                         property var subReplies: JSON.parse(model.repliesJson || "[]") || []
+                                        // 楼中楼"回复 @xxx"前缀切分的候选用户名：
+                                        // 根评论作者 + 已加载子评论作者（未加载页/已删评论
+                                        // 的作者不在集合内，切分回退冒号启发式）
+                                        property var replyCandidates: {
+                                            var names = [model.uname]
+                                            for (var i = 0; i < subReplies.length; i++) {
+                                                if (subReplies[i].uname) names.push(subReplies[i].uname)
+                                            }
+                                            return names
+                                        }
 
                                         Repeater {
                                             model: parent.subReplies
@@ -5321,7 +5462,10 @@ Rectangle {
                                                     }
 
                                                     FluText {
-                                                        text: pageRoot.formatCommentContent(modelData.content, modelData.emotes, true, modelData.jumpUrls)
+                                                        // 候选用户名 = 根评论作者 + 已加载子评论作者（用于
+                                                        // "回复 @xxx" 前缀的精确切分，见 splitReplyPrefix）
+                                                        text: pageRoot.formatCommentContent(modelData.content, modelData.emotes, true, modelData.jumpUrls,
+                                                                                           parent.parent.parent.replyCandidates, pageRoot.atNamesOf(modelData))
                                                         font: FluTextStyle.Body
                                                         color: FluTheme.fontPrimaryColor
                                                         textFormat: Text.RichText
@@ -5334,6 +5478,8 @@ Rectangle {
                                                             if (link.indexOf("timestamp:") === 0) {
                                                                 var ms = parseInt(link.substring("timestamp:".length), 10)
                                                                 mpvPlayer.seek(ms)
+                                                            } else if (link.indexOf("video:") === 0) {
+                                                                pageRoot.openVideoFromComment(link.substring("video:".length))
                                                             }
                                                         }
                                                     }

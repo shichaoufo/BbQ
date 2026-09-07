@@ -79,6 +79,9 @@ public:
         QMap<QString, EmoteInfo> emotes;
         // 评论中的跳转链接：原文本 -> 显示标题（用于购物链接等）
         QMap<QString, QString> jumpUrls;
+        // 正文 @提及的用户名列表（来自 content.members，仅@面板插入的
+        // 真提及有数据；手打 @ 不在此列）
+        QStringList atNames;
         // 个性装扮 - 评论卡片背景
         UserSailing userSailing;
         // 头像框

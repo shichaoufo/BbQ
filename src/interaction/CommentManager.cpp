@@ -555,6 +555,20 @@ CommentManager::Comment CommentManager::parseCommentObject(const QJsonObject &ob
         }
     }
 
+    // 解析正文 @提及用户 content.members（仅@面板插入的真提及，
+    // 手打 @ 服务端不登记）
+    if (content.contains("members")) {
+        QJsonValue membersVal = content["members"];
+        if (membersVal.isArray()) {
+            for (const QJsonValue &mv : membersVal.toArray()) {
+                QString uname = mv.toObject()["uname"].toString();
+                if (!uname.isEmpty()) {
+                    comment.atNames.append(uname);
+                }
+            }
+        }
+    }
+
     // 解析表情 content.emote（一个字典，key是表情文本如 "[微笑]")
     if (content.contains("emote")) {
         QJsonValue emoteVal = content["emote"];
@@ -627,6 +641,8 @@ QVariantMap CommentManager::commentToMap(const Comment &comment) const
         jumpUrlMap[it.key()] = it.value();
     }
     map["jumpUrls"] = jumpUrlMap;
+
+    map["atNames"] = comment.atNames;
 
     QVariantMap emoteMap;
     for (auto it = comment.emotes.begin(); it != comment.emotes.end(); ++it) {
