@@ -114,7 +114,10 @@ public:
 
 signals:
     // 评论列表获取成功（QML 友好的 QVariantList）
-    void commentsReady(const QVariantList &comments, int page, int total, int sort);
+    // hasNextPage：来自 API cursor.is_end / next_offset 的权威判断。
+    // 不能用 comments.length >= 20 判断——热度排序下服务端每页返回数量
+    // 不固定（19/20/21 都有），数量判断会提前终止翻页导致评论读不全
+    void commentsReady(const QVariantList &comments, int page, int total, int sort, bool hasNextPage);
 
     // 子评论获取成功
     void subCommentsReady(qint64 rootRpid, const QVariantList &comments);

@@ -3666,7 +3666,7 @@ FluPage {
 
     Connections {
         target: CommentManager
-        function onCommentsReady(comments, page, total, sort) {
+        function onCommentsReady(comments, page, total, sort, hasNextPage) {
             if (page > 0) {
                 detailCommentPage = page
             }
@@ -3677,7 +3677,13 @@ FluPage {
             if (comments.length === 0 && detailCommentPage > 1) {
                 detailCommentTotal = (detailCommentPage - 1) * 20
             }
-            detailCommentHasNextPage = comments.length >= 20
+            // hasNextPage 来自 API cursor.is_end/next_offset（权威）；
+            // 数量判断（>=20）会因服务端每页返回数不固定而提前终止翻页
+            if (hasNextPage !== undefined) {
+                detailCommentHasNextPage = hasNextPage && comments.length > 0
+            } else {
+                detailCommentHasNextPage = comments.length >= 20
+            }
             detailCommentModel.clear()
             var oid = detailCommentOid()
             for (var i = 0; i < comments.length; i++) {
@@ -3686,6 +3692,10 @@ FluPage {
                 c.repliesExpanded = false
                 c.repliesJson = JSON.stringify([])
                 c.repliesPage = 1
+                // atNames 数组过 ListModel 会变嵌套模型对象（.length 失效），
+                // 序列化为 JSON 字符串（与 VideoPlayerPage 同方案）
+                c.atNamesJson = JSON.stringify(c.atNames || [])
+                delete c.atNames
                 detailCommentModel.append(c)
             }
             // 数据就位后再复位滚动：避免“先滚回顶部、再等加载”的两段式跳动
@@ -3716,6 +3726,9 @@ FluPage {
             comment.repliesExpanded = false
             comment.repliesJson = JSON.stringify([])
             comment.repliesPage = 1
+            // atNames 数组过 ListModel 会变嵌套模型对象，序列化（同上）
+            comment.atNamesJson = JSON.stringify(comment.atNames || [])
+            delete comment.atNames
             var rootId = String(root || "")
             if (rootId === "" || rootId === "0") {
                 detailCommentModel.insert(0, comment)

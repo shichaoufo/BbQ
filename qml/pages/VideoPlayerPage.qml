@@ -2717,7 +2717,7 @@ Rectangle {
 
     Connections {
         target: CommentManager
-        function onCommentsReady(comments, page, total, sort) {
+        function onCommentsReady(comments, page, total, sort, hasNextPage) {
             if (page > 0) {
                 pageRoot.commentPage = page
             }
@@ -2730,8 +2730,13 @@ Rectangle {
             if (comments.length === 0 && pageRoot.commentPage > 1) {
                 pageRoot.commentTotal = (pageRoot.commentPage - 1) * 20
             }
-            // 返回数量不足一页时，说明已到末尾，禁用下一页
-            pageRoot.commentHasNextPage = comments.length >= 20
+            // hasNextPage 来自 API cursor.is_end/next_offset（权威）；
+            // 数量判断（>=20）会因服务端每页返回数不固定而提前终止翻页
+            if (hasNextPage !== undefined) {
+                pageRoot.commentHasNextPage = hasNextPage && comments.length > 0
+            } else {
+                pageRoot.commentHasNextPage = comments.length >= 20
+            }
             
             // ★ 评论数量更新后强制刷新标签，确保"评论XXX"数字正确
             pageRoot.refreshPivotTabs()

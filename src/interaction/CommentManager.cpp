@@ -310,6 +310,16 @@ void CommentManager::parseCommentsData(const QByteArray &data, int sort, const Q
         m_commentCursor[cursorKey] = nextOffset;
     }
 
+    // 权威的"还有下一页"判断：cursor.is_end 与 next_offset。
+    // 服务端热度排序下每页返回数量不固定（实测同一视频第1页21条、
+    // 第2页19条），按数量判断会提前终止翻页导致评论读不全
+    bool isEnd = cursorObj["is_end"].toBool();
+    bool hasNextPage = !isEnd && !nextOffset.isEmpty();
+    // 空页防御：API 说有下一页但本页一条都没有时按末页处理，避免死循环翻页
+    if (hasNextPage && dataObj["replies"].toArray().isEmpty() && !dataObj.contains("top_replies")) {
+        hasNextPage = false;
+    }
+
     // 解析置顶评论（WBI 主接口没有 page.num，直接判断是否存在 top_replies）
     // 参照 wiliwili：将 top_replies 标记为置顶并插入列表最前面
     if (dataObj.contains("top_replies")) {
@@ -332,20 +342,11 @@ void CommentManager::parseCommentsData(const QByteArray &data, int sort, const Q
         }
     }
 
-    // WBI 接口 page.count 为 0，没有直接返回主评论数。
-    // 用当前页普通主评论数占总评论（主+子）的比例估算主评论总数。
+    // WBI 接口 page.count 为 0。评论总数直接用 cursor.all_count（主+子，
+    // 与官方"XXXX 条评论"显示口径一致）。不要按当前页主/子比例估算——
+    // 置顶热评带几千条子回复时估算值严重失真（实测 6003 条被估成 83 条）
     if (total <= 0 && allCount > 0) {
-        int mainCount = replies.size();
-        int subCount = 0;
-        for (const QJsonValue &val : replies) {
-            if (!val.isObject()) continue;
-            subCount += val.toObject().value("count").toInt();
-        }
-        if (mainCount + subCount > 0) {
-            total = static_cast<int>(allCount * static_cast<qreal>(mainCount) / (mainCount + subCount));
-        } else {
-            total = allCount;
-        }
+        total = allCount;
     }
 
     QVariantList result;
@@ -373,8 +374,8 @@ void CommentManager::parseCommentsData(const QByteArray &data, int sort, const Q
                  << "top ip_location:" << firstReply["ip_location"].toString();
     }
     qDebug() << "[CommentManager] parseCommentsData done, count:" << result.size() << "page:" << page << "total:" << total
-             << "nextOffset:" << nextOffset << "ipEmptyCount:" << ipEmptyCount;
-    emit commentsReady(result, page, total, sort);
+             << "nextOffset:" << nextOffset << "hasNextPage:" << hasNextPage << "ipEmptyCount:" << ipEmptyCount;
+    emit commentsReady(result, page, total, sort, hasNextPage);
 }
 
 void CommentManager::parseSubCommentsData(const QByteArray &data, qint64 rootRpid)
