@@ -35,6 +35,7 @@ FluPage {
 
     property bool videoVisible: false
     property bool liveVisible: false
+    property bool userProfileVisible: false
 
     onVisibleChanged: {
         if (visible) {
@@ -449,14 +450,128 @@ FluPage {
         }
     }
 
-    // 视频播放页打开时，兜底拦截滚轮事件，防止其穿透到底层主页滚动视图。
+    // 视频播放页/直播页/用户主页打开时，兜底拦截滚轮事件，防止其穿透到底层主页滚动视图。
     MouseArea {
         anchors.fill: historyFrame
         z: 99
-        enabled: videoVisible
+        enabled: videoVisible || userProfileVisible
         acceptedButtons: Qt.NoButton
         hoverEnabled: true
         onWheel: function(wheel) { wheel.accepted = true }
+    }
+
+    // ===== 用户主页 Overlay（动画/守卫模式与 HomePage userProfileOverlay 一致） =====
+    // z 序：滚轮守卫 99 < 用户主页 100 < 视频/直播 100(声明在后)。
+    // 从视频打开主页时视频先关闭（openUserProfile 内处理），从主页打开
+    // 视频时视频盖上主页
+    Item {
+        id: userProfileOverlay
+        anchors.fill: historyFrame
+        anchors.margins: Theme.playerOverlayMargin
+        z: 100
+        visible: opacity > 0 || openUserProfileAnim.running || closeUserProfileAnim.running
+        opacity: 0
+
+        property string profileMid: ""
+        property string profileName: ""
+        property string profileFace: ""
+        property int profileVerify: -1
+        property bool _profileCreated: false
+
+        Component {
+            id: userProfileComponent
+            UserProfilePage {
+                anchors.fill: parent
+                mid: userProfileOverlay.profileMid
+                userName: userProfileOverlay.profileName
+                userFace: userProfileOverlay.profileFace
+                userVerify: userProfileOverlay.profileVerify
+            }
+        }
+
+        Item {
+            id: userProfileContainer
+            anchors.fill: parent
+            transform: Translate {
+                id: userProfileTranslate
+                y: 0
+            }
+            MouseArea {
+                anchors.fill: parent
+                z: -1
+                enabled: userProfileLoader.active
+                onClicked: { /* 仅消费事件，不遮挡内部交互 */ }
+            }
+            Loader {
+                id: userProfileLoader
+                anchors.fill: parent
+                // 守卫：切导航栏时 history_page.visible=false 会使 overlay 的
+                // visible 从父级"流动"为 false，若不守卫会立即卸载销毁用户主
+                // 页实例，切回导航时重新加载。userProfileVisible 是逻辑状态，
+                // 不受父级隐藏影响（与 HomePage/SearchPage 同一模式）
+                active: (userProfileOverlay.visible || history_page.userProfileVisible) && userProfileOverlay._profileCreated
+                sourceComponent: userProfileComponent
+            }
+        }
+
+        Timer {
+            id: userProfileDestroyTimer
+            interval: 250
+            repeat: false
+            onTriggered: {
+                if (!userProfileVisible && !openUserProfileAnim.running && !closeUserProfileAnim.running) {
+                    userProfileOverlay._profileCreated = false
+                }
+            }
+        }
+
+        function doOpen() {
+            userProfileDestroyTimer.stop()
+            closeUserProfileAnim.stop()
+            _profileCreated = true
+            openUserProfileAnim.start()
+        }
+
+        function doClose() {
+            openUserProfileAnim.stop()
+            closeUserProfileAnim.stop()
+            userProfileDestroyTimer.start()
+            closeUserProfileAnim.start()
+        }
+
+        ParallelAnimation {
+            id: openUserProfileAnim
+            NumberAnimation {
+                target: userProfileOverlay
+                property: "opacity"
+                from: 0; to: 1; duration: 250
+                easing.type: Easing.OutCubic
+            }
+            NumberAnimation {
+                target: userProfileTranslate
+                property: "y"
+                from: userProfileOverlay.height * 0.15; to: 0
+                duration: 250
+                easing.type: Easing.OutCubic
+            }
+        }
+
+        ParallelAnimation {
+            id: closeUserProfileAnim
+            NumberAnimation {
+                target: userProfileOverlay
+                property: "opacity"
+                from: 1; to: 0; duration: 200
+                easing.type: Easing.InCubic
+            }
+            NumberAnimation {
+                target: userProfileTranslate
+                property: "y"
+                from: 0; to: userProfileOverlay.height * 0.15
+                duration: 200
+                easing.type: Easing.InCubic
+            }
+        }
     }
 
     Item {
@@ -853,6 +968,13 @@ FluPage {
         function onVideoCloseRequested() {
             history_page.closeVideoPlayer()
         }
+        function onUserProfileOpenRequested(mid, name, face, verify) {
+            if (!history_page.visible) return
+            history_page.openUserProfile(mid, name, face, verify)
+        }
+        function onUserProfileCloseRequested() {
+            history_page.closeUserProfile()
+        }
     }
 
     function openBangumiPlayer(bvid, epId, seasonId, title) {
@@ -949,6 +1071,30 @@ FluPage {
         if (!liveVisible) return
         liveVisible = false
         liveOverlay.doClose()
+    }
+
+    // ===== 用户主页（z 序：滚轮守卫 99 < 主页 100 < 视频/直播 100(声明在后)） =====
+    // 入口：视频播放页 UP 信息区/评论区头像（先关视频，露出/替换主页）。
+    // 从主页打开视频时视频盖上主页，退出视频回主页
+    function openUserProfile(mid, name, face, verify) {
+        // 若视频/直播打开中，先关闭。顺序必须在 same-mid 去重之前：
+        // 下方已开着同用户主页时，也要关闭视频露出主页，而不是因去重
+        // 提前返回让视频留在原地
+        if (videoVisible) closeVideoPlayer()
+        if (liveVisible) closeLivePlayer()
+        if (userProfileVisible && userProfileOverlay.profileMid === mid) return
+        userProfileOverlay.profileMid = mid
+        userProfileOverlay.profileName = name || ""
+        userProfileOverlay.profileFace = face || ""
+        userProfileOverlay.profileVerify = verify !== undefined ? verify : -1
+        userProfileVisible = true
+        userProfileOverlay.doOpen()
+    }
+
+    function closeUserProfile() {
+        if (!userProfileVisible) return
+        userProfileVisible = false
+        userProfileOverlay.doClose()
     }
 
     Component.onDestruction: {

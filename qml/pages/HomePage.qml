@@ -572,11 +572,13 @@ FluPage {
     }
 
     function openUserProfile(mid, name, face, verify) {
-        if (userProfileVisible && userProfileOverlay.profileMid === mid) return
-        // 如果视频打开中，先关闭视频
+        // 若视频打开中，先关闭视频。顺序必须在 same-mid 去重之前：
+        // 下方已开着同用户主页时（主页→视频→点UP本人头像），也要关闭
+        // 视频露出主页，而不是因去重提前返回让视频留在原地
         if (videoVisible) {
             closeVideoPlayer()
         }
+        if (userProfileVisible && userProfileOverlay.profileMid === mid) return
         userProfileOverlay.profileMid = mid
         userProfileOverlay.profileName = name || ""
         userProfileOverlay.profileFace = face || ""

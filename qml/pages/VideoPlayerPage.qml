@@ -158,12 +158,25 @@ Rectangle {
     }
     property int tabCount: pivotTabs.length
     
-    // StackLayout 结构（固定索引）: 
+    // StackLayout 结构（固定索引）:
     // index 0: 评论
     // index 1: 选集 (Loader, active: pagesModel.count > 1)
     // index 2: 合集 (Loader, active: hasUgcSeason)
     // index 3: 推荐
     // index 4: 投稿
+    // 打开 UP 主用户主页（头像/用户名点击）。经 App 广播由当前可见导航页
+    // 处理：关闭本视频播放页 + 打开主页
+    function openUpProfile() {
+        if (String(pageRoot.mid) === "") return
+        App.openUserProfile(String(pageRoot.mid), pageRoot.upName, pageRoot.upFace, pageRoot.upVerify)
+    }
+
+    // 打开评论区用户主页（本页评论列表为自绘 delegate，非 CommentPanel 组件）
+    function openCommentUserPage(mid, name, face) {
+        if (mid === undefined || mid === null || String(mid) === "") return
+        App.openUserProfile(String(mid), String(name || ""), String(face || ""))
+    }
+
     function stackIndexOf(tabName) {
         switch(tabName) {
         case "评论": return 0
@@ -4622,6 +4635,14 @@ Rectangle {
                                 verifyType: pageRoot.upVerify
                                 placeholderText: "UP"
                             }
+
+                            // 头像可点击：打开 UP 主用户主页（经 App 广播由
+                            // 当前可见导航页处理：关闭视频 + 打开主页）
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: pageRoot.openUpProfile()
+                            }
                         }
 
                         ColumnLayout {
@@ -4632,6 +4653,13 @@ Rectangle {
                                 text: pageRoot.upName
                                 font: FluTextStyle.Body
                                 color: pageRoot.upVipType > 0 ? "#FB7299" : FluTheme.fontPrimaryColor
+
+                                // 用户名可点击：打开 UP 主用户主页
+                                MouseArea {
+                                    anchors.fill: parent
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: pageRoot.openUpProfile()
+                                }
                             }
 
                             FluText {
@@ -5133,12 +5161,26 @@ Rectangle {
                                                 Layout.fillWidth: true
                                                 spacing: 8
 
-                                                AvatarWithPendant {
-                                                    face: model.face || ""
-                                                    pendantImage: model.pendantImage || ""
-                                                    avatarSize: 32
-                                                    verifyType: model.verifyType !== undefined ? model.verifyType : -1
+                                                // 头像可点击：打开评论作者的用户主页
+                                                //（经 App 广播由当前可见导航页处理：关闭视频 + 打开主页）
+                                                Item {
+                                                    implicitWidth: 32
+                                                    implicitHeight: 32
                                                     Layout.alignment: Qt.AlignTop
+
+                                                    AvatarWithPendant {
+                                                        anchors.fill: parent
+                                                        face: model.face || ""
+                                                        pendantImage: model.pendantImage || ""
+                                                        avatarSize: 32
+                                                        verifyType: model.verifyType !== undefined ? model.verifyType : -1
+                                                    }
+
+                                                    MouseArea {
+                                                        anchors.fill: parent
+                                                        cursorShape: Qt.PointingHandCursor
+                                                        onClicked: pageRoot.openCommentUserPage(model.mid, model.uname, model.face)
+                                                    }
                                                 }
 
                                                 ColumnLayout {
@@ -5159,6 +5201,12 @@ Rectangle {
                                                                 return FluTheme.fontSecondaryColor
                                                             }
                                                             anchors.verticalCenter: parent.verticalCenter
+
+                                                            MouseArea {
+                                                                anchors.fill: parent
+                                                                cursorShape: Qt.PointingHandCursor
+                                                                onClicked: pageRoot.openCommentUserPage(model.mid, model.uname, model.face)
+                                                            }
                                                         }
 
                                                         Image {
@@ -5444,15 +5492,27 @@ Rectangle {
                                         Layout.fillWidth: true
                                         spacing: 8
 
-                                                // 子评论头像
-                                                AvatarWithPendant {
+                                                // 子评论头像可点击：打开评论作者的用户主页
+                                                Item {
+                                                    implicitWidth: 28
+                                                    implicitHeight: 28
+                                                    Layout.alignment: Qt.AlignTop
+
+                                                    AvatarWithPendant {
+                                                        anchors.fill: parent
                                                         face: modelData.face || ""
                                                         pendantImage: modelData.pendantImage || ""
                                                         avatarSize: 28
                                                         verifyType: modelData.verifyType !== undefined ? modelData.verifyType : -1
                                                         placeholderText: "?"
-                                                        Layout.alignment: Qt.AlignTop
                                                     }
+
+                                                    MouseArea {
+                                                        anchors.fill: parent
+                                                        cursorShape: Qt.PointingHandCursor
+                                                        onClicked: pageRoot.openCommentUserPage(modelData.mid, modelData.uname, modelData.face)
+                                                    }
+                                                }
 
                                                 ColumnLayout {
                                                     Layout.fillWidth: true
@@ -5466,6 +5526,12 @@ Rectangle {
                                                             font: FluTextStyle.Caption
                                                             color: modelData.isVip ? "#FB7299" : FluTheme.fontSecondaryColor
                                                             anchors.verticalCenter: parent.verticalCenter
+
+                                                            MouseArea {
+                                                                anchors.fill: parent
+                                                                cursorShape: Qt.PointingHandCursor
+                                                                onClicked: pageRoot.openCommentUserPage(modelData.mid, modelData.uname, modelData.face)
+                                                            }
                                                         }
 
                                                         Image {

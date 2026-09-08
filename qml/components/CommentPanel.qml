@@ -28,6 +28,14 @@ Item {
         return String(mid) === String(panelRoot.ownerMid)
     }
 
+    // 打开评论作者的用户主页（头像/用户名点击）。视频播放页与动态详情页
+    // 共用本组件，统一经 App 广播由当前可见导航页打开主页（并按既定规则
+    // 先关闭视频播放页）
+    function openUserPage(mid, name, face) {
+        if (mid === undefined || mid === null || String(mid) === "") return
+        App.openUserProfile(String(mid), String(name || ""), String(face || ""))
+    }
+
     function levelIconSource(level) {
         return "qrc:/BiliQt/icons/level/user-lv" + (level || 0) + ".svg"
     }
@@ -454,12 +462,27 @@ Item {
                                 Layout.fillWidth: true
                                 spacing: 8
 
-                                AvatarWithPendant {
-                                    face: model.face || ""
-                                    pendantImage: model.pendantImage || ""
-                                    avatarSize: 32
-                                    verifyType: model.verifyType !== undefined ? model.verifyType : -1
+                                // 头像可点击：打开评论作者的用户主页。
+                                // 经 App 广播由当前可见导航页处理（按既定规则
+                                // 先关闭视频播放页再开主页）
+                                Item {
+                                    implicitWidth: 32
+                                    implicitHeight: 32
                                     Layout.alignment: Qt.AlignTop
+
+                                    AvatarWithPendant {
+                                        anchors.fill: parent
+                                        face: model.face || ""
+                                        pendantImage: model.pendantImage || ""
+                                        avatarSize: 32
+                                        verifyType: model.verifyType !== undefined ? model.verifyType : -1
+                                    }
+
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: panelRoot.openUserPage(model.mid, model.uname, model.face)
+                                    }
                                 }
 
                                 ColumnLayout {
@@ -480,6 +503,12 @@ Item {
                                                 return FluTheme.fontSecondaryColor
                                             }
                                             anchors.verticalCenter: parent.verticalCenter
+
+                                            MouseArea {
+                                                anchors.fill: parent
+                                                cursorShape: Qt.PointingHandCursor
+                                                onClicked: panelRoot.openUserPage(model.mid, model.uname, model.face)
+                                            }
                                         }
 
                                         Image {
@@ -771,14 +800,26 @@ Item {
                                         Layout.fillWidth: true
                                         spacing: 8
 
-                                        // 子评论头像
-                                        AvatarWithPendant {
-                                            face: modelData.face || ""
-                                            pendantImage: modelData.pendantImage || ""
-                                            avatarSize: 28
-                                            verifyType: modelData.verifyType !== undefined ? modelData.verifyType : -1
-                                            placeholderText: "?"
+                                        // 子评论头像可点击：打开评论作者的用户主页
+                                        Item {
+                                            implicitWidth: 28
+                                            implicitHeight: 28
                                             Layout.alignment: Qt.AlignTop
+
+                                            AvatarWithPendant {
+                                                anchors.fill: parent
+                                                face: modelData.face || ""
+                                                pendantImage: modelData.pendantImage || ""
+                                                avatarSize: 28
+                                                verifyType: modelData.verifyType !== undefined ? modelData.verifyType : -1
+                                                placeholderText: "?"
+                                            }
+
+                                            MouseArea {
+                                                anchors.fill: parent
+                                                cursorShape: Qt.PointingHandCursor
+                                                onClicked: panelRoot.openUserPage(modelData.mid, modelData.uname, modelData.face)
+                                            }
                                         }
 
                                         ColumnLayout {
@@ -793,6 +834,12 @@ Item {
                                                     font: FluTextStyle.Caption
                                                     color: modelData.isVip ? "#FB7299" : FluTheme.fontSecondaryColor
                                                     anchors.verticalCenter: parent.verticalCenter
+
+                                                    MouseArea {
+                                                        anchors.fill: parent
+                                                        cursorShape: Qt.PointingHandCursor
+                                                        onClicked: panelRoot.openUserPage(modelData.mid, modelData.uname, modelData.face)
+                                                    }
                                                 }
 
                                                 Image {

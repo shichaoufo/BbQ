@@ -34,6 +34,12 @@ Rectangle {
     property string level: ""
     property bool isFollowing: false
 
+    // 实例复用换人场景（主页还开着时从视频页打开另一用户的主页）：
+    // 已加载数据的 mid 与构造完成标记。Loader 实例不重建、仅 mid 绑定
+    // 变化，onCompleted 不会再触发，由 onMidChanged 驱动重置与重载
+    property string _loadedMid: ""
+    property bool _completed: false
+
     // ===== 视频分页属性 =====
     property int videoPage: 1
     property int videoPageSize: 30
@@ -281,6 +287,33 @@ Rectangle {
         Api.getUserSpaceVideos(pageRoot.mid, pageRoot.videoPage, pageRoot.videoPageSize, pageRoot.videoOrder)
     }
 
+    // ===== 实例复用换人：mid 变化时重置并重载 =====
+    // _loadedMid 去重保证每个 mid 只加载一次（onCompleted 与 onMidChanged
+    // 均调用本函数，构造期信号与完成回调不会重复触发加载）
+    function ensureLoaded() {
+        if (pageRoot.mid === "" || pageRoot._loadedMid === pageRoot.mid) return
+        pageRoot._loadedMid = pageRoot.mid
+        delayedLoadVideosTimer.stop()
+        // 重置分页与排序（videoOrder 复位会联动排序下拉框，不触发请求）
+        pageRoot.videoPage = 1
+        pageRoot.videoHasMore = true
+        pageRoot.videoLoading = false
+        pageRoot.videoOrder = "pubdate"
+        // 清掉上一用户由 API 返回的展示字段，避免换人瞬间闪现旧数据
+        //（userName/userFace/userVerify 由父级绑定自动更新，无需清）
+        pageRoot.userSign = ""
+        pageRoot.userFans = ""
+        pageRoot.userAttention = ""
+        pageRoot.pendantImage = ""
+        pageRoot.level = ""
+        pageRoot.vipType = 0
+        pageRoot.isFollowing = false
+        pageRoot.videosModel.clear()
+        videosGrid.contentY = 0
+        loadUserInfo()
+        delayedLoadVideosTimer.start()
+    }
+
     // ===== Connections：用户信息 =====
     Connections {
         target: Api
@@ -291,6 +324,9 @@ Rectangle {
                     return
                 }
                 var d = obj.data || {}
+                // 过期响应防御：换人后上一用户的信息响应才返回时丢弃
+                //（space info 响应自带 data.mid）
+                if (d.mid !== undefined && String(d.mid) !== String(pageRoot.mid)) return
                 pageRoot.userName = d.name || ""
                 pageRoot.userFace = d.face || ""
                 pageRoot.userSign = d.sign || ""
@@ -321,6 +357,10 @@ Rectangle {
                 }
                 var d = obj.data || {}
                 var list = d.list ? d.list.vlist : []
+                // 过期响应防御：换人后上一用户的视频响应才返回时丢弃。
+                // vlist 条目自带作者 mid；APP API（未登录）路径可能不含
+                // mid（为 0/undefined），此时不拦截，保持原行为
+                if (list.length > 0 && list[0].mid && String(list[0].mid) !== String(pageRoot.mid)) return
                 var pageInfo = d.page || {}
                 pageRoot.videoTotal = pageInfo.count || 0
                 var totalPages = Math.ceil(pageRoot.videoTotal / pageRoot.videoPageSize)
@@ -419,9 +459,14 @@ Rectangle {
     }
 
     Component.onCompleted: {
-        if (pageRoot.mid && pageRoot.mid !== "") {
-            loadUserInfo()
-            delayedLoadVideosTimer.start()
-        }
+        pageRoot._completed = true
+        ensureLoaded()
+    }
+
+    // 实例复用换人：mid 绑定变化时重置重载。构造期绑定求值也可能触发
+    // 本信号，但此时组件未就绪，首次加载统一由 onCompleted 执行
+    onMidChanged: {
+        if (!pageRoot._completed) return
+        ensureLoaded()
     }
 }

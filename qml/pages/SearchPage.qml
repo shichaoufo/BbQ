@@ -1273,7 +1273,15 @@ FluPage {
                 else if (GlobalState.searchResultModel.count === 0) appendSearchResults()
             }
         } else {
+            // 小窗模式：pageStack.visible=false 使 visible 从父级"流动"为 false
+            //（Qt 语义：父项 visible 变化会直接改变全部子孙的 visible 值并触发
+            //  visibleChanged），非真实切页，绝不能关闭播放器
+            if (App.miniPlayerMode) return
             saveScroll()
+            // 切到其他导航页时关闭视频/直播播放器，避免声音串扰
+            //（与 HomePage/HistoryPage/DynamicPage 的既定行为一致）
+            if (videoVisible) closeVideoPlayer()
+            if (liveVisible) closeLivePlayer()
         }
     }
 
@@ -2699,10 +2707,12 @@ FluPage {
     }
 
     function openUserProfile(mid, name, face, verify) {
-        if (userProfileVisible && userProfileOverlay.profileMid === mid) return
-        // 如果视频/直播打开中，先关闭
+        // 若视频/直播打开中，先关闭。顺序必须在 same-mid 去重之前：
+        // 下方已开着同用户主页时（主页→视频→点UP本人头像），也要关闭
+        // 视频露出主页，而不是因去重提前返回让视频留在原地
         if (videoVisible) closeVideoPlayer()
         if (liveVisible) closeLivePlayer()
+        if (userProfileVisible && userProfileOverlay.profileMid === mid) return
         userProfileOverlay.profileMid = mid
         userProfileOverlay.profileName = name || ""
         userProfileOverlay.profileFace = face || ""
