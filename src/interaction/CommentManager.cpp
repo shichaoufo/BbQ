@@ -47,6 +47,35 @@ void CommentManager::getComments(const QString &oid, int type, int pn, int ps, i
 {
     qDebug() << "[CommentManager] getComments oid:" << oid << "type:" << type << "pn:" << pn << "ps:" << ps << "sort:" << sort;
 
+    // 预取缓存命中：同步回放，零网络延迟。
+    // 游标恢复到"本页之后"，保证后续预取/网络请求的偏移链正确
+    const QString cKey = commentCacheKey(oid, sort, ps, pn);
+    auto it = m_commentPageCache.constFind(cKey);
+    if (it != m_commentPageCache.constEnd() && it->valid) {
+        const QString cursorKey = oid + "_" + QString::number(sort);
+        if (!it->nextCursor.isEmpty())
+            m_commentCursor[cursorKey] = it->nextCursor;
+        qDebug() << "[CommentManager] getComments cache hit, page:" << pn << "count:" << it->comments.size();
+        emit commentsReady(it->comments, pn, it->total, sort, it->hasNextPage, oid);
+        return;
+    }
+    requestComments(oid, type, pn, ps, sort, false);
+}
+
+void CommentManager::prefetchComments(const QString &oid, int type, int pn, int ps, int sort)
+{
+    // 缓存命中（如显示与预取并发请求了同一页）：无需网络，直接回告结果
+    const QString cKey = commentCacheKey(oid, sort, ps, pn);
+    auto it = m_commentPageCache.constFind(cKey);
+    if (it != m_commentPageCache.constEnd() && it->valid) {
+        emit prefetchReady(oid, sort, pn, !it->comments.isEmpty());
+        return;
+    }
+    requestComments(oid, type, pn, ps, sort, true);
+}
+
+void CommentManager::requestComments(const QString &oid, int type, int pn, int ps, int sort, bool prefetch)
+{
     // 参照 biliuwp-lite：优先使用 /x/v2/reply/wbi/main，mode=3热度, mode=2时间
     int mode = (sort == 2) ? 3 : 2;
     QString offsetStr = (pn <= 1) ? "" : m_commentCursor.value(oid + "_" + QString::number(sort));
@@ -85,7 +114,15 @@ void CommentManager::getComments(const QString &oid, int type, int pn, int ps, i
     ctx.type = type;
     ctx.sort = sort;
     ctx.oid = oid;
+    ctx.isPrefetch = prefetch;
+    ctx.page = pn;
+    ctx.ps = ps;
     getOneShot(request, ctx);
+}
+
+QString CommentManager::commentCacheKey(const QString &oid, int sort, int ps, int pn)
+{
+    return QString("%1_%2_%3_%4").arg(oid).arg(sort).arg(ps).arg(pn);
 }
 
 void CommentManager::getSubComments(const QString &oid, const QString &root, int pn, int ps, int type)
@@ -262,7 +299,7 @@ void CommentManager::onReplyFinished()
     qDebug() << "[CommentManager] reply data size:" << data.size() << "content:" << data.left(512);
 
     if (ctx.action == "get_comments") {
-        parseCommentsData(data, ctx.sort, ctx.oid);
+        parseCommentsData(data, ctx);
     } else if (ctx.action == "get_sub_comments") {
         parseSubCommentsData(data, ctx.pendingRootRpid);
     } else {
@@ -272,9 +309,12 @@ void CommentManager::onReplyFinished()
     reply->deleteLater();
 }
 
-void CommentManager::parseCommentsData(const QByteArray &data, int sort, const QString &oid)
+void CommentManager::parseCommentsData(const QByteArray &data, const ReplyContext &ctx)
 {
     QList<Comment> commentList;
+    const QString &oid = ctx.oid;
+    const int sort = ctx.sort;
+    const int page = ctx.page;
 
     QJsonDocument doc = QJsonDocument::fromJson(data);
     if (!doc.isObject()) {
@@ -295,12 +335,41 @@ void CommentManager::parseCommentsData(const QByteArray &data, int sort, const Q
     QJsonObject pageObj = dataObj["page"].toObject();
     QJsonObject cursorObj = dataObj["cursor"].toObject();
 
-    int page = pageObj["num"].toInt();
     int total = pageObj["count"].toInt();
     int allCount = cursorObj["all_count"].toInt();
 
+    // 乱序/过期响应防御：响应必须按页序到达才接受。
+    // 典型场景：预取第 N+1 页在途中用户点了"首页"（游标已重置回链头），
+    // 旧预取响应随后才返回——若照常写游标会把偏移链拉回旧位置，
+    // 后续"下一页"会取到错误的页
+    const QString cursorKey = oid + "_" + QString::number(sort);
+    const int lastPage = m_commentLastPage.value(cursorKey, 0);
+    bool accept = ctx.isPrefetch
+                      ? (page == lastPage + 1)
+                      : (page == 1 || page == lastPage || page == lastPage + 1);
+    // 显示响应额外允许 ==lastPage：预取与显示并发请求同一页时（用户在
+    // 预取返回前点了"下一页"），两个响应先后到达均有效
+    if (!accept) {
+        qDebug() << "[CommentManager] stale comment response dropped:"
+                 << "page" << page << "lastPage" << lastPage
+                 << "prefetch" << ctx.isPrefetch;
+        return;
+    }
+    m_commentLastPage[cursorKey] = page;
+
+    // 第 1 页显示请求 = 新会话：清空该 oid_sort 的页缓存，
+    // 避免重开视频/切回排序后回放陈旧页
+    if (!ctx.isPrefetch && page == 1) {
+        const QString prefix = cursorKey + "_";
+        for (auto cit = m_commentPageCache.begin(); cit != m_commentPageCache.end();) {
+            if (cit.key().startsWith(prefix))
+                cit = m_commentPageCache.erase(cit);
+            else
+                ++cit;
+        }
+    }
+
     // 解析 WBI 主接口翻标（pagination_reply.next_offset）
-    QString cursorKey = oid + "_" + QString::number(sort);
     QJsonObject paginationReply = cursorObj["pagination_reply"].toObject();
     QString nextOffset = paginationReply["next_offset"].toString();
     if (nextOffset.isEmpty()) {
@@ -312,7 +381,9 @@ void CommentManager::parseCommentsData(const QByteArray &data, int sort, const Q
 
     // 权威的"还有下一页"判断：cursor.is_end 与 next_offset。
     // 服务端热度排序下每页返回数量不固定（实测同一视频第1页21条、
-    // 第2页19条），按数量判断会提前终止翻页导致评论读不全
+    // 第2页19条），按数量判断会提前终止翻页导致评论读不全。
+    // 注：尾页边界处 is_end 仍不精确——最后一个有内容的页可能仍报
+    // "有下一页"，由 QML 侧的空尾页回退 + 预取机制兜底
     bool isEnd = cursorObj["is_end"].toBool();
     bool hasNextPage = !isEnd && !nextOffset.isEmpty();
     // 空页防御：API 说有下一页但本页一条都没有时按末页处理，避免死循环翻页
@@ -373,9 +444,27 @@ void CommentManager::parseCommentsData(const QByteArray &data, int sort, const Q
                  << "ip_location:" << firstReplyControl.value("ip_location").toString()
                  << "top ip_location:" << firstReply["ip_location"].toString();
     }
+    // 页缓存：预取产物供"下一页"命中即时回放；显示响应同样入缓存
+    //（预取与显示并发取同页的重复响应场景）。第 1 页不入缓存——
+    // 每次进入都要最新数据，且上面新会话时已清空
+    if (page > 1) {
+        CommentPageCache entry;
+        entry.comments = result;
+        entry.total = total;
+        entry.hasNextPage = hasNextPage;
+        entry.nextCursor = m_commentCursor.value(cursorKey);
+        entry.valid = true;
+        m_commentPageCache[commentCacheKey(oid, sort, ctx.ps, page)] = entry;
+    }
+
     qDebug() << "[CommentManager] parseCommentsData done, count:" << result.size() << "page:" << page << "total:" << total
-             << "nextOffset:" << nextOffset << "hasNextPage:" << hasNextPage << "ipEmptyCount:" << ipEmptyCount;
-    emit commentsReady(result, page, total, sort, hasNextPage);
+             << "nextOffset:" << nextOffset << "hasNextPage:" << hasNextPage << "prefetch:" << ctx.isPrefetch << "ipEmptyCount:" << ipEmptyCount;
+    if (ctx.isPrefetch) {
+        // 预取结果不触发 commentsReady（不干扰当前显示页），只回告有无内容
+        emit prefetchReady(oid, sort, page, !result.isEmpty());
+    } else {
+        emit commentsReady(result, page, total, sort, hasNextPage, oid);
+    }
 }
 
 void CommentManager::parseSubCommentsData(const QByteArray &data, qint64 rootRpid)

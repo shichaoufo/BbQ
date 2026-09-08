@@ -96,6 +96,13 @@ public:
     // 获取评论列表（sort=2按热度，sort=0按时间正序，sort=1按时间倒序）
     Q_INVOKABLE void getComments(const QString &oid, int type = 1, int pn = 1, int ps = 20, int sort = 2);
 
+    // 预取下一页评论：显示第 N 页时后台先取第 N+1 页——
+    // 1) 服务端 is_end/next_offset 在尾页边界不精确（最后一个有内容的页仍
+    //    报"有下一页"），预取能在用户无感知时探明真实尾页并提前禁用"下一页"
+    // 2) 预取结果入缓存，"下一页"命中时同步回放，零网络延迟
+    // 结果只通过 prefetchReady 通知（携带 oid 归属），不发 commentsReady
+    Q_INVOKABLE void prefetchComments(const QString &oid, int type = 1, int pn = 2, int ps = 20, int sort = 2);
+
     // 获取子评论（回复）
     Q_INVOKABLE void getSubComments(const QString &oid, const QString &root, int pn = 1, int ps = 10, int type = 1);
 
@@ -117,7 +124,13 @@ signals:
     // hasNextPage：来自 API cursor.is_end / next_offset 的权威判断。
     // 不能用 comments.length >= 20 判断——热度排序下服务端每页返回数量
     // 不固定（19/20/21 都有），数量判断会提前终止翻页导致评论读不全
-    void commentsReady(const QVariantList &comments, int page, int total, int sort, bool hasNextPage);
+    // oid：评论归属。视频播放页与动态详情页两处 Connections 监听同一信号，
+    // 需用它过滤各自的响应，防止互相覆盖对方的评论模型
+    void commentsReady(const QVariantList &comments, int page, int total, int sort, bool hasNextPage, const QString &oid);
+
+    // 预取页就绪。hasContent=false 表示预取页为空 → 显示中的当前页即真实
+    // 尾页（提前禁用"下一页"，无需用户点一次空页才发现）
+    void prefetchReady(const QString &oid, int sort, int page, bool hasContent);
 
     // 子评论获取成功
     void subCommentsReady(qint64 rootRpid, const QVariantList &comments);
@@ -134,9 +147,23 @@ signals:
     // 错误
     void errorOccurred(const QString &error);
 
+private:
+    // 每个网络请求对应的上下文，避免并发请求时 m_currentAction 被覆盖。
+    // 注意：须声明在 private slots 之前——parseCommentsData 槽签名用到它
+    struct ReplyContext {
+        QString action;
+        int type = 1;
+        int sort = 2;
+        QString oid;
+        qint64 pendingRootRpid = 0;
+        bool isPrefetch = false; // 预取请求：只入缓存/发 prefetchReady，不发 commentsReady
+        int page = 0;            // 请求页码（WBI 接口响应无 page.num，需请求侧自带）
+        int ps = 20;             // 页大小（缓存键组成部分）
+    };
+
 private slots:
     void onReplyFinished();
-    void parseCommentsData(const QByteArray &data, int sort, const QString &oid);
+    void parseCommentsData(const QByteArray &data, const ReplyContext &ctx);
     void parseSubCommentsData(const QByteArray &data, qint64 rootRpid);
     void parseActionData(const QByteArray &data, const QString &action, qint64 rpid);
 
@@ -145,15 +172,6 @@ private:
     QVariantMap commentToMap(const Comment &comment) const;
     QString getCSRFToken();
 
-    // 每个网络请求对应的上下文，避免并发请求时 m_currentAction 被覆盖
-    struct ReplyContext {
-        QString action;
-        int type = 1;
-        int sort = 2;
-        QString oid;
-        qint64 pendingRootRpid = 0;
-    };
-
     // 一次性 QNAM 请求：每次请求新建网络管理器，用完即毁。
     // 不复用共享池连接——池内连接一旦被 B 站风控标记，
     // 复用它的请求会失败且重试仍落在同一条坏连接上，直到重启客户端。
@@ -161,10 +179,29 @@ private:
     QNetworkReply *postOneShot(const QNetworkRequest &request, const QByteArray &data, const ReplyContext &ctx);
     QNetworkReply *getOneShot(const QNetworkRequest &request, const ReplyContext &ctx);
 
+    // 主评论网络请求公共路径（getComments/prefetchComments 共用，仅 ctx.isPrefetch 不同）
+    void requestComments(const QString &oid, int type, int pn, int ps, int sort, bool prefetch);
+    static QString commentCacheKey(const QString &oid, int sort, int ps, int pn);
+
     QHash<QNetworkReply*, ReplyContext> m_replyContextMap;
 
     // WBI 主接口翻页游标：key = oid_sort
     QMap<QString, QString> m_commentCursor;
+
+    // 主评论分页缓存（预取产物）：key = commentCacheKey()。
+    // "下一页"命中时同步回放，零网络延迟；第 1 页显示请求（新会话）时清空
+    struct CommentPageCache {
+        QVariantList comments;
+        int total = 0;
+        bool hasNextPage = false;
+        QString nextCursor;   // 本页解析后的游标；回放时恢复，保证偏移链正确
+        bool valid = false;
+    };
+    QHash<QString, CommentPageCache> m_commentPageCache;
+
+    // oid_sort 已接受解析的最后一页页码：丢弃乱序/过期响应
+    //（如"首页"重置游标后姗姗来迟的旧预取响应，防止写坏游标链）
+    QHash<QString, int> m_commentLastPage;
 
     static const QString USER_AGENT;
     static const QString REFERER;

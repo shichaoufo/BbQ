@@ -2487,11 +2487,12 @@ FluPage {
         }
     }
 
-    // 视频播放页打开时，兜底拦截滚轮事件，防止其穿透到底层主页滚动视图。
+    // 视频播放页/直播页/动态详情页打开时，兜底拦截滚轮事件，
+    // 防止其穿透到底层主页滚动视图。
     MouseArea {
         anchors.fill: parent
         z: 99
-        enabled: videoVisible || liveVisible
+        enabled: videoVisible || liveVisible || detailVisible
         acceptedButtons: Qt.NoButton
         hoverEnabled: true
         onWheel: function(wheel) { wheel.accepted = true }
@@ -3666,16 +3667,27 @@ FluPage {
 
     Connections {
         target: CommentManager
-        function onCommentsReady(comments, page, total, sort, hasNextPage) {
+        function onCommentsReady(comments, page, total, sort, hasNextPage, oid) {
+            // 过滤其他评论面板（如视频播放页）的响应：两处 Connections 监听
+            // 同一信号，无归属过滤时会互相覆盖对方的评论模型
+            if (String(oid) !== String(detailCommentOid())) return
+            // 空尾页回退：热度排序下服务端 is_end/next_offset 不精确，
+            // 最后一个有内容的页仍可能报"有下一页"，再翻一页实际返回 0 条。
+            // 此时保留上一页内容、页码回退一页并禁用"下一页"，
+            // 而不是清空列表显示一个空尾页。预取机制正常时用户到不了这一步
+            //（预取已提前禁用按钮），此处兜底预取返回前的点击竞态
+            if (comments.length === 0 && detailCommentPage > 1) {
+                detailCommentPage -= 1
+                detailCommentLoadingMore = false
+                detailCommentHasNextPage = false
+                return
+            }
             if (page > 0) {
                 detailCommentPage = page
             }
             detailCommentLoadingMore = false
             if (detailCommentPage <= 1 || detailCommentTotal <= 0) {
                 detailCommentTotal = total || comments.length
-            }
-            if (comments.length === 0 && detailCommentPage > 1) {
-                detailCommentTotal = (detailCommentPage - 1) * 20
             }
             // hasNextPage 来自 API cursor.is_end/next_offset（权威）；
             // 数量判断（>=20）会因服务端每页返回数不固定而提前终止翻页
@@ -3700,6 +3712,21 @@ FluPage {
             }
             // 数据就位后再复位滚动：避免“先滚回顶部、再等加载”的两段式跳动
             detailCommentPanel.scrollToTop()
+            // 预取下一页：后台探明真实尾页（空尾页提前禁用“下一页”），
+            // 命中缓存时翻页零网络延迟
+            if (detailCommentHasNextPage) {
+                CommentManager.prefetchComments(detailCommentOid(), detailCommentType(), detailCommentPage + 1, 20, sort)
+            }
+        }
+        function onPrefetchReady(oid, sort, page, hasContent) {
+            // 只处理本动态评论的预取结果（排序切换期间的旧预取按 sort 过滤）
+            if (String(oid) !== String(detailCommentOid())) return
+            if (sort !== (detailCommentSortByHeat ? 2 : 1)) return
+            // 预取的是当前页+1；返回空说明当前页即真实尾页，
+            // 无需用户点一次“下一页”才发现
+            if (page !== detailCommentPage + 1) return
+            if (!hasContent)
+                detailCommentHasNextPage = false
         }
         function onSubCommentsReady(rootRpid, comments) {
             var targetRpid = String(rootRpid || "")
