@@ -128,7 +128,9 @@ public:
     /// emoticonUrl：直播纯表情弹幕图（空 = 普通文本/混排弹幕；text 可为空）。
     ///              图未就绪时弹幕延迟激活（等 EmoticonCache::ready），
     ///              下载失败/超时 8s 丢弃
-    /// emoticonSize：1=小表情（约 1.15 倍行高） 2=大表情（约 1.8 倍行高）
+    /// emoticonSize：1=小表情（kEmoteScaleSmall 倍字形高） 2=大表情
+    ///              （kEmoteScaleLarge 倍字形高，高于一条轨道 → 跨轨道占用）。
+    ///              直播侧由 LiveDanmakuManager 按弹幕级 bulge_display 判定
     /// emoticons：文本+表情混排（如 "1[哇]"），元素为 map{text,url,size}，
     ///            text 是文本内的占位符（会被图片替换）。任一图未就绪时
     ///            整条延迟激活；失败/超时的表情降级为普通文本占位符
@@ -142,6 +144,15 @@ public:
     Q_INVOKABLE void appendFixed(const QString &text, const QString &color,
                                  qreal yPos, qint64 durationMs, qint64 nowMs,
                                  qreal fontScale = 1.0, qreal vCenterBase = 0.0);
+    /// 实测逻辑像素宽（不含左右贴边余量）。QML 在 addDanmaku 里用它算轨道
+    /// 占用时长 —— 判据是「上一条尾部进屏即可再放」，必须用真实宽度：
+    /// 按字数粗估对 CJK 会偏窄约 15%，相邻两条会直接叠字。
+    /// 参数与 appendScroll 完全对应，测量口径与激活期一致
+    /// （纯表情 → emoticonLogicalSize；混排 → measureMixed；纯文本 → measure）
+    Q_INVOKABLE qreal measureWidth(const QString &text, qreal fontScale = 1.0,
+                                   const QString &emoticonUrl = QString(),
+                                   int emoticonSize = 1,
+                                   const QVariantList &emoticons = QVariantList()) const;
     /// 弹幕时钟（单调、暂停补偿）。QML 在 addDanmaku 的轨道分配中使用，
     /// 保证轨道时间戳与弹幕位置共用同一时钟
     Q_INVOKABLE qint64 currentMs() const;
@@ -206,7 +217,7 @@ private:
     struct InlineEmo {
         QString key;      ///< 文本内的占位符（如 "[哇]"），渲染时被图片替换
         QString url;      ///< 表情图 URL（EmoticonCache 键）
-        int     size = 1; ///< 1=小表情（1.15 倍行高） 2=大表情（1.8 倍行高）
+        int     size = 1; ///< 1=小表情 2=大表情（kEmoteScaleSmall/Large 倍字形高）
         bool    failed = false;   ///< 下载失败/超时 → 占位符按普通文本渲染（降级）
     };
     struct LiveItem {
@@ -299,7 +310,10 @@ private:
     // 旧窗口最后一帧渲染安全，删除交旧窗口渲染线程 job）。原子量：
     // 写者跨线程，读者（flush 判空）在渲染线程
     std::atomic<QRhiTexture *> m_atlasTex{nullptr};
-    QSize        m_atlasSize{2048, 2048};   ///< 物理像素；容量上限 ~200 条平均弹幕
+    QSize        m_atlasSize{4096, 2048};   ///< 物理像素；容量上限约 400 条平均弹幕
+                                            ///< （轨道占用放开后同屏可达 150+，
+                                            ///< 2048² 在 200% 缩放下仅容 ~74 条，
+                                            ///< 一旦装不下会整图重排 + 全量重烘焙）
     std::atomic<bool> m_atlasCreatePending{false};
     bool         m_atlasResetPending = false;  ///< 分配失败 → 下帧整图重排（compact）
     /// 行分配器状态（仅 GUI 线程同步点访问）
@@ -373,10 +387,18 @@ private:
     qreal m_speedScale = 1.0;
     int   m_trackHeight = 32;
     bool  m_danmakuEnabled = true;
-    int   m_maxItems = 80;
+    int   m_maxItems = 180;
     int   m_outlineStyle = 0;  ///< 0=描边 1=重墨 2=45°投影（B站网页端三档）
 
-    static constexpr int kMaxSlots = 400;   ///< 同屏弹幕硬上限
+    /// 表情渲染尺寸系数（字形高的倍数）：
+    ///   - 小表情 = 行内 emoji（emoji_*），约 1.15 倍字形高，单轨道内
+    ///   - 大表情 = 装扮类大图（bulge_display == 1，如 upower_*），1.8 倍
+    ///     字形高 —— 高于一条轨道，QML 侧按实际高度跨轨道占用
+    /// QML 侧 DanmakuOverlay.emoteScaleSmall/Large 必须与此保持一致
+    static constexpr qreal kEmoteScaleSmall = 1.15;
+    static constexpr qreal kEmoteScaleLarge = 1.8;
+
+    static constexpr int kMaxSlots = 512;   ///< 同屏弹幕硬上限（需 > maxItems）
     // 单帧纹理激活预算（防高峰尖刺帧）。2026-08-28 由 6 收紧到 3：高刷节流
     // 档的同步阶段预算最紧（240Hz+120fps 档提前量后仅 ~7.5ms），密集期
     // 一帧烘焙 6 条弹幕的纹理尖峰会顶穿预算、令帧错过目标 vsync（偶发

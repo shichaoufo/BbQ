@@ -28,8 +28,16 @@ Item {
     property int baseFontSize: 22
     property int trackHeight: 32
     property int scrollDuration: 8000
-    property int maxItems: 80
+    property int maxItems: 180
     property int outlineStyle: 0   // 描边样式：0=描边 1=重墨 2=45°投影（B站三档）
+
+    // 跨轨道判定用的大表情尺寸系数（字形高的倍数），须与 C++
+    // DanmakuCanvas::kEmoteScaleLarge 保持一致。
+    // 小表情（行内 emoji，C++ kEmoteScaleSmall = 1.15）**不**参与跨轨道判定：
+    // 1.15 × lineHeight ≈ 35.6 仅比 effTrackHeight(32) 高出约 1~2 逻辑像素，
+    // 这点出血按行内 emoji 处理（B 站同款观感：表情贴字走、不撑行距）。
+    // 若让它也占 2 条轨道，密集房间里带表情的弹幕会把同轨容量直接砍半。
+    readonly property real emoteScaleLarge: 1.8
 
     property var _tracks: []
     property var _topTracks: []
@@ -80,10 +88,13 @@ Item {
         return -1
     }
 
-    // 轨道分配与速度计算保持原逻辑不变（仅在发射时执行一次，非每帧热点）
+    // 轨道分配与速度计算仅在发射时执行一次（非每帧热点）。
+    // 同轨复用判据：上一条弹幕尾部进屏后即可再放（对齐 B 站网页端），见 occupyTime
     // dmFontSize：可选，B站弹幕字号字段（25=普通 18=小字），以 25 为基准换算缩放
     // emoticonUrl/emoticonSize：可选，直播纯表情弹幕（text 可为空；size 1=小 2=大）
     // emoticons：可选，文本+表情混排（元素 {text,url,size}，text 为文本内占位符）
+    // size=2（大表情）的渲染高度超过一条轨道 → 按实际高度跨轨道占用（span 条
+    // 连续轨道），占据的每条轨道都刷新占用时刻，不会压住相邻轨道的文字
     function addDanmaku(text, color, type, dmFontSize, emoticonUrl, emoticonSize, emoticons) {
         if (!danmakuEnabled) return
         var emoList = (emoticons !== undefined && emoticons !== null) ? emoticons : []
@@ -100,32 +111,39 @@ Item {
         // 单条字号缩放：未传/非法值时为 1.0；限制在合理范围防止异常数据撑爆纹理
         var dmScale = (dmFontSize > 0) ? Math.max(0.5, Math.min(2.0, dmFontSize / 25.0)) : 1.0
 
-        var fontSize = baseFontSize * fontSizeScale * dmScale
-        var charWidth = fontSize * 0.85
-        // 宽度粗估（轨道占用时长用）：纯表情按平均纵横比 1.2 估算；
-        // 混排 = 文本宽 + 各表情宽（各自按尺寸系数估高、纵横比 1.2 估宽）
-        var emoWidth = 0
+        // 跨轨道判定系数：**只有大表情**（bulge_display=1 的装扮大图，1.8 倍字形高）
+        // 才撑破一条轨道。小表情按 1.0 计（允许上述轻微出血），
+        // 与 C++ 的位图渲染尺寸无关 —— 那儿仍按 kEmoteScaleSmall/Large 出图。
         var emoFactor = 1.0
         if (emoticonUrl !== undefined && emoticonUrl !== null && emoticonUrl !== "") {
-            var f0 = (emoSize === 2) ? 1.8 : 1.15
-            emoFactor = Math.max(emoFactor, f0)
-            emoWidth += 1.2 * _canvas.lineHeight * dmScale * f0
+            emoFactor = Math.max(emoFactor, (emoSize === 2) ? emoteScaleLarge : 1.0)
         }
         for (var e = 0; e < emoList.length; e++) {
-            var fe = (emoList[e].size === 2) ? 1.8 : 1.15
+            var fe = (emoList[e].size === 2) ? emoteScaleLarge : 1.0
             emoFactor = Math.max(emoFactor, fe)
-            emoWidth += 1.2 * _canvas.lineHeight * dmScale * fe
         }
-        var textWidth = text.length * charWidth + emoWidth + 30
+
+        // 宽度必须实测（C++ 同一口径）：轨道复用判据见下方 occupyTime，
+        // 按字数粗估对 CJK 偏窄约 15%，相邻两条会直接叠字
+        var textWidth = _canvas.measureWidth(
+                    text, dmScale,
+                    (emoticonUrl !== undefined && emoticonUrl !== null) ? emoticonUrl : "",
+                    emoSize, emoList)
 
         var baseDistance = width + 200
         var pixelSpeed = baseDistance / (scrollDuration / speedScale)
-        var duration = (width + textWidth) / pixelSpeed
-        var occupyTime = (width + textWidth) / pixelSpeed + 200
+        // 轨道复用判据（对齐 B 站网页端）：上一条弹幕的**尾部**完全进入屏幕后，
+        // 同轨即可放下一条。此前是等它整条横穿离开屏幕（约等于 scrollDuration），
+        // 每条轨道 8 秒只能周转 1 条，同屏条数被钉死在轨道数上（~30 条），
+        // 高峰期后续弹幕只能静默丢弃 —— 这就是「比 B 站稀疏」的根因。
+        // +200ms：给相邻两条之间留出可辨识的间距。
+        // 必须先按实测宽度算出上一条尾部进屏的时刻（textWidth 为实测值，
+        // 粗估偏窄会让新弹幕的头部追上前一条的尾部 = 叠字）
+        var occupyTime = textWidth / pixelSpeed + 200
 
-        // 大字号弹幕/大表情渲染高度超过一条轨道时按实际高度跨轨道占用，
-        // 占据的每条轨道都刷新占用时刻，相邻轨道弹幕不会与之重叠
-        // （表情高度系数须与 C++ emoticonLogicalSize 保持一致）
+        // 渲染高度（大字号弹幕 / 大表情）超过一条轨道时按实际高度跨轨道占用，
+        // 占据的每条轨道都刷新占用时刻，相邻轨道弹幕不会与之重叠。
+        // 普通弹幕 span 恒为 1，布局与改造前完全一致
         var contentH = _canvas.lineHeight * dmScale * emoFactor
         var span = Math.max(1, Math.ceil(contentH / effTrackHeight))
         var vBase = span * effTrackHeight   // 跨轨道区域总高（C++ 垂直居中基准）

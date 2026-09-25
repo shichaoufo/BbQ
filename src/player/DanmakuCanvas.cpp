@@ -337,6 +337,42 @@ void DanmakuCanvas::appendFixed(const QString &text, const QString &color,
     kickstart();
 }
 
+qreal DanmakuCanvas::measureWidth(const QString &text, qreal fontScale,
+                                  const QString &emoticonUrl, int emoticonSize,
+                                  const QVariantList &emoticons) const
+{
+    // 三个分支与 appendScroll 的尺寸计算、以及激活期的实测口径一一对应，
+    // 保证「轨道占用时长用的宽度」== 上屏后实际占用的宽度
+    if (!emoticonUrl.isEmpty()) {
+        // 纯表情：整条就是一张图，宽度由图片纵横比决定（图未就绪按方形估算）
+        const QSizeF sz = emoticonLogicalSize(EmoticonCache::instance()->image(emoticonUrl),
+                                              fontScale, emoticonSize);
+        return sz.width();
+    }
+    if (!emoticons.isEmpty()) {
+        QVector<InlineEmo> emos;
+        emos.reserve(emoticons.size());
+        for (const QVariant &v : emoticons) {
+            const QVariantMap m = v.toMap();
+            InlineEmo ie;
+            ie.key  = m.value(QStringLiteral("text")).toString();
+            ie.url  = m.value(QStringLiteral("url")).toString();
+            ie.size = m.value(QStringLiteral("size")).toInt() == 2 ? 2 : 1;
+            // 占位符必须实际出现在文本里才算行内表情（与 appendScroll 同判据）
+            if (!ie.key.isEmpty() && !ie.url.isEmpty() && text.contains(ie.key))
+                emos.append(ie);
+        }
+        if (!emos.isEmpty()) {
+            qreal w = 0, h = 0;
+            measureMixed(text, emos, fontScale, w, h);
+            return w;
+        }
+    }
+    qreal w = 0, h = 0;
+    measure(text, fontScale, w, h);
+    return w;
+}
+
 qint64 DanmakuCanvas::currentMs() const
 {
     // 暂停期间返回冻结值：弹幕原地静止（与暂停补偿语义一致）
@@ -1545,7 +1581,7 @@ QSizeF DanmakuCanvas::emoticonLogicalSize(const QImage &src, qreal fontScale, in
     const int extent = outlineExtent(logicalSize);
     const qreal textH = fm.ascent() + fm.descent() + extent * 2;
 
-    const qreal h = textH * (emoticonSize == 2 ? 1.8 : 1.15);
+    const qreal h = textH * (emoticonSize == 2 ? kEmoteScaleLarge : kEmoteScaleSmall);
     if (src.isNull() || src.height() <= 0)
         return QSizeF(h, h);   // 图未就绪：方形估算（就绪后由实测尺寸覆盖）
     qreal w = h * qreal(src.width()) / qreal(src.height());

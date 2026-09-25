@@ -14,6 +14,24 @@
 #include <QTimer>
 #include <zlib.h>
 
+namespace {
+
+/// 宽松取整：B 站偶尔把数值字段发成字符串（如 "size": "2"），
+/// QJsonValue::toInt() 遇到字符串会直接返回默认值，这里显式兼容
+int lenientInt(const QJsonValue &v, int def = 0)
+{
+    if (v.isDouble())
+        return v.toInt(def);
+    if (v.isString()) {
+        bool ok = false;
+        const int n = v.toString().toInt(&ok);
+        return ok ? n : def;
+    }
+    return def;
+}
+
+}   // namespace
+
 LiveDanmakuManager::LiveDanmakuManager(QObject *parent)
     : QObject(parent)
     , m_webSocket(new QWebSocket(QString(), QWebSocketProtocol::VersionLatest, this))
@@ -523,8 +541,17 @@ void LiveDanmakuManager::parsePacket(const QByteArray &data)
                                 }
                                 // 混排表情：info[0][15].extra（JSON 字符串）内的
                                 // emots 字典，key 为文本占位符（如 "[哇]"），
-                                // value 含 url/size。文本中的占位符由渲染层
-                                // 替换为行内图片
+                                // value 含 url。文本中的占位符由渲染层替换为行内图片。
+                                //
+                                // 大小表情判定（2026-09-25 实测抓包 435 条真实弹幕）：
+                                // emots 各值字段固定为 count/descript/emoji/
+                                // emoticon_id/emoticon_unique/height/url/width ——
+                                // **没有 size**；info[0][13] 同样没有。真正的大小信号
+                                // 是**弹幕级**的 bulge_display == 1，extra 顶层与
+                                // info[0][13] 上都会出现。实测 435 条里仅 1 条为 1，
+                                // 正是装扮大表情 upower_[...]；行内 emoji（emoji_*，
+                                // 图 20×20）恒为 0。故以 bulge_display 为准，
+                                // size 只作老数据兼容兜底。
                                 if (basicInfo.size() > 15) {
                                     const QString extraStr = basicInfo[15].toObject()
                                                                  ["extra"].toString();
@@ -532,8 +559,11 @@ void LiveDanmakuManager::parsePacket(const QByteArray &data)
                                         const QJsonDocument extraDoc =
                                                 QJsonDocument::fromJson(extraStr.toUtf8());
                                         if (extraDoc.isObject()) {
-                                            const QJsonObject emots = extraDoc.object()
-                                                                       ["emots"].toObject();
+                                            const QJsonObject extraObj = extraDoc.object();
+                                            // 大表情是整条弹幕的属性，不是单个表情的属性
+                                            const bool bulge =
+                                                    lenientInt(extraObj["bulge_display"]) == 1;
+                                            const QJsonObject emots = extraObj["emots"].toObject();
                                             for (auto eIt = emots.begin();
                                                  eIt != emots.end(); ++eIt) {
                                                 const QJsonObject emo = eIt.value().toObject();
@@ -541,7 +571,8 @@ void LiveDanmakuManager::parsePacket(const QByteArray &data)
                                                 const QString key = eIt.key();
                                                 if (url.isEmpty() || key.isEmpty())
                                                     continue;
-                                                const int size = emo["size"].toInt(1) == 2 ? 2 : 1;
+                                                const int size = (bulge
+                                                        || lenientInt(emo["size"], 1) >= 2) ? 2 : 1;
                                                 EmoticonCache::instance()->prefetch(url);
                                                 if (danmaku.text.contains(key)) {
                                                     // 混排：占位符在文本内
@@ -560,13 +591,16 @@ void LiveDanmakuManager::parsePacket(const QByteArray &data)
                                         }
                                     }
                                 }
-                                // 兼容旧字段 info[0][13] emoticon 对象（纯表情）
+                                // 兼容旧字段 info[0][13] emoticon 对象（纯表情）：
+                                // 字段为 bulge_display/emoticon_unique/height/
+                                // in_player_area/is_dynamic/url/width，同样没有 size
                                 if (dmEmoUrl.isEmpty() && basicInfo.size() > 13) {
                                     QJsonObject emo = basicInfo[13].toObject();
                                     const QString emoUrl = emo["url"].toString();
                                     if (!emoUrl.isEmpty()) {
                                         dmEmoUrl = emoUrl;
-                                        dmEmoSize = emo["size"].toInt(1);
+                                        dmEmoSize = (lenientInt(emo["bulge_display"]) == 1
+                                                || lenientInt(emo["size"], 1) >= 2) ? 2 : 1;
                                         EmoticonCache::instance()->prefetch(emoUrl);
                                     }
                                 }
