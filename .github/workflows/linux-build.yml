@@ -196,10 +196,13 @@ jobs:
           # 断言走的是 OpenGL + libmpv 路径而非降级：
           #   NO_MPV=1 时 CMake 不链 libmpv，ldd 里就不会出现 libmpv
           #   Qt6::OpenGL 是 REQUIRED 组件，缺失则 configure 早已失败
+          # 注：ldd 展示的是完整传递闭包，libQt6OpenGL 由 libQt6Gui 传递
+          # 引入；本项目直接使用的 QOpenGLContext/FBO/Functions 在 Qt6 中
+          # 归属 Qt6::Gui。此断言的目的是确认 OpenGL 栈在位。
           grep -q "libmpv" /tmp/ldd.txt || {
             echo "ERROR: libmpv not linked -- CMake fell back to NO_MPV=1 (video disabled)"; exit 1; }
           grep -q "libQt6OpenGL" /tmp/ldd.txt || {
-            echo "ERROR: libQt6OpenGL not linked"; exit 1; }
+            echo "ERROR: libQt6OpenGL not in link closure"; exit 1; }
           grep -q "libQt6Quick" /tmp/ldd.txt || {
             echo "ERROR: libQt6Quick not linked"; exit 1; }
 
@@ -286,7 +289,7 @@ jobs:
               queue+=("$dep")
             done < <(ldd "$cur" 2>/dev/null | grep -oE '/[^ ]+\.so[^ ]*' || true)
           done
-          echo "--- bundled non-Qt libs ($(ls "$LIBDIR" | grep -cv '^libQt6') ):"
+          echo "--- bundled non-Qt libs ($(ls "$LIBDIR" | grep -cv '^libQt6' || true) ):"
           ls "$LIBDIR" | grep -v '^libQt6' || true
 
           # ---- 启动脚本 ----
