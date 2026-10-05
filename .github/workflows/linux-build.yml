@@ -6,7 +6,7 @@
 # 具备图形驱动（mesa/GL）与窗口系统（X11/Wayland）即可运行。
 #
 # 依赖说明：
-#   - Qt 6.9.3 gcc_64（aqtinstall / jurplel-install-qt-action）
+#   - Qt 6.9.3 linux_gcc_64（aqtinstall / jurplel-install-qt-action）
 #     与 macOS workflow 刻意保持同一版本，理由见下方"Qt 版本选择"注释
 #   - libmpv 来自 Ubuntu 官方仓库（libmpv-dev 提供 mpv/client.h +
 #     mpv/render_gl.h + libmpv.so.2）。CMakeLists 的 UNIX 分支用
@@ -101,11 +101,18 @@ jobs:
       #   qt5compat     : Core5Compat + Quick5Compat（可选组件，缺失只 WARNING
       #                   并关闭亚克力效果，故装上以对齐 Windows 的观感）
       #   qtimageformats: qwebp 等图片解码插件（B站动态图大量 webp）
-      - name: Install Qt 6.9.3 (gcc_64)
+      #
+      # arch 必须是 linux_gcc_64 而非 gcc_64：Qt 6.9.3 的 Linux 桌面归档
+      # 只有 linux_gcc_64 这一个架构名（aqt list-qt linux desktop --arch
+      # 6.9.3 确认），写成 gcc_64 会在这一步报
+      # "The packages [...] were not found while parsing XML"。
+      # （install-qt-action README 里 Linux x64 的默认值写的是 gcc_64，
+      #   但那是 6.8.x 的情况，6.9+ 已改名，不要照抄。）
+      - name: Install Qt 6.9.3 (linux_gcc_64)
         uses: jurplel/install-qt-action@v4
         with:
           version: '6.9.3'
-          arch: 'gcc_64'
+          arch: 'linux_gcc_64'
           modules: 'qtshadertools qtmultimedia qtwebsockets qt5compat qtimageformats'
           cache: true
 
