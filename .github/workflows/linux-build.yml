@@ -263,6 +263,11 @@ jobs:
           test -n "$MPV_SO" || { echo "ERROR: cannot locate libmpv.so.2"; exit 1; }
           echo "--- libmpv at: $MPV_SO"
 
+          # 种子自身也要拷：它是 BFS 的起点，不会被下面的循环处理。
+          # 漏拷会导致产物在无 libmpv 的目标机上启动即失败，而 runner
+          # 上因为系统装了 libmpv-dev，ldd 仍然全绿——典型的假绿。
+          cp -L "$MPV_SO" "$LIBDIR/$(basename "$MPV_SO")"
+
           # 排除两类：glibc/运行时本体、图形与窗口系统栈
           DENY='^(linux-vdso|ld-linux|libc\.so|libm\.so|libdl\.so|libpthread\.so|librt\.so|libresolv\.so|libnsl\.so|libutil\.so|libanl\.so|libstdc\+\+|libgcc_s|libGL|libEGL|libGLX|libGLdispatch|libOpenGL|libX11|libXau|libXdmcp|libXext|libxcb|libxshmfence|libdrm|libgbm|libwayland|libxkbcommon)'
 
