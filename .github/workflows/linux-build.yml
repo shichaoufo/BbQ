@@ -1,0 +1,348 @@
+# Linux (x64) 手动触发编译 BbQ（OpenGL RHI + libmpv render_gl 路径）
+#
+# 目标：把 Linux 移植的"编译期"问题在 CI 上收敛（Windows 本地完全无法验证
+# 非 WIN 分支），并产出一个自包含的 BbQ-Linux-x64.tar.gz——Qt 运行库、
+# QML 模块（含 FluentUI）、libmpv 及其 ffmpeg 依赖全部内置，目标机只需
+# 具备图形驱动（mesa/GL）与窗口系统（X11/Wayland）即可运行。
+#
+# 依赖说明：
+#   - Qt 6.9.3 gcc_64（aqtinstall / jurplel-install-qt-action）
+#     与 macOS workflow 刻意保持同一版本，理由见下方"Qt 版本选择"注释
+#   - libmpv 来自 Ubuntu 官方仓库（libmpv-dev 提供 mpv/client.h +
+#     mpv/render_gl.h + libmpv.so.2）。CMakeLists 的 UNIX 分支用
+#     find_library(mpv) 定位它；找不到只会 WARNING 并置 NO_MPV=1
+#     （视频播放禁用），本 workflow 在 smoke test 里断言 libmpv 确实
+#     进了 NEEDED，避免"编译通过但播不了"的假绿
+#   - FluentUI 从官方仓库拉取并就地编入 Qt 的 qml 目录
+#
+# Qt 版本选择（为什么是 6.9.3 而不是 6.11.1）：
+#   1) 源码用到的 private API 是 QSGTexture::commitTextureOperations(
+#      QRhi*, QRhiResourceUpdateBatch*) 与 QRhi::newTexture()，其中
+#      QRhiResourceUpdateBatch 自 Qt 6.6 起就是正式名字，且经比对
+#      Qt 6.9.3 与 6.12 文档，该虚函数签名逐字一致——不构成版本约束。
+#   2) CMakeLists 里 find_package(Qt6 REQUIRED COMPONENTS GuiPrivate)
+#      对 6.9 与 6.11 均成立（官方二进制包都带 private 头与
+#      GuiPrivate 的 cmake config），6.11 只是"不再隐式加载"而已。
+#   3) macOS workflow 已在 6.9.3 上验证过同一份 CMakeLists + 同一份
+#      源码的 UNIX 分支可编译，Linux 复用同一版本＝复用已验证结论。
+#   4) aqtinstall 对 Qt 6.11 存在仓库目录结构不兼容（上游 #1007，
+#      修复 PR #1000 仅覆盖到 win_x64），install-qt-action 内置的
+#      aqt 版本未必带该修复。Windows workflow 为此专门绕开了
+#      install-qt-action 手动装 PR 版 aqt；Linux 若同样锁 6.11 就必须
+#      复制这套 workaround，徒增变量。6.9.3 无此问题。
+#
+# 已知限制：
+#   - runner 无 GUI 会话（且刻意不引入 xvfb，见 smoke test 注释），
+#     只能验证"编译通过 + 链接完整 + 打包完整"；OpenGL 渲染、mpv
+#     帧回调、弹幕 vsync 等运行期行为必须真机联调。
+#   - GStreamer 运行时**不内置**进 tar 包：Qt6 Multimedia 的 gstreamer
+#     后端体积大且版本敏感，而本项目视频播放走 libmpv，Qt Multimedia
+#     仅被链接未实际使用（无 QMediaPlayer 调用）。目标机若无
+#     GStreamer，Qt Multimedia 相关功能不可用，不影响 BbQ 主功能。
+
+name: Linux Build
+
+on:
+  workflow_dispatch: {}   # 仅手动触发：Actions 页面 → Linux Build → Run workflow
+
+# 手动触发场景下同一分支可能连点多次，取消旧运行避免浪费配额
+concurrency:
+  group: linux-build-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  linux-x64:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ---- 系统依赖 ----
+      # libmpv-dev : mpv 头文件（client.h / render_gl.h）+ libmpv.so.2，
+      #              UNIX 分支 find_library/find_path 命中它才算真正启用播放
+      # zlib1g-dev: CMakeLists 里 target_link_libraries(... z)，弹幕压缩包 inflate
+      # libgl*/libegl*/libopengl-dev:
+      #              Qt6::OpenGL 的 cmake config 内部 find_package(OpenGL REQUIRED
+      #              COMPONENTS ...)，缺 GL/EGL/GLX 开发符号会在 configure 阶段
+      #              直接失败，是 REQUIRED 级依赖而非可选项
+      # libxkbcommon-dev / libfontconfig1-dev:
+      #              Qt6Gui 在 Linux 上探测 XKB / fontconfig，缺失会让
+      #              Gui 的 cmake config 走降级分支
+      # gstreamer*: Qt6 Multimedia 的运行期后端，纯运行期依赖——本项目
+      #              视频走 mpv，编译期完全不需要，装它们只为让产物在
+      #              常规桌面发行版上具备 Qt Multimedia 能力
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ninja-build \
+            git \
+            ca-certificates \
+            libmpv-dev \
+            zlib1g-dev \
+            libgl1-mesa-dev \
+            libegl-dev \
+            libopengl-dev \
+            libxkbcommon-dev \
+            libfontconfig1-dev \
+            gstreamer1.0-plugins-good \
+            gstreamer1.0-plugins-bad \
+            gstreamer1.0-libav
+
+      # 基础包已含 qtbase/qtdeclarative/qtsvg/qttools；下面 5 个是附加包：
+      #   qtshadertools : ShaderTools（MultiEffect/FluWindow 亚克力效果）
+      #   qtmultimedia  : Multimedia（REQUIRED 组件）
+      #   qtwebsockets  : WebSockets（REQUIRED 组件，弹幕/评论长连接）
+      #   qt5compat     : Core5Compat + Quick5Compat（可选组件，缺失只 WARNING
+      #                   并关闭亚克力效果，故装上以对齐 Windows 的观感）
+      #   qtimageformats: qwebp 等图片解码插件（B站动态图大量 webp）
+      - name: Install Qt 6.9.3 (gcc_64)
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.9.3'
+          arch: 'gcc_64'
+          modules: 'qtshadertools qtmultimedia qtwebsockets qt5compat qtimageformats'
+          cache: true
+
+      # qmake 由 install-qt-action 加入 PATH；用 -query 拿权威安装路径，
+      # 不依赖 action 的环境变量命名（Windows/macOS workflow 同一做法）
+      - name: Verify toolchain
+        run: |
+          set -euo pipefail
+          echo "--- compiler / cmake:"
+          g++ --version | head -1
+          cmake --version | head -1
+          echo "--- libmpv:"
+          pkg-config --modversion mpv 2>/dev/null || true
+          ls -l /usr/lib/*/libmpv.so* 2>/dev/null || ls -l /usr/lib/libmpv.so* 2>/dev/null || true
+          test -f /usr/include/mpv/render_gl.h
+          echo "mpv/render_gl.h present"
+          echo "--- Qt:"
+          qmake -query QT_VERSION
+          qmake -query QT_INSTALL_PREFIX
+          qmake -query QT_INSTALL_QML
+          echo "QT_PREFIX=$(qmake -query QT_INSTALL_PREFIX)" >> "$GITHUB_ENV"
+          echo "QT_QML_DIR=$(qmake -query QT_INSTALL_QML)" >> "$GITHUB_ENV"
+
+      # FluentUI 构建时把插件 so 直接链入 Qt 的 qml 目录，
+      # 其 cmake install 规则默认指向无权限目录，因此跳过 install，
+      # 改为校验插件目录完整性 + 缺 qmldir 时从 build 树补拷
+      - name: Build FluentUI
+        run: |
+          set -euo pipefail
+          git clone --depth 1 https://github.com/zhuzichu520/FluentUI.git "$RUNNER_TEMP/FluentUI"
+          cmake -S "$RUNNER_TEMP/FluentUI" -B "$RUNNER_TEMP/FluentUI/build" \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="$QT_PREFIX" \
+            -DFLUENTUI_BUILD_EXAMPLES=OFF
+          cmake --build "$RUNNER_TEMP/FluentUI/build" --parallel
+          echo "--- plugin dir contents:"
+          ls -la "$QT_QML_DIR/FluentUI/" || true
+          if [ ! -f "$QT_QML_DIR/FluentUI/qmldir" ]; then
+            echo "qmldir missing in plugin dir, copying from build tree"
+            find "$RUNNER_TEMP/FluentUI/build" -name qmldir -exec cp {} "$QT_QML_DIR/FluentUI/" \;
+          fi
+          test -f "$QT_QML_DIR/FluentUI/qmldir" || { echo "ERROR: FluentUI qmldir not found"; exit 1; }
+
+      # FLUENTUI_QML_PATH 的默认值 /usr/lib/qml/FluentUI 只适配部分发行版，
+      # 必须用 -D 显式传入本机 Qt 的实际 qml 目录
+      - name: Configure (Release)
+        run: |
+          set -euo pipefail
+          cmake -S . -B build \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="$QT_PREFIX" \
+            -DFLUENTUI_QML_PATH="$QT_QML_DIR/FluentUI"
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      # Linux 无 bundle，install(TARGETS ... RUNTIME DESTINATION bin)
+      # 直接产出裸可执行文件 stage/bin/BbQ
+      - name: Install to staging
+        run: cmake --install build --prefix "$PWD/stage"
+
+      # runner 无 GUI 会话。这里刻意不加 xvfb：Xvfb + llvmpipe 软件渲染
+      # 会引入与真实驱动不同的行为，且 BbQ 启动即发起网络请求与登录态
+      # 恢复，既不稳定也不代表真机表现——那样的"跑起来了"是假信号。
+      # 这里只做与运行期无关、但能真正暴露问题的静态校验。
+      - name: Smoke test (static)
+        run: |
+          set -euo pipefail
+          BIN="stage/bin/BbQ"
+          test -x "$BIN" || { echo "ERROR: $BIN missing or not executable"; exit 1; }
+
+          echo "--- file type:"
+          file "$BIN"
+
+          echo "--- NEEDED entries:"
+          readelf -d "$BIN" | grep NEEDED || true
+
+          # ldd 出现 "not found" 说明链接闭包有缺口——这是 runner 上
+          # 唯一能真实反映运行期动态链接是否完整的检查
+          echo "--- ldd:"
+          ldd "$BIN" | tee /tmp/ldd.txt
+          if grep -q "not found" /tmp/ldd.txt; then
+            echo "ERROR: unresolved dynamic dependencies"; exit 1
+          fi
+
+          # 断言走的是 OpenGL + libmpv 路径而非降级：
+          #   NO_MPV=1 时 CMake 不链 libmpv，ldd 里就不会出现 libmpv
+          #   Qt6::OpenGL 是 REQUIRED 组件，缺失则 configure 早已失败
+          grep -q "libmpv" /tmp/ldd.txt || {
+            echo "ERROR: libmpv not linked -- CMake fell back to NO_MPV=1 (video disabled)"; exit 1; }
+          grep -q "libQt6OpenGL" /tmp/ldd.txt || {
+            echo "ERROR: libQt6OpenGL not linked"; exit 1; }
+          grep -q "libQt6Quick" /tmp/ldd.txt || {
+            echo "ERROR: libQt6Quick not linked"; exit 1; }
+
+          # 产物体积 sanity check：Qt 静态资源（qrc）缺失会缩到几 MB
+          SIZE=$(stat -c %s "$BIN")
+          echo "--- binary size: $SIZE bytes"
+          if [ "$SIZE" -lt 2000000 ]; then
+            echo "ERROR: binary suspiciously small, QML resources may be missing"; exit 1
+          fi
+
+          # 项目从未调用 enable_testing()，CMake 不会生成 CTestTestfile.cmake，
+          # 此时 ctest 自身会因找不到该文件而报错退出。必须以文件是否存在
+          # 来判断有无测试——若改用 `ctest -N | grep "Total Tests: 0"` 判断，
+          # ctest 找不到文件时 stdout 无匹配 → 守卫失效 → 走进 else 分支
+          # 真去跑 ctest → 因无测试文件而非零退出 → 整个步骤失败。
+          if [ -f build/CTestTestfile.cmake ]; then
+            ctest --test-dir build --output-on-failure
+          else
+            echo "ctest: 项目未注册测试（无 CTestTestfile.cmake），已跳过"
+          fi
+
+      # ===== 自包含打包 =====
+      # 不用 linuxdeployqt，原因（均为其在该场景下的实际失败模式）：
+      #   1) 它默认产出 AppImage，需要 FUSE；GitHub runner 无 /dev/fuse，
+      #      只能用 --appimage-extract 绕，属非主流路径
+      #   2) 上游长期无维护（最后正式版 2019），continuous 构建在
+      #      glibc 2.38+ / Qt6 上失败是常态，CI 里不可控
+      #   3) 它对 Qt6 的 qml/ 模块目录覆盖不全，而本项目重度依赖
+      #      FluentUI 与 QtQuick.Controls，漏目录＝运行时才崩
+      # 改为手工收集，行为完全确定，且顺带能做完整性校验：
+      #   1) Qt 前缀的 lib/ + plugins/ + qml/ 目录结构固定，整体拷入
+      #      （QtXcbQpa 等不在主程序 NEEDED 里、但平台插件要用，
+      #       所以不能只按 ldd 挑）
+      #   2) libmpv 的 ffmpeg 传递闭包从 libmpv.so.2 出发 BFS 收集，
+      #      排除 glibc 与图形/窗口栈（目标机必有，内置反而可能与
+      #      本地驱动冲突）
+      #   3) 用启动脚本注入 LD_LIBRARY_PATH / 插件与 QML 搜索路径，
+      #      无需 patchelf 改 rpath（改 rpath 会与 Qt 自身的
+      #      $ORIGIN/../plugins 假设打架）
+      - name: Deploy (self-contained Qt + libmpv)
+        run: |
+          set -euo pipefail
+          STAGE="$PWD/stage"
+          BIN="$STAGE/bin/BbQ"
+          LIBDIR="$STAGE/lib"
+          mkdir -p "$LIBDIR"
+
+          echo "--- copying Qt runtime (lib / plugins / qml)"
+          cp -a "$QT_PREFIX"/lib/*.so* "$LIBDIR"/
+          cp -a "$QT_PREFIX/plugins" "$STAGE/plugins"
+          cp -a "$QT_PREFIX/qml" "$STAGE/qml"
+
+          # FluentUI 必须在打包后的 qml 树里，否则启动即找不到 FluWindow
+          test -f "$STAGE/qml/FluentUI/qmldir" || {
+            echo "ERROR: FluentUI qmldir missing in staged qml tree"; exit 1; }
+
+          # ---- libmpv + ffmpeg 传递依赖 BFS ----
+          # 从 libmpv.so.2 出发而非主程序出发：主程序的 ldd 里混着
+          # 大量 X11/GL 栈，不该内置
+          MPV_SO="$(ldd "$BIN" | awk '/libmpv/ {print $3; exit}')"
+          test -n "$MPV_SO" || { echo "ERROR: cannot locate libmpv.so.2"; exit 1; }
+          echo "--- libmpv at: $MPV_SO"
+
+          # 排除两类：glibc/运行时本体、图形与窗口系统栈
+          DENY='^(linux-vdso|ld-linux|libc\.so|libm\.so|libdl\.so|libpthread\.so|librt\.so|libresolv\.so|libnsl\.so|libutil\.so|libanl\.so|libstdc\+\+|libgcc_s|libGL|libEGL|libGLX|libGLdispatch|libOpenGL|libX11|libXau|libXdmcp|libXext|libxcb|libxshmfence|libdrm|libgbm|libwayland|libxkbcommon)'
+
+          queue=("$MPV_SO"); seen=("$MPV_SO")
+          while [ ${#queue[@]} -gt 0 ]; do
+            cur="${queue[0]}"; queue=("${queue[@]:1}")
+            while IFS= read -r dep; do
+              [ -e "$dep" ] || continue
+              base="$(basename "$dep")"
+              echo "$base" | grep -Eq "$DENY" && continue
+              case " ${seen[*]} " in
+                *" $dep "*) continue ;;
+              esac
+              seen+=("$dep")
+              cp -L "$dep" "$LIBDIR/$base"
+              queue+=("$dep")
+            done < <(ldd "$cur" 2>/dev/null | grep -oE '/[^ ]+\.so[^ ]*' || true)
+          done
+          echo "--- bundled non-Qt libs ($(ls "$LIBDIR" | grep -cv '^libQt6') ):"
+          ls "$LIBDIR" | grep -v '^libQt6' || true
+
+          # ---- 启动脚本 ----
+          cat > "$STAGE/run-bbq.sh" <<'EOF'
+          #!/usr/bin/env bash
+          # BbQ 启动脚本：注入自包含运行时环境（Qt 库 / 平台插件 / QML 模块 / libmpv）
+          # 用法：./run-bbq.sh [传给 BbQ 的参数]
+          set -euo pipefail
+          HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+          export LD_LIBRARY_PATH="$HERE/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          export QT_PLUGIN_PATH="$HERE/plugins"
+          export QML2_IMPORT_PATH="$HERE/qml"
+          exec "$HERE/bin/BbQ" "$@"
+          EOF
+          chmod 755 "$STAGE/run-bbq.sh"
+
+          cat > "$STAGE/README.txt" <<'EOF'
+          BbQ for Linux x64
+          ==================
+
+          运行：
+              chmod +x run-bbq.sh && ./run-bbq.sh
+
+          目录结构：
+              bin/BbQ            主程序
+              lib/               Qt 运行库 + libmpv 及其 ffmpeg 依赖
+              plugins/           Qt 平台插件（xcb/wayland）与图片解码插件
+              qml/               QML 模块（含 FluentUI）
+              run-bbq.sh         启动脚本（设置 LD_LIBRARY_PATH 等环境变量）
+
+          目标机要求（未内置）：
+              - 图形驱动：mesa（libGL/libEGL），或厂商驱动
+              - 窗口系统：X11 或 Wayland
+              - Qt Multimedia（可选）：GStreamer 运行时。本项目视频播放
+                走 libmpv，不依赖它。
+
+          已知限制：
+              - 本包由 CI 无 GUI 会话环境产出，仅验证了编译与链接完整性，
+                未做运行期验证。OpenGL 渲染、mpv 帧回调、弹幕渲染表现
+                请在真机上确认。
+          EOF
+
+          # tar 本身保留权限位，这里再 chmod 一次是双保险
+          chmod 755 "$BIN"
+
+      # 打成 tar.gz 而非直接上传目录：actions/upload-artifact 在打包
+      # 目录时不保留可执行权限位，解压出来的 BbQ 会变成 -rw-r--r--，
+      # 双击即"权限不够"。tar 原样冻结文件系统权限，与 macOS workflow
+      # 用 DMG 的动机完全一致。
+      - name: Create tarball
+        run: |
+          set -euo pipefail
+          mv stage BbQ-Linux-x64
+          tar -czf BbQ-Linux-x64.tar.gz BbQ-Linux-x64
+          ls -lh BbQ-Linux-x64.tar.gz
+          echo "--- executable bit preserved inside archive:"
+          tar -tvzf BbQ-Linux-x64.tar.gz | grep -E 'bin/BbQ|run-bbq.sh'
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: BbQ-Linux-x64
+          path: BbQ-Linux-x64.tar.gz
+          retention-days: 14
