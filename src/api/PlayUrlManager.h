@@ -268,7 +268,9 @@ signals:
     // 详细视频信息已获取
     void videoDetailReady(const QVariantMap &detail);
 
-    // 视频当前在线观看人数已获取（已格式化的文本，如 "2000+人正在看"）
+    // 视频当前在线观看人数已获取（已格式化的展示文本）。
+    // 接口返回的 total 是带单位的字符串（千级 "999+"、万级 "2.4万+"、
+    // 亿级 "1.2亿"），故此处文本已含单位，如 "2.4万+人正在看"
     void videoOnlineCountReady(const QString &text);
 
     // 当前用户对视频的互动关系（点赞/投币/收藏/点踩）已获取
@@ -382,6 +384,12 @@ private slots:
     void onPlayUrlReplyFinished();
 
 private:
+    // 把接口返回的在线人数文本补上"人正在看"后缀。
+    // 上游（B 站）返回的已是格式化好的展示文本（千级 "999+"、万级 "2.4万+"），
+    // 故此处刻意**不解析数值**——QString::toInt 遇"万"会静默返回已解析的
+    // 前缀（"2.4万" → 2），曾导致万级视频显示成"2+人正在看"。
+    static QString formatOnlineCount(const QString &raw);
+
     QString getSign(const QString &params);
     QString generateTimestamp();
     QString getAppKey();

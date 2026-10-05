@@ -1737,31 +1737,55 @@ void PlayUrlManager::getVideoOnlineCount(const QString &aid, const QString &cid,
         if (totalStr.isEmpty()) {
             totalStr = dataObj.value("num").toVariant().toString();
         }
-        bool hasPlus = totalStr.contains("+");
-        // B站返回的是 "1000+" 这种带 + 号的字符串，QString::toInt 遇到 + 会解析失败，
-        // 需要先把 + 号去掉再转数字
-        QString numStr = totalStr;
-        int plusIndex = numStr.indexOf('+');
-        if (plusIndex >= 0) {
-            numStr = numStr.left(plusIndex);
-        }
-        int total = numStr.toInt();
-        qDebug() << "[PlayUrlManager] online/total totalStr:" << totalStr << "hasPlus:" << hasPlus << "numStr:" << numStr << "total:" << total;
-        if (total <= 0) {
-            total = dataObj.value("total").toInt();
-            if (total <= 0) {
-                total = dataObj.value("count").toInt();
+        // 接口返回的 total/count 已是**官方格式化好的展示文本**，直接用：
+        //   千级 "999+"   万级 "2.4万+"   小人数 "82"
+        // 原代码把它当数字解析（剥 + 号再 toInt）才导致 bug——QString::toInt
+        // 遇到"万"会静默返回已解析的前缀（不抛异常、不置 ok），
+        // "2.4万" → 2，于是显示成荒谬的"2+人正在看"。
+        // 既然上游已经替我们做好了格式化，就别再拆解重拼：
+        // 直接补后缀即可，也天然与官方客户端显示一致。
+        // （曾考虑过解析单位再重组，但那样既多一层出错可能，
+        //   又会把 "2.4万" 这种**有损**的量级值当成精确值去处理。）
+        QString text = PlayUrlManager::formatOnlineCount(totalStr);
+        if (text.isEmpty()) {
+            // 兼容 count（Web 端实时在线，始终是纯数字）与 online（APP 端字段）
+            for (const char *field : {"count", "online"}) {
+                QString alt = dataObj.value(field).toVariant().toString();
+                if (alt.isEmpty())
+                    continue;
+                text = PlayUrlManager::formatOnlineCount(alt);
+                if (!text.isEmpty())
+                    break;
             }
-            if (total <= 0) {
-                total = dataObj.value("online").toInt();
+        }
+        if (text.isEmpty()) {
+            // 兜底：接口偶尔会额外给一个纯数字的 online 字段
+            for (const char *field : {"online", "count", "total"}) {
+                int n = dataObj.value(field).toInt();
+                if (n > 0) {
+                    text = QString::number(n) + "人正在看";
+                    break;
+                }
             }
         }
-        QString text = (total > 0 ? QString::number(total) + (hasPlus ? "+" : "") : "") + "人正在看";
-        qDebug() << "[PlayUrlManager] online/total parsed text:" << text;
+        qDebug() << "[PlayUrlManager] online/total totalStr:" << totalStr << "formatted text:" << text;
         emit videoOnlineCountReady(text);
 
         reply->deleteLater();
     });
+}
+
+QString PlayUrlManager::formatOnlineCount(const QString &raw)
+{
+    // 补"人正在看"后缀；空输入返回空串交由调用方回退。
+    // 刻意不拆解数值/单位：B 站给什么就显示什么，与官方客户端一致。
+    const QString s = raw.trimmed();
+    if (s.isEmpty())
+        return QString();
+    // 上游若已带后缀则不重复追加
+    if (s.contains(QStringLiteral("人正在看")))
+        return s;
+    return s + QStringLiteral("人正在看");
 }
 
 void PlayUrlManager::getArchiveRelation(const QString &aid, const QString &bvid)
