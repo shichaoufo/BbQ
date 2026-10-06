@@ -34,6 +34,16 @@ public:
         if (m_mpvRender) {
             mpv_render_context_free(m_mpvRender);
             m_mpvRender = nullptr;
+
+            // 本次确实free 掉了一个已建立的 render context。
+            // mpv_render_context_free() 内部 kill_video_async 会销毁
+            // VO+解码链，而后续的 mpv_render_context_create() 不会自动
+            // 重新挂接（vo_libmpv.c 无 reinit 逻辑）→ 需要重选视频轨。
+            // 置位"曾 free 过"标志；createFramebufferObject() 里据此决定
+            // 是否要重选视频链（首次创建时无此需求，必须跳过）。
+            if (m_item) {
+                m_item->m_renderContextFreed.store(true, std::memory_order_release);
+            }
         }
 
         if (m_mpv) {
@@ -134,6 +144,20 @@ public:
                     MpvRenderer *renderer = static_cast<MpvRenderer*>(ctx);
                     renderer->onUpdate();
                 }, this);
+
+                // 只有"此前确实 free 过一个已建立的 render context"才需要
+                // 重建视频链。首次创建走这里**不能**置位——此刻 mpv 里
+                // 尚未 loadfile（setSource 还没调），video-params 必然取不到，
+                // verifyVideoChainAlive 会判定死链并下发一次 vid no→auto，
+                // 结果是刚起播就被无端重选视频轨（首帧闪黑 + 起播延迟）。
+                // 这正是 Windows 版用 migrating && oldWindow 双重守卫挡掉的。
+                bool wasFreed = m_item
+                    && m_item->m_renderContextFreed.exchange(false, std::memory_order_acq_rel);
+                // 另加"确实加载了文件"这一必要条件：没有文件就没有视频链，
+                // 重选只会把 vid 打成 no 造成不必要的状态抖动。
+                if (wasFreed && m_item && !m_item->m_source.isEmpty()) {
+                    m_item->m_videoReinitPending.store(true, std::memory_order_release);
+                }
             }
         }
 
@@ -175,7 +199,16 @@ MpvObject::MpvObject(QQuickItem *parent)
     m_renderTimer = new QTimer(this);
     m_renderTimer->setInterval(16);
     m_renderTimer->setTimerType(Qt::PreciseTimer);
-    connect(m_renderTimer, &QTimer::timeout, this, [this]() { update(); });
+    connect(m_renderTimer, &QTimer::timeout, this, [this]() {
+        // 消费渲染线程置位的"渲染上下文已重建、需要重选视频轨"标记。
+        // 置位者是 MpvRenderer::createFramebufferObject（渲染线程），
+        // 消费放在 GUI 线程的定时器里，保证 mpv 命令与信号 emit 都在
+        // 正确的线程上（mpv 命令本身线程安全，但 QML 信号必须 GUI 线程）。
+        if (m_videoReinitPending.exchange(false, std::memory_order_acq_rel)) {
+            verifyVideoChainAlive(3);
+        }
+        update();
+    });
 }
 
 MpvObject::~MpvObject()
@@ -233,11 +266,6 @@ void MpvObject::initMpv()
     // 明确告诉 mpv 显示器刷新率为 60fps，避免它按视频帧率自行降速
     mpv_set_option_string(m_mpv, "display-fps", "60");
     mpv_set_option_string(m_mpv, "override-display-fps", "60");
-    // 限制 mpv 缓冲大小，降低内存占用（对 1080P 足够，4K 可适当放大）
-    mpv_set_option_string(m_mpv, "cache-secs", "15");
-    mpv_set_option_string(m_mpv, "demuxer-max-bytes", "50M");
-    mpv_set_option_string(m_mpv, "demuxer-max-back-bytes", "25M");
-    mpv_set_option_string(m_mpv, "demuxer-readahead-secs", "15");
     // 使用 mpv fast profile，降低缩放/后处理开销；对 bilibili 视频画质影响很小
     mpv_set_option_string(m_mpv, "profile", "fast");
     // 明确关闭高成本缩放与后处理选项（fast profile 通常已包含，显式设置更保险）
@@ -251,6 +279,9 @@ void MpvObject::initMpv()
     // 解码端也开启快速路径
     mpv_set_option_string(m_mpv, "vd-lavc-fast", "yes");
     mpv_set_option_string(m_mpv, "vd-lavc-skiploopfilter", "all");
+    // 缓存配置：默认按视频点播模式应用，直播页会在 setSource 之前由 QML
+    // 写 liveMode: true 触发 applyCacheOptions() 覆盖为直播档
+    applyCacheOptions();
 
     if (mpv_initialize(m_mpv) < 0) {
         qWarning() << "[MpvObject] failed to initialize mpv";
@@ -259,6 +290,7 @@ void MpvObject::initMpv()
         m_mpv = nullptr;
         return;
     }
+    m_mpvInitialized = true;
 
     applyHttpHeaders();
 
@@ -285,6 +317,131 @@ void MpvObject::destroyMpv()
     if (m_mpv) {
         mpv_terminate_destroy(m_mpv);
         m_mpv = nullptr;
+    }
+    m_mpvInitialized = false;
+}
+
+void MpvObject::applyCacheOptions()
+{
+    // cache 选项分两个阶段生效，必须区别对待：
+    //   mpv_initialize 之前：mpv_set_option_string（启动期选项，写入后不可改）
+    //   mpv_initialize 之后：mpv_set_option_string 会返回错误，必须用
+    //                     mpv_set_property_string（运行时属性，可改）
+    // QML 侧 liveMode 是普通属性绑定，其 setter 一定在构造函数（=initMpv）
+    // 之后才被调用，因此"直播页恰好在 initialize 前设好"这一 D3D11 版注释里
+    // 假定的时序在 Qt 属性绑定机制下并不成立。必须同时支持两条路径，
+    // 否则直播页永远拿到视频档的大cache（30s/64M），延迟高且易积压。
+    if (!m_mpv) return;
+
+    const char *cacheSecs = nullptr;
+    const char *maxBytes = nullptr;
+    const char *maxBackBytes = nullptr;
+    const char *readaheadSecs = nullptr;
+    if (m_liveMode) {
+        // 直播：小cache 低延迟，避免延迟随播放时长累积
+        cacheSecs = "10";
+        maxBytes = "16M";
+        maxBackBytes = "8M";
+        readaheadSecs = "10";
+    } else {
+        // 视频点播：大cache 抗网络抖动，避免 CDN 短暂断流时 demuxer 缓存
+        // 耗尽而停住。30s 前向 + 64M 字节上限（约 30-60s 1080p 数据），
+        // 16M 回看缓冲（seek 后退时不需重新下载）
+        cacheSecs = "30";
+        maxBytes = "64M";
+        maxBackBytes = "16M";
+        readaheadSecs = "30";
+    }
+
+    struct CacheOption { const char *name; const char *value; };
+    const CacheOption options[] = {
+        {"cache", "yes"},
+        {"cache-secs", cacheSecs},
+        {"demuxer-max-bytes", maxBytes},
+        {"demuxer-max-back-bytes", maxBackBytes},
+        {"demuxer-readahead-secs", readaheadSecs},
+    };
+
+    for (const CacheOption &opt : options) {
+        if (m_mpvInitialized) {
+            // `cache` 是启动期开关：mpv 0.23.0 起对应的运行时属性已被移除，
+            // initialize 之后再设必然失败。直播页恰好总是走这条分支
+            // （liveMode 绑定晚于构造 → setLiveMode 在 initialize 之后被调），
+            // 不跳过就会每次开直播页都刷一条"failed to set cache=yes"的
+            // 噪声 warning，掩盖真正有用的错误。其余 4 项是普通选项
+            // （--cache-secs 语义），运行期改是有效的，故保留。
+            if (strcmp(opt.name, "cache") == 0) {
+                continue;
+            }
+            if (mpv_set_property_string(m_mpv, opt.name, opt.value) < 0) {
+                qWarning() << "[MpvObject] failed to set" << opt.name << "=" << opt.value
+                           << "after initialize";
+            }
+        } else {
+            mpv_set_option_string(m_mpv, opt.name, opt.value);
+        }
+    }
+
+    // 注：D3D11 版在视频档额外设了 vf=amf_frc（AMD 硬件帧率转换），
+    // Linux 走 Mesa/VAAPI 没有对应滤镜，照抄会导致 mpv filter 加载失败
+    // 而整个视频链起不来，故此处刻意不设 vf。
+
+    qDebug() << "[MpvObject] cache options applied, liveMode =" << m_liveMode
+             << "cache-secs =" << cacheSecs << "max-bytes =" << maxBytes
+             << "initialized =" << m_mpvInitialized;
+}
+
+bool MpvObject::liveMode() const
+{
+    return m_liveMode;
+}
+
+void MpvObject::setLiveMode(bool liveMode)
+{
+    if (m_liveMode == liveMode) return;
+    m_liveMode = liveMode;
+    // 重新应用 cache 配置（initialize 前走 option，initialize 后走 property，
+    // 详见 applyCacheOptions 内的注释）
+    applyCacheOptions();
+    emit liveModeChanged();
+}
+
+void MpvObject::reinitVideoChain()
+{
+    if (!m_mpv) return;
+    // vid no→auto 重选视频轨，强制 mpv 以当前（新）渲染上下文重建
+    // VO+解码链。两条命令异步提交给核心按序执行。
+    // 纯 mpv 通用 API，与平台无关（D3D11 版用的也是同一段命令）。
+    const char *vidOff[] = {"set", "vid", "no", nullptr};
+    mpv_command_async(m_mpv, 0, vidOff);
+    const char *vidOn[] = {"set", "vid", "auto", nullptr};
+    mpv_command_async(m_mpv, 0, vidOn);
+    qWarning() << "[MpvObject] video track reselected (vid no->auto) to"
+               << "reinit video chain after render context recreation";
+}
+
+void MpvObject::verifyVideoChainAlive(int attempts)
+{
+    // 重建后需要校验视频链是否真的活着：kill_video_async 异步于核心线程，
+    // 若其完成时机晚于首次重选，刚建好的视频链会被迟到的销毁再次杀死 → 黑屏
+    if (!m_mpv || attempts <= 0) {
+        //重试耗尽：交由 QML 侧既有的播放失败重试机制兜底
+        return;
+    }
+    // video-params 仅在 VO 链存活时有效（暂停时同样有效，不依赖新帧）
+    int64_t vw = 0;
+    const int err = mpv_get_property(m_mpv, "video-params/w", MPV_FORMAT_INT64, &vw);
+    const bool alive = (err >= 0 && vw > 0);
+    qWarning() << "[MpvObject] verify video chain after context recreation: alive =" << alive
+               << "attempts left =" << attempts;
+    if (!alive) {
+        reinitVideoChain();
+        QTimer::singleShot(500, this, [this, attempts]() {
+            verifyVideoChainAlive(attempts - 1);
+        });
+    } else {
+        // 恢复完成：视频链存活，通知 QML 层恢复播放
+        emit videoChainRestored();
     }
 }
 
@@ -621,6 +778,9 @@ void MpvObject::onMpvEvents()
             break;
         }
         case MPV_EVENT_FILE_LOADED: {
+            // 首帧解码完成、画面已出。QML 侧依赖此信号重置播放级重试状态、
+            // 启动弹幕延迟计时与空降助手查询。Linux 版曾缺失该emit，
+            // 导致 VideoPlayerPage 加载失败、首页组件链连锁失败。
             if (!m_audioSource.isEmpty()) {
                 QByteArray audioData = m_audioSource.toUtf8();
                 const char *cmd[] = {"audio-add", audioData.constData(), nullptr};
@@ -631,6 +791,7 @@ void MpvObject::onMpvEvents()
                 const char *cmd[] = {"set", "pause", "no", nullptr};
                 mpv_command_async(m_mpv, 0, cmd);
             }
+            emit fileLoaded();
             break;
         }
         case MPV_EVENT_END_FILE: {
@@ -639,6 +800,12 @@ void MpvObject::onMpvEvents()
                 QString err = QString::fromUtf8(mpv_error_string(ef->error));
                 qWarning() << "[MpvObject] playback error:" << err;
                 emit errorOccurred(err);
+            } else if (ef && ef->reason == MPV_END_FILE_REASON_EOF && m_liveMode) {
+                // 直播流自然结束：通常是主播推流中断（网络不稳）导致服务器侧终止流。
+                // 用户主动 stop()/切换 source 产生的是 STOP reason，不会走到这里。
+                // QML（LivePlayerPage）据此触发指数退避的自动重连。
+                qWarning() << "[MpvObject] live stream EOF, notifying QML for reconnect";
+                emit liveStreamEof();
             }
             break;
         }
