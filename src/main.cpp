@@ -4,6 +4,7 @@
 #include <QQmlEngine>
 #include <qqml.h>
 #include <QDir>
+#include <QStandardPaths>
 #include <QFile>
 #include <QFileInfo>
 #include <QPixmapCache>
@@ -284,7 +285,17 @@ static void installCrashHandler()
 
 static void initLogFile()
 {
-    QString logDir = QCoreApplication::applicationDirPath();
+    // 日志必须写到**用户可写目录**。原先写 applicationDirPath()（exe 同级），
+    // 在 deb 安装方式下不可写：/opt/bbq 由 root 拥有，普通用户启动时
+    // QFile::open 失败，而返回值被丢弃 → 日志静默丢失，排障时完全看不到
+    // 任何运行时信息。QStandardPaths::AppDataLocation 在各平台都指向
+    // 用户可写的应用数据目录（Linux: ~/.local/share/<org>/<app>）。
+    QString logDir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    if (logDir.isEmpty()) {
+        // 兜底：AppDataLocation 不可用时退回用户主目录，仍好过写安装目录
+        logDir = QDir::homePath() + "/.BbQ";
+    }
+    QDir().mkpath(logDir);
     QString logPath = logDir + "/BbQ.log";
 
     // 超过大小限制时删除旧日志，重新创建新日志
@@ -294,7 +305,15 @@ static void initLogFile()
     }
 
     g_logFile.setFileName(logPath);
-    g_logFile.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text);
+    // 必须检查返回值：写不进去时至少 stderr 还能给出提示，否则会再次
+    // 出现"日志静默丢失、排障时两眼一黑"的情况
+    if (!g_logFile.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text)) {
+        qWarning("Failed to open log file %s: %s", qPrintable(logPath),
+                 qPrintable(g_logFile.errorString()));
+        qWarning("  日志无法写入，运行期诊断信息将只输出到 stderr");
+    } else {
+        qInfo("Log file: %s", qPrintable(logPath));
+    }
 }
 
 // 日志处理器会被任意线程并发调用（网络线程的 warning、主线程的日志等），
