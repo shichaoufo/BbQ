@@ -6,6 +6,7 @@ import QtQuick.Effects
 
 import FluentUI 1.0
 import BiliQt 1.0
+import "../components"
 
 Rectangle {
     id: root

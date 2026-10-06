@@ -535,25 +535,39 @@ jobs:
           chmod 644 "$PKGROOT/usr/share/applications/bbq.desktop"
 
           # ---- 4) 图标：res/app.ico → 256x256 png ----
-          # .ico 是容器格式，内含多尺寸图层（16/32/48/64/128/256）。
-          # ImageMagick 默认只取**第一层**，而 .ico 的第一层通常是最小的
-          # 16x16 —— 直接 `convert app.ico out.png` 会得到 16x16 的糊图，
-          # 在启动器里显示为严重模糊的图标。必须用 -define
-          # icon:auto-resize=256 让 IM 选择 256 那一层。
-          # 装 imagemagick 是为了这一步，runner 默认不带。
-          # DEBIAN_FRONTEND=noninteractive：imagemagick 在 Ubuntu 上会
-          # 询问装 IM6 还是 IM7（display-manager 风格的选择框）。runner 无
-          # TTY，这个提问会直接把 step 卡死直到 job 超时。必须显式关掉。
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends imagemagick
+          # 【为什么不用 ImageMagick —— 踩过的坑，勿改回】
+          # .ico 是多图层容器（16/32/48/64/128/256），要拿到 256 那层。
+          # 曾用 `convert -define icon:auto-resize=256 ...`，这是
+          # **ImageMagick 7 专有语法**；而 Ubuntu 22.04 的 `imagemagick`
+          # 元包提供的是 **IM6**（6.9.x，命令落在 convert-im6.q16 /
+          # identify-im6.q16，经 alternatives 指向 convert/identify）。
+          # IM6 遇到不认识的 `-define` **不报错、直接静默忽略** → 产物根本没
+          # 生成，CI 要等到后面的尺寸断言才炸，且错误信息指向"多图层提取
+          # 失败"这种误导性原因。（索引语法 `app.ico[5]` 在 IM6/IM7 之间
+          # 行为同样不一致，也不能依赖。）
+          # 已经因为"照抄文档 / 换版本就失效"踩坑两次（aqt 的 `gcc_64`
+          # vs `linux_gcc_64`、这次的 `icon:auto-resize`），故彻底移出
+          # 对 ImageMagick 的依赖。
+          #
+          # 改为零依赖的 Python 直接解析 ICO 容器：
+          # .ico 的 256 那层本身就是**内嵌的完整 PNG**（本仓库 res/app.ico
+          # 实测layer5 魔数为 89 50 4E 47），按 dwBytesInRes/dwImageOffset
+          # 取出字节流即为合法 PNG；万一某次重新导出 .ico 导致 256 层变成
+          # BMP/DIB，脚本内置 DIB→PNG 转换兜底。两条分支都有单测覆盖
+          # （scripts/make-test-ico.py 造样本，scripts/verify-png.py 校验）。
+          command -v python3 >/dev/null 2>&1 || {
+            echo "ERROR: python3 not found (required for ICO extraction)"; exit 1; }
+
           mkdir -p "$PKGROOT/usr/share/icons/hicolor/256x256/apps"
-          convert -background none -define icon:auto-resize=256 \
-            res/app.ico -resize 256x256 -strip \
-            "$PKGROOT/usr/share/icons/hicolor/256x256/apps/bbq.png"
-          # 断言真的产出了 256x256，避免 -define 在某个 IM 版本上
-          # 行为不同而静默退化成 16x16（那是最容易漏到用户眼里的坑）
-          identify -format '%wx%h\n' "$PKGROOT/usr/share/icons/hicolor/256x256/apps/bbq.png" \
-            | grep -qx '256x256' || {
-              echo "ERROR: icon is not 256x256 (.ico multi-layer extraction failed)"; exit 1; }
+          ICON_PNG="$PKGROOT/usr/share/icons/hicolor/256x256/apps/bbq.png"
+          python3 scripts/extract-ico-png.py res/app.ico "$ICON_PNG"
+
+          # 断言产出真的是 256x256 的合法 PNG。用 Python 读 IHDR 而**不用**
+          # `identify`：identify 是 IM6/IM7 双版本命令，输出格式与可用性
+          # 都随版本变化，重新引入对 IM 的依赖就等于回到上面的坑。
+          # verify-png.py 会逐 chunk 校验 CRC、按 PNG 规范逐行解码扫描线
+          # （能抓住"结构合法但内容错位"的静默失败），并检查非全透明。
+          python3 scripts/verify-png.py "$ICON_PNG" 256 256
 
           # ---- 5) DEBIAN/control ----
           # libc6 下限必须与 runner 的 glibc 严格对齐：CI 在 22.04（2.35）上编，

@@ -5,6 +5,7 @@ import QtQuick.Layouts 1.15
 import FluentUI 1.0
 import BiliQt 1.0
 import "./"
+import "../components"
 
 FluPage {
     id: home_page
