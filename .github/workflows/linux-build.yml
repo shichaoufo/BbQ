@@ -296,6 +296,42 @@ jobs:
           cp -a "$QT_PREFIX/plugins" "$STAGE/plugins"
           cp -a "$QT_PREFIX/qml" "$STAGE/qml"
 
+          # ---- BbQ 自己的 QML 模块也必须以**文件形式**落到 qml 树里 ----
+          # QML_IMPORT_TRACE 实测（银河麒麟）：
+          #   locateLocalQmldir: FluentUI module's qmldir found at ".../qml/FluentUI/qmldir"
+          #   locateLocalQmldir: BiliQt module's qmldir file not found
+          # 即引擎对 import BiliQt 1.0 走的是**文件系统查找**（locateLocalQmldir），
+          # 而非 qrc 内嵌资源。qrc:/BiliQt/qmldir 确实存在于二进制中（Windows
+          # 构建可验证），但那条路径依赖 qmltyperegistrar 的静态注册生效；
+          # Linux 上该注册未起作用，引擎退化到文件系统查找并失败。
+          # 后果：qmldir 里的两条 singleton 声明（GlobalState / Theme）读不到，
+          # 全部 QML 报 "ReferenceError: GlobalState is not defined"，界面无数据。
+          #
+          # 修法：把构建树里 qt_add_qml_module 生成的完整模块目录原样拷进
+          # qml 树。这与 FluentUI 的部署方式完全一致（已被同一次运行证明有效）。
+          # 必须整个 BiliQt/ 目录一起拷——qmldir 里的 type 路径是
+          # `qml/GlobalState.qml`（相对模块根），只拷 qmldir 会找不到 QML 本体。
+          echo "--- copying BbQ's own QML module (qmldir + qml tree)"
+          BILIQT_MODULE_DIR="$(dirname "$(find build -name qmldir -path '*BiliQt/qmldir' | head -1)")"
+          if [ -z "$BILIQT_MODULE_DIR" ] || [ ! -d "$BILIQT_MODULE_DIR" ]; then
+            echo "ERROR: BiliQt module dir (containing qmldir) not found under build/"; exit 1
+          fi
+          echo "    module dir: $BILIQT_MODULE_DIR"
+          cp -a "$BILIQT_MODULE_DIR" "$STAGE/qml/BiliQt"
+
+          # 部署后自检：qmldir 与 singleton 声明必须在位，否则又是
+          # "ReferenceError: GlobalState is not defined"。用 grep 而非 identify
+          # 之类外部工具，保持零依赖。
+          test -f "$STAGE/qml/BiliQt/qmldir" || {
+            echo "ERROR: BiliQt qmldir missing in staged qml tree"; exit 1; }
+          grep -q "^singleton GlobalState" "$STAGE/qml/BiliQt/qmldir" || {
+            echo "ERROR: qmldir lacks 'singleton GlobalState' declaration"; exit 1; }
+          grep -q "^singleton Theme" "$STAGE/qml/BiliQt/qmldir" || {
+            echo "ERROR: qmldir lacks 'singleton Theme' declaration"; exit 1; }
+          test -f "$STAGE/qml/BiliQt/qml/GlobalState.qml" || {
+            echo "ERROR: GlobalState.qml missing beside qmldir"; exit 1; }
+          echo "--- staged BiliQt module OK"
+
           # FluentUI 必须在打包后的 qml 树里，否则启动即找不到 FluWindow
           test -f "$STAGE/qml/FluentUI/qmldir" || {
             echo "ERROR: FluentUI qmldir missing in staged qml tree"; exit 1; }
@@ -343,6 +379,12 @@ jobs:
           export LD_LIBRARY_PATH="$HERE/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
           export QT_PLUGIN_PATH="$HERE/plugins"
           export QML2_IMPORT_PATH="$HERE/qml"
+          export QML_IMPORT_PATH="$HERE/qml"
+          # stderr 落地：控制台启动会同时打到终端与日志文件
+          LOG_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/BbQ"
+          if mkdir -p "$LOG_DIR" 2>/dev/null; then
+            exec "$HERE/bin/BbQ" "$@" 2>>"$LOG_DIR/bbq-error.log"
+          fi
           exec "$HERE/bin/BbQ" "$@"
           EOF
           chmod 755 "$STAGE/run-bbq.sh"
@@ -508,6 +550,16 @@ jobs:
           # "/mpv-config"，这里指到可写目录；不可写时 mpv 会自己降级，
           # 不会导致启动失败）
           export HOME="${HOME:-$PREFIX}"
+
+          # 从桌面图标启动时 stderr 会被丢弃（.desktop 的 Terminal=false），
+          # QML 加载失败这类问题会表现为"界面空白且毫无提示"，极难排查
+          # （本次银河麒麟的 GlobalState 报错就是这样查了两轮）。
+          # 这里把 stderr 落到用户可写目录，控制台启动时也一并保留。
+          LOG_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/BbQ"
+          if mkdir -p "$LOG_DIR" 2>/dev/null; then
+            exec "$PREFIX/bin/BbQ" "$@" 2>>"$LOG_DIR/bbq-error.log"
+          fi
+          # 日志目录不可建时不要因此起不来，直接裸 exec
           exec "$PREFIX/bin/BbQ" "$@"
           EOF
           chmod 755 "$PKGROOT/usr/bin/bbqq"
