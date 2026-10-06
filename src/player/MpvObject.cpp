@@ -8,6 +8,8 @@
 #include <QOpenGLFunctions>
 #include <QVariantMap>
 
+#include <clocale>
+
 extern "C" {
 #include <mpv/client.h>
 #include <mpv/render_gl.h>
@@ -236,6 +238,31 @@ MpvObject::~MpvObject()
 
 void MpvObject::initMpv()
 {
+    // libmpv 硬性要求 LC_NUMERIC 为 "C"：它内部的数值解析（含 ffmpeg 依赖的
+    // Chromium base）在非 C locale 下会直接拒绝初始化，mpv_create() 返回
+    // nullptr。症状是日志里先出现
+    //   Non-C locale detected. This is not supported.
+    // 再出现 [MpvObject] failed to create mpv context，随后播放页空白并闪退。
+    //
+    // 为什么 Windows 上没事：MSVC 运行时默认就是 C locale，用户改系统语言
+    // 也不影响 LC_NUMERIC。而 Linux 桌面环境的 LANG 通常是 zh_CN.UTF-8，
+    // Qt 启动时会按用户 locale 调用 setlocale(LC_ALL, "")，把 LC_NUMERIC
+    // 一并改成中文 —— 这就是"只有 Linux 崩"的原因。
+    //
+    // 放在 initMpv() 里就地修，而不是只在启动脚本里 export LC_NUMERIC=C：
+    // 这样无论程序由 .desktop / bbqq 脚本 / tar.gz 脚本 / 直接执行哪条路径
+    // 启动都能生效，不依赖外部环境变量是否被正确传递。
+    //
+    // 注意 LC_ALL 会被 Qt 覆盖，因此这里只单独设置 LC_NUMERIC —— 这也是
+    // libmpv 官方文档明确要求的做法。
+    const char *curNumeric = std::setlocale(LC_NUMERIC, nullptr);
+    if (curNumeric && qstrcmp(curNumeric, "C") != 0
+        && qstrcmp(curNumeric, "POSIX") != 0) {
+        qWarning() << "[MpvObject] LC_NUMERIC is" << curNumeric
+                   << "- resetting to C (required by libmpv)";
+    }
+    std::setlocale(LC_NUMERIC, "C");
+
     m_mpv = mpv_create();
     if (!m_mpv) {
         qWarning() << "[MpvObject] failed to create mpv context";
