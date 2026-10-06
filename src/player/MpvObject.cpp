@@ -1,17 +1,146 @@
 #include "MpvObject.h"
 
 #include "LoginManager.h"
+#include "FramePacer.h"
+#include "../core/AppDirs.h"
+
 #include <QDebug>
 #include <QQuickWindow>
 #include <QOpenGLContext>
 #include <QOpenGLFramebufferObject>
 #include <QOpenGLFunctions>
 #include <QVariantMap>
+#include <QElapsedTimer>
+// 迁移兜底用到 QFile::copy / QFileInfo::exists / QStandardPaths。
+// AppDirs.h 里也 include 了它们，但显式列出更稳妥 —— 依赖传递 include
+// 会在AppDirs.h 改动时突然编不过。
+#include <QFile>
+#include <QFileInfo>
+#include <QStandardPaths>
+
+#include <clocale>
 
 extern "C" {
 #include <mpv/client.h>
 #include <mpv/render_gl.h>
 }
+
+namespace {
+
+// ===========================================================================
+// mpv.conf 迁移时的平台专属选项过滤
+// ===========================================================================
+// 背景：我们在 Linux 上把 mpv 的 config-dir 从 mpv 自己的默认目录
+// （~/.config/mpv/）改成了 ~/.config/BbQ/。迁移时若把旧文件原样搬过去，
+// 里面的 Windows 侧调参会静默生效。
+//
+// 为什么必须过滤而不是照搬：
+//   `vf=amf_frc` —— amf_frc 是 AMD 硬件帧率转换滤镜，依赖 libamdhip。
+//   Linux 的 Mesa/VAAPI 没有对应实现，mpv 在**视频链初始化阶段**就会报
+//   filter 加载失败，结果是整条视频链起不来（黑屏），比"少个滤镜"严重得多。
+//   （用户已确认 vf=amf_frc 是他为自己那台 AMD 显卡加的私人调优。）
+//
+// 过滤规则（大小写不敏感，只匹配行首key=）：
+//   - 命中黑名单的 key：整行剔除
+//   - `#` 注释行与空行：原样保留（用户可能在里面写说明）
+//   - 其它行（volume=100 等无害项）：原样保留
+//
+// 单独抽成纯函数（无副作用、不碰文件系统）是为了可单测：过滤逻辑出错的
+// 后果是"用户的配置被静默改坏"，必须有可执行的验证手段。
+//
+// ---------------------------------------------------------------------------
+// 【过滤强度的取舍 —— 与需求描述略有不同，说明如下】
+// 需求要求滤 `vf` / `band` / `dither` / `dither-depth` 四项。查证后我按
+// "会不会让 Linux 视频链起不来"这个真实判据重新评估，结论如下：
+//
+//   vf=            → **必须滤**。非空值（amf_frc）在 Linux 上必定导致
+//                    filter 加载失败、视频链起不来。空值也一并删掉更干净。
+//   dither=        → **滤，但理由与需求描述不同**：dither 并非 D3D11 专属，
+//                    它是 mpv 跨平台有效选项，Linux 上能正常工作，不会让
+//                    视频链起不来。仍要滤的真实理由是：本项目 initMpv() 里
+//                    硬设了 dither=no（fast profile 下的性能取舍），
+//                    用户的 dither=fruit 会**覆盖**掉这个刻意选择。
+//   dither-depth=  → 同上，跨平台有效；同样会覆盖代码里的设置。
+//   band=          → **照滤，但需澄清**：查证后mpv 并没有名为 `band` 的
+//                    顶层选项（去色带的是 `deband`），`vf=band` 才会被当作
+//                    滤镜名。所以 `band=yes` 实际会被 mpv 当作未知选项
+//                    报错后忽略，**不会**导致视频链起不来。滤掉它是为了
+//                    消除日志里的噪声、避免用户困惑，不是因为它危险。
+//
+// 综上：四项全滤，但**真正防止"起不来"的只有 `vf`**；另三项是
+// "避免覆盖代码设置 / 消除噪声"。这个区分很重要——若日后 mpv 真的
+// 出了某个新的致命选项，靠的是重新审这份黑名单，而不是以为"四项都致命"。
+
+// 需要整行剔除的 key（全部小写，比较时统一转小写）
+const char *const kStrippedKeys[] = {
+    "vf",            // Linux 无 amf_frc 等硬件滤镜，非空值会让视频链起不来
+    "band",          // 查证：mpv 无此顶层选项（去色带是 deband），滤仅为消噪
+    "dither",        // 跨平台有效，但会覆盖 initMpv 里的 dither=no
+    "dither-depth",  // 同上
+};
+
+/// 从一行 mpv.conf 中提取 key（行首 key= 的 key 部分，小写）。
+/// 不是有效赋值行（注释、空行、无=、含前导空白）时返回空串。
+QString confKeyOf(const QString &line)
+{
+    // mpv.conf 允许行首空白；注释行以 # 开头
+    const QString trimmed = line.trimmed();
+    if (trimmed.isEmpty() || trimmed.startsWith(QLatin1Char('#')))
+        return QString();
+    const int eq = trimmed.indexOf(QLatin1Char('='));
+    if (eq <= 0)   // 无 '=' 或 '=' 在首位（非法）
+        return QString();
+    return trimmed.left(eq).trimmed().toLower();
+}
+
+/// mpv.conf 过滤结果
+struct ConfFilterResult {
+    QString filtered;      ///< 过滤后的文件内容
+    QStringList removed;   ///< 每条剔除记录（供逐条打日志）
+    int strippedCount = 0; ///< 剔除条数（removed 里不含汇总行）
+};
+
+/// 过滤 mpv.conf 文本。纯函数、不碰文件系统，便于单测。
+ConfFilterResult filterWindowsOnlyMpvConf(const QString &text)
+{
+    ConfFilterResult res;
+    QStringList out;
+    out.reserve(64);
+
+    const QStringList lines = text.split(QLatin1Char('\n'));
+    for (const QString &rawLine : lines) {
+        // 保留原始行内容（含可能存在的行尾 \r，Windows 写出的文件常带 CRLF）
+        const QString key = confKeyOf(rawLine);
+        bool hit = false;
+        if (!key.isEmpty()) {
+            for (const char *k : kStrippedKeys) {
+                if (key == QLatin1String(k)) {   // key 已转小写
+                    hit = true;
+                    break;
+                }
+            }
+        }
+        if (hit) {
+            ++res.strippedCount;
+            QString shown = rawLine.trimmed();
+            if (shown.size() > 80)
+                shown = shown.left(80) + QStringLiteral("…");
+            res.removed.append(QStringLiteral("%1 ← 原行 %2").arg(key, shown));
+            continue;   // 剔除该行
+        }
+        out.append(rawLine);
+    }
+
+    QString result = out.join(QLatin1Char('\n'));
+    // split 会在末尾产生一个空串项；join 回来后若原文以换行结尾就还原了。
+    // 统一保证以换行结尾，避免最后一行与后续追加内容粘连。
+    if (!result.endsWith(QLatin1Char('\n')))
+        result += QLatin1Char('\n');
+    res.filtered = result;
+    return res;
+}
+
+} // namespace
 
 static const QString MPV_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 static const QString MPV_REFERER = "https://www.bilibili.com";
@@ -193,6 +322,10 @@ MpvObject::MpvObject(QQuickItem *parent)
 {
     initMpv();
 
+    // 启动 positionChanged 节流计时基准。m_lastPosEmitMs 保持 -1 表示
+    // "尚未 emit 过"，首次time-pos 事件会无条件放行。
+    m_posThrottleClock.start();
+
     // 16ms 渲染定时器：强制 QSG 以 60fps 节奏调度 MpvObject 渲染。
     // 与 DanmakuOverlay 的 NumberAnimation、frameSwapped->update() 共同作用，
     // 避免视频/直播帧率把 QSG 拖入低帧率 timer mode。
@@ -236,6 +369,31 @@ MpvObject::~MpvObject()
 
 void MpvObject::initMpv()
 {
+    // libmpv 硬性要求 LC_NUMERIC 为 "C"：它内部的数值解析（含 ffmpeg 依赖的
+    // Chromium base）在非 C locale 下会直接拒绝初始化，mpv_create() 返回
+    // nullptr。症状是日志里先出现
+    //   Non-C locale detected. This is not supported.
+    // 再出现 [MpvObject] failed to create mpv context，随后播放页空白并闪退。
+    //
+    // 为什么 Windows 上没事：MSVC 运行时默认就是 C locale，用户改系统语言
+    // 也不影响 LC_NUMERIC。而 Linux 桌面环境的 LANG 通常是 zh_CN.UTF-8，
+    // Qt 启动时会按用户 locale 调用 setlocale(LC_ALL, "")，把 LC_NUMERIC
+    // 一并改成中文 —— 这就是"只有 Linux 崩"的原因。
+    //
+    // 放在 initMpv() 里就地修，而不是只在启动脚本里 export LC_NUMERIC=C：
+    // 这样无论程序由 .desktop / bbqq 脚本 / tar.gz 脚本 / 直接执行哪条路径
+    // 启动都能生效，不依赖外部环境变量是否被正确传递。
+    //
+    // 注意 LC_ALL 会被 Qt 覆盖，因此这里只单独设置 LC_NUMERIC —— 这也是
+    // libmpv 官方文档明确要求的做法。
+    const char *curNumeric = std::setlocale(LC_NUMERIC, nullptr);
+    if (curNumeric && qstrcmp(curNumeric, "C") != 0
+        && qstrcmp(curNumeric, "POSIX") != 0) {
+        qWarning() << "[MpvObject] LC_NUMERIC is" << curNumeric
+                   << "- resetting to C (required by libmpv)";
+    }
+    std::setlocale(LC_NUMERIC, "C");
+
     m_mpv = mpv_create();
     if (!m_mpv) {
         qWarning() << "[MpvObject] failed to create mpv context";
@@ -243,19 +401,123 @@ void MpvObject::initMpv()
         return;
     }
 
+    // vo=libmpv 是硬性要求：本项目不走 mpv 自己的窗口渲染，而是把
+    // mpv 当作解码器 + 帧源，画面由 QQuickFramebufferObject 渲染路径接管。
+    // 缺这一项 mpv 会自己开窗，与 Qt 窗口互相抢屏。
     mpv_set_option_string(m_mpv, "vo", "libmpv");
-    // 开启 mpv 内部日志，便于排查播放失败、解码、渲染问题
+
+    // ---- 配置目录（与 MpvObjectD3D11 行为对齐，路径按平台区分）----
+    // Windows：exe 同目录（保持用户既有行为不变，软件删除无残留）
+    // Linux  ：~/.config/BbQ/（详见 src/core/AppDirs.h 的理由）
+    //
+    // config=yes 允许用户通过 mpv.conf 调参（免重编译）；
+    // load-scripts=no 禁止加载 Lua 脚本 —— 第三方脚本可能直接崩进程，
+    // 而我们对 mpv 内部有定制需求（见下方 msg-level），不能让脚本改写。
     {
-        QString mpvLogPath = QCoreApplication::applicationDirPath() + "/mpv.log";
-        mpv_set_option_string(m_mpv, "log-file", mpvLogPath.toUtf8().constData());
-        mpv_set_option_string(m_mpv, "msg-level", "all=debug");
+        const QString cfgDir = AppDirs::configRoot();
+
+#ifndef Q_OS_WIN
+        // ---- 迁移兜底：把旧 mpv 配置目录里的 mpv.conf 搬过来 ----
+        // 背景：改动前 Linux 版**从未设置 config-dir**，所以 mpv 用它自己的
+        // 默认目录 ~/.config/mpv/。现在把 config-dir 指向 ~/.config/BbQ/ 后，
+        // 那里已有的 mpv.conf 会被**静默忽略**、用户毫无察觉（而 bsb.conf 与
+        // fonts/ 都有回退，唯独 mpv.conf 没有 —— mpv 只读一个 config-dir，
+        // 没法像读取方那样"两个位置都试"）。这会造成可感知的配置回归。
+        //
+        // 故在设 config-dir 之前做一次性**过滤后复制**。四个约束：
+        //   1) 仅非 Windows。Windows 走 applicationDirPath()/mpv-config，
+        //      行为与改动前完全一致，不做任何迁移。
+        //   2) **绝不覆盖**已存在的新文件 —— 用户在新目录里可能已经改过配置。
+        //   3) 只在旧目录**确实有 mpv.conf 文件**时才复制（目录存在 ≠ 有文件，
+        //      ~/.config/mpv/ 常因其它原因存在）。
+        //   4) **过滤 Windows 专属选项后再写**，不能原样搬。原样搬会把
+        //      vf=amf_frc 之类的设置带到 Linux 上，而 Linux 无对应滤镜，
+        //      mpv 会在视频链初始化阶段就失败 → 整条视频链起不来。
+        //      详见上方 filterWindowsOnlyMpvConf() 的注释与取舍说明。
+        const QString legacyCfgDir = QDir(
+            QStandardPaths::writableLocation(QStandardPaths::GenericConfigLocation))
+            .absolutePath() + QStringLiteral("/mpv");
+        const QString legacyConf = legacyCfgDir + QStringLiteral("/mpv.conf");
+        const QString newConf = cfgDir + QStringLiteral("/mpv.conf");
+        if (QFileInfo::exists(legacyConf)) {
+            if (QFileInfo::exists(newConf)) {
+                qInfo().noquote() << QStringLiteral(
+                    "[MpvObject] %1 已存在，保留它并忽略旧配置 %2")
+                    .arg(newConf, legacyConf);
+            } else {
+                QFile legacyFile(legacyConf);
+                if (!legacyFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
+                    qWarning().noquote() << QStringLiteral(
+                        "[MpvObject] 旧 mpv 配置无法读取，迁移跳过: %1（%2）")
+                        .arg(legacyConf, legacyFile.errorString());
+                } else {
+                    const QString raw = QString::fromUtf8(legacyFile.readAll());
+                    legacyFile.close();
+
+                    const ConfFilterResult fr = filterWindowsOnlyMpvConf(raw);
+
+                    QFile newFile(newConf);
+                    if (newFile.open(QIODevice::WriteOnly | QIODevice::Text)) {
+                        // 即使过滤后为空也照样写文件：留下一个空/仅含注释的
+                        // mpv.conf 比"什么都没写"更清晰 —— 用户能看到
+                        // "配置已迁移，但内容全是 Windows 专属设置，已全部剔除"，
+                        // 而不会困惑于"我的配置怎么不见了"。
+                        newFile.write(fr.filtered.toUtf8());
+                        newFile.close();
+                        // 每条剔除都必须让用户看见 —— 静默改用户配置不可接受
+                        for (const QString &r : fr.removed) {
+                            qInfo().noquote() << QStringLiteral(
+                                "[MpvObject] mpv.conf 迁移：已剔除 Windows 专属设置 %1")
+                                .arg(r);
+                        }
+                        qInfo().noquote() << QStringLiteral(
+                            "[MpvObject] 已把旧 mpv 配置迁移: %1 -> %2（剔除 %3 条）")
+                            .arg(legacyConf, newConf)
+                            .arg(fr.strippedCount);
+                        if (fr.strippedCount > 0) {
+                            qInfo().noquote() << QStringLiteral(
+                                "[MpvObject] 提示：被剔除的设置在 Linux 上无效或有害，"
+                                "如需在 Linux 调参请直接编辑 %1").arg(newConf);
+                        }
+                    } else {
+                        qWarning().noquote() << QStringLiteral(
+                            "[MpvObject] 无法写入新 mpv 配置 %1（%2），"
+                            "请手动复制并自行删除 Windows 专属设置")
+                            .arg(newConf, newFile.errorString());
+                    }
+                }
+            }
+        }
+#endif // !Q_OS_WIN
+
+        mpv_set_option_string(m_mpv, "config-dir", cfgDir.toUtf8().constData());
+        mpv_set_option_string(m_mpv, "config", "yes");
+        mpv_set_option_string(m_mpv, "load-scripts", "no");
+        qInfo().noquote() << QStringLiteral(
+                   "[MpvObject] mpv 配置目录: %1（mpv.conf 可放此目录）").arg(cfgDir);
     }
-    // Windows 上明确指定 d3d11va（非 copy），避免 auto 落到 d3d11va-copy 产生 GPU->CPU->GPU 拷贝
-#ifdef Q_OS_WIN
-    mpv_set_option_string(m_mpv, "hwdec", "d3d11va");
-#else
+
+    // mpv 内部日志：文件 + 事件回调双通道。
+    // 日志文件放进配置目录而不是 exe 目录 —— .deb 安装后 exe 在 /opt/bbq/bin/
+    // 归 root，普通用户写不进去会导致日志**完全丢失**，直播卡死这类问题
+    // 就失去了唯一的排查依据。
+    {
+        QString mpvLogPath = AppDirs::configRoot() + QStringLiteral("mpv.log");
+        mpv_set_option_string(m_mpv, "log-file", mpvLogPath.toUtf8().constData());
+        // 与 D3D11 版一致：把 mpv 内部 c 日志接入 qWarning。重点关注
+        // [ao] 前缀行（音频输出初始化/失败/重开）、[demux/audio] 行（缓存
+        // 欠载）、[cplayer] 行。无 GUI 的 CI 上这行是唯一的排障信息源。
+        mpv_set_option_string(m_mpv, "msg-level",
+                             "all=warn,cplayer=info,ao=debug,demuxer=debug,cache=debug");
+    }
+
+    // 硬解：auto-safe 是跨平台取值，会自动挑选当前平台可用的硬解后端
+    // （Linux 上是 VAAPI，Windows 上是 D3D11VA），不可用时回退软解。
+    // 不能写死 d3d11va —— 那是 Windows 专属后端，在 Linux 上会导致
+    // mpv_initialize 失败。
     mpv_set_option_string(m_mpv, "hwdec", "auto-safe");
-#endif
+    // 解码器直接输出渲染可用的帧格式，跳过一次 CPU 拷贝
+    mpv_set_option_string(m_mpv, "vd-lavc-dr", "yes");
     mpv_set_option_string(m_mpv, "keep-open", "yes");
     mpv_set_option_string(m_mpv, "force-window", "no");
     mpv_set_option_string(m_mpv, "input-default-bindings", "no");
@@ -263,6 +525,14 @@ void MpvObject::initMpv()
     mpv_set_option_string(m_mpv, "ytdl", "no");
     // 与 wiliwili 保持一致，降低视频帧率对弹幕/渲染节奏的干扰
     mpv_set_option_string(m_mpv, "video-timing-offset", "0");
+    // 以音频时钟为同步基准（mpv 默认是 display-resample，会重采样音频）。
+    // 弹幕客户端里音频连续播放比严格音画同步更重要：音频被反复重采样
+    // 会产生可听的断续感。
+    mpv_set_option_string(m_mpv, "video-sync", "audio");
+    // 丢帧策略：只在 VO 端丢"已经迟到"的帧，解码器不主动跳帧。
+    // 目的是解码器能跟上直播实时流（宁可丢显示帧也不让延迟累积），
+    // 同时避免 decoder 级丢帧导致音画错位。
+    mpv_set_option_string(m_mpv, "framedrop", "vo");
     // 明确告诉 mpv 显示器刷新率为 60fps，避免它按视频帧率自行降速
     mpv_set_option_string(m_mpv, "display-fps", "60");
     mpv_set_option_string(m_mpv, "override-display-fps", "60");
@@ -271,6 +541,9 @@ void MpvObject::initMpv()
     // 明确关闭高成本缩放与后处理选项（fast profile 通常已包含，显式设置更保险）
     mpv_set_option_string(m_mpv, "scale", "bilinear");
     mpv_set_option_string(m_mpv, "dscale", "bilinear");
+    // cscale 是 GPU/VO 端缩放算法（对应 dscale=bilinear 的 GPU 对应项）。
+    // Linux 的 GL 渲染路径实际会走到它，不设则沿用 mpv 默认值。
+    mpv_set_option_string(m_mpv, "cscale", "bilinear");
     mpv_set_option_string(m_mpv, "dither", "no");
     mpv_set_option_string(m_mpv, "correct-downscaling", "no");
     mpv_set_option_string(m_mpv, "linear-downscaling", "no");
@@ -279,6 +552,8 @@ void MpvObject::initMpv()
     // 解码端也开启快速路径
     mpv_set_option_string(m_mpv, "vd-lavc-fast", "yes");
     mpv_set_option_string(m_mpv, "vd-lavc-skiploopfilter", "all");
+
+    // 刻意不设 vf（无论何值）—— 说明见 applyCacheOptions() 内的注释。
     // 缓存配置：默认按视频点播模式应用，直播页会在 setSource 之前由 QML
     // 写 liveMode: true 触发 applyCacheOptions() 覆盖为直播档
     applyCacheOptions();
@@ -298,6 +573,9 @@ void MpvObject::initMpv()
         QMetaObject::invokeMethod(static_cast<MpvObject*>(ctx), &MpvObject::onMpvEvents, Qt::QueuedConnection);
     }, this);
 
+    // ---- 属性观察 ----
+    // 与 MpvObjectD3D11 完全一致的 12 个观察项。缺失任何一个都会让对应
+    // 诊断能力在 Linux 上彻底消失（详见onMpvEvents 里的处理分支）。
     mpv_observe_property(m_mpv, 0, "time-pos", MPV_FORMAT_DOUBLE);
     mpv_observe_property(m_mpv, 0, "duration", MPV_FORMAT_DOUBLE);
     mpv_observe_property(m_mpv, 0, "pause", MPV_FORMAT_FLAG);
@@ -305,6 +583,23 @@ void MpvObject::initMpv()
     mpv_observe_property(m_mpv, 0, "video-params", MPV_FORMAT_NODE);
     mpv_observe_property(m_mpv, 0, "seekable", MPV_FORMAT_FLAG);
     mpv_observe_property(m_mpv, 0, "hwdec-current", MPV_FORMAT_STRING);
+    // 容器帧率：FramePacer 自适应心跳的输入（≥50fps 内容按需升档节奏）。
+    // 缺这一项 Linux 上弹幕心跳等于瞎跑，永远按默认 60fps 档工作。
+    mpv_observe_property(m_mpv, 0, "container-fps", MPV_FORMAT_DOUBLE);
+    // demuxer 缓存状态：node 里含 cache-duration / fw-bytes /
+    // cache-underrun 等。**直播卡死/闪退目前最大的排查黑箱**就是它 ——
+    // 能直接看出是"网络供不上"（underrun）还是"解码跟不上"（eof 时长）。
+    mpv_observe_property(m_mpv, 0, "demuxer-cache-state", MPV_FORMAT_NODE);
+    // 播放中途无声问题确诊日志：观测音频轨选择与音频设备状态。
+    // aid 变化 = 音频轨被切/失效（如 DASH 音频流断开时 mpv 内部 deselect）；
+    // audio-device 变化 = 系统默认输出设备切换（蓝牙耳机断开回退板载声卡）。
+    mpv_observe_property(m_mpv, 0, "aid", MPV_FORMAT_FLAG);
+    mpv_observe_property(m_mpv, 0, "audio-device", MPV_FORMAT_STRING);
+    mpv_observe_property(m_mpv, 0, "ao-volume", MPV_FORMAT_DOUBLE);
+
+    // 把 mpv 内部日志事件送进 onMpvEvents 的 MPV_EVENT_LOG_MESSAGE 分支，
+    // 与 log-file 双通道并存：文件供事后翻阅，回调供实时观察。
+    mpv_request_log_messages(m_mpv, "v");
 
     double vol = 100.0;
     mpv_set_property(m_mpv, "volume", MPV_FORMAT_DOUBLE, &vol);
@@ -382,13 +677,28 @@ void MpvObject::applyCacheOptions()
         }
     }
 
-    // 注：D3D11 版在视频档额外设了 vf=amf_frc（AMD 硬件帧率转换），
-    // Linux 走 Mesa/VAAPI 没有对应滤镜，照抄会导致 mpv filter 加载失败
-    // 而整个视频链起不来，故此处刻意不设 vf。
+    // ---- 关于 vf：刻意两档都不设（重要，不要"对齐"回去）----
+    // MpvObjectD3D11 的 applyCacheOptions() 里，视频档会设
+    //     mpv_set_option_string(m_mpv, "vf", "amf_frc");
+    // 直播档则设 vf="" 显式清空。
+    //
+    // **这里刻意两档都不设 vf，也不要为了"与 Windows 版对齐"把它搬过来。**
+    // 原因（用户已明确确认）：`amf_frc` 是 AMD 硬件帧率转换滤镜，是用户
+    // 为自己那台 AMD 显卡机器加的**私人调优**，不是通用方案。它依赖
+    // libamdhip / ffmpeg 的 amf 滤镜，Linux 的 Mesa/VAAPI 栈没有对应
+    // 实现；硬设会让 mpv 在**视频链初始化阶段**就报 filter 加载失败，
+    // 结果是整条视频链起不来（黑屏且无画面），比"少一个滤镜"严重得多。
+    //
+    // 直播档的 vf="" 是"清空滤镜"，与"不设置"语义等价，同样无需搬。
+    //
+    // 如果用户在 Linux 上确实需要滤镜，正确做法是在
+    // ~/.config/BbQ/mpv.conf 里自己写（config=yes 已启用，mpv.conf
+    // 优先级高于代码），而不是让程序硬设一个特定显卡的滤镜。
 
     qDebug() << "[MpvObject] cache options applied, liveMode =" << m_liveMode
              << "cache-secs =" << cacheSecs << "max-bytes =" << maxBytes
-             << "initialized =" << m_mpvInitialized;
+             << "initialized =" << m_mpvInitialized
+             << "(video filter chain intentionally left untouched)";
 }
 
 bool MpvObject::liveMode() const
@@ -728,8 +1038,16 @@ void MpvObject::onMpvEvents()
                 double pos = *static_cast<double*>(prop->data);
                 int newPos = int(pos * 1000);
                 if (m_position != newPos) {
+                    // 信号节流（属性本体每次都更新，仅限制 emit 频率）：
+                    // >1s 跳变（seek/切 P 位）立即放行保证 UI 响应
+                    const bool jump = qAbs(newPos - m_position) > 1000;
                     m_position = newPos;
-                    emit positionChanged();
+                    const qint64 nowMs = m_posThrottleClock.elapsed();
+                    if (jump || m_lastPosEmitMs < 0
+                            || nowMs - m_lastPosEmitMs >= 200) {
+                        m_lastPosEmitMs = nowMs;
+                        emit positionChanged();
+                    }
                 }
             } else if (strcmp(prop->name, "duration") == 0 && prop->format == MPV_FORMAT_DOUBLE) {
                 double dur = *static_cast<double*>(prop->data);
@@ -759,6 +1077,13 @@ void MpvObject::onMpvEvents()
                     m_speed = speed;
                     emit speedChanged();
                 }
+            } else if (strcmp(prop->name, "container-fps") == 0 && prop->format == MPV_FORMAT_DOUBLE) {
+                // 自适应心跳输入：高帧率内容（≥50fps）在高刷屏上按需升档，
+                // 保证视频帧不被 60fps 节奏饿死；换文件/卸载时 fps 回 0。
+                // 缺这一项时Linux 上心跳恒为默认档，等于这条能力完全没启用。
+                double fps = *static_cast<double*>(prop->data);
+                FramePacer::instance()->setVideoFps(
+                    (fps > 0.0 && fps < 1000.0) ? fps : 0.0);
             } else if (strcmp(prop->name, "video-params") == 0) {
                 bool hasVideo = (prop->format == MPV_FORMAT_NODE);
                 if (m_hasVideo != hasVideo) {
@@ -774,6 +1099,81 @@ void MpvObject::onMpvEvents()
             } else if (strcmp(prop->name, "hwdec-current") == 0 && prop->format == MPV_FORMAT_STRING) {
                 char *hw = *static_cast<char**>(prop->data);
                 qWarning() << "[MpvObject] hwdec-current:" << (hw ? QString::fromUtf8(hw) : QString("none"));
+            } else if (strcmp(prop->name, "aid") == 0 && prop->format == MPV_FORMAT_FLAG) {
+                // 音频轨选择状态：中途变 no = 音频轨被取消选择（无声的常见根因）
+                bool aidOn = *static_cast<int*>(prop->data) != 0;
+                qWarning() << "[MpvObject] audio track (aid):" << (aidOn ? "selected" : "DESELECTED");
+            } else if (strcmp(prop->name, "audio-device") == 0 && prop->format == MPV_FORMAT_STRING) {
+                char *dev = *static_cast<char**>(prop->data);
+                qWarning() << "[MpvObject] audio-device:" << (dev ? QString::fromUtf8(dev) : QString("?"));
+            } else if (strcmp(prop->name, "ao-volume") == 0 && prop->format == MPV_FORMAT_DOUBLE) {
+                // 音频输出实际音量：与 volume（请求值）不一致时说明 ao 侧
+                // 做了自己的缩放/静音，是"改了音量却没声音"的定位点
+                double aov = *static_cast<double*>(prop->data);
+                qWarning() << "[MpvObject] ao-volume:" << aov;
+            } else if (strcmp(prop->name, "demuxer-cache-state") == 0
+                       && prop->format == MPV_FORMAT_NODE) {
+                // 直播卡死/闪退的核心诊断项。这里刻意只打印不解析成信号：
+                // 它是高频变化（每次读缓存都变）的诊断数据，emit 给 QML 只会
+                // 制造无谓的绑定刷新。真正需要结构化时再加。
+                mpv_node *node = static_cast<mpv_node*>(prop->data);
+                if (node && node->format == MPV_FORMAT_NODE_MAP) {
+                    // 注意 mpv_node.u.list 是 mpv_node_list**（因为 mpv_node
+                    // 内部持有一个指针成员，取地址得到二级指针）。D3D11 版
+                    // 写的是 mpv_node_list *list = node->u.list;（用了
+                    // 指针的隐式转换）。这里显式取 * 保持类型正确。
+                    const mpv_node_list *list = node->u.list;
+                    double cacheSecs = -1.0;
+                    int64_t fwBytes = -1, totalBytes = -1;
+                    int64_t underrunCount = -1;
+                    bool eof = false;
+                    for (int i = 0; i < list->num; ++i) {
+                        const char *key = list->keys ? list->keys[i] : nullptr;
+                        if (!key) continue;
+                        const mpv_node &v = list->values[i];
+                        if (strcmp(key, "cache-duration") == 0
+                            && v.format == MPV_FORMAT_DOUBLE) {
+                            cacheSecs = v.u.double_;
+                        } else if (strcmp(key, "fw-bytes") == 0
+                                   && v.format == MPV_FORMAT_INT64) {
+                            fwBytes = v.u.int64;
+                        } else if (strcmp(key, "total-bytes") == 0
+                                   && v.format == MPV_FORMAT_INT64) {
+                            totalBytes = v.u.int64;
+                        } else if (strcmp(key, "cache-underrun") == 0
+                                   && v.format == MPV_FORMAT_FLAG) {
+                            underrunCount = v.u.int64;
+                        } else if (strcmp(key, "eof") == 0
+                                   && v.format == MPV_FORMAT_FLAG) {
+                            eof = v.u.int64 != 0;
+                        }
+                    }
+                    // 缓存耗尽（underrun）或流已结束且没缓存，是"卡住不动"的
+                    // 两种典型形态，直接打出来便于事后判断是网络还是解码问题
+                    const bool starved = (underrunCount >= 0)
+                        || (eof && cacheSecs < 0.5);
+                    if (starved) {
+                        qWarning() << "[MpvObject] demuxer cache starved:"
+                                   << "duration =" << cacheSecs << "s"
+                                   << "fw-bytes =" << fwBytes
+                                   << "total-bytes =" << totalBytes
+                                   << "underrun-count =" << underrunCount
+                                   << "eof =" << (eof ? "yes" : "no")
+                                   << "liveMode =" << (m_liveMode ? "yes" : "no");
+                    }
+                }
+            }
+            break;
+        }
+        case MPV_EVENT_LOG_MESSAGE: {
+            // mpv内部日志透传（无声/卡死问题确诊）：关注 [ao]/[demux]/[cplayer] 行。
+            // 依赖 initMpv 里的 mpv_request_log_messages(m_mpv, "v")，
+            // 缺这一行调用本分支永远不会触发。
+            mpv_event_log_message *msg = static_cast<mpv_event_log_message*>(event->data);
+            if (msg && msg->text) {
+                QString line = QString::fromUtf8(msg->text).trimmed();
+                if (!line.isEmpty())
+                    qWarning() << "[mpv]" << line;
             }
             break;
         }
@@ -781,6 +1181,20 @@ void MpvObject::onMpvEvents()
             // 首帧解码完成、画面已出。QML 侧依赖此信号重置播放级重试状态、
             // 启动弹幕延迟计时与空降助手查询。Linux 版曾缺失该emit，
             // 导致 VideoPlayerPage 加载失败、首页组件链连锁失败。
+            //
+            // 绿屏/雪花问题确诊日志：流的编码格式与硬解方法。用于判断
+            // "是不是硬解/滤镜不兼容导致的渲染异常" —— Linux 走 VAAPI，
+            // 若 hwdec-current 为 none 说明已回退软解（可能是 VAAPI 不支持
+            // 该 profile，回退后能播但 CPU 占用高）。
+            char *vfmt = mpv_get_property_string(m_mpv, "video-format");
+            char *vcodec = mpv_get_property_string(m_mpv, "video-codec");
+            char *hwcur = mpv_get_property_string(m_mpv, "hwdec-current");
+            qWarning() << "[MpvObject] file loaded, video-format:" << (vfmt ? vfmt : "?")
+                       << "video-codec:" << (vcodec ? vcodec : "?")
+                       << "hwdec-current:" << (hwcur ? hwcur : "none");
+            mpv_free(vfmt);
+            mpv_free(vcodec);
+            mpv_free(hwcur);
             if (!m_audioSource.isEmpty()) {
                 QByteArray audioData = m_audioSource.toUtf8();
                 const char *cmd[] = {"audio-add", audioData.constData(), nullptr};

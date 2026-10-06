@@ -1,6 +1,7 @@
 #include "SponsorBlockManager.h"
 
 #include "AppSettings.h"
+#include "../core/AppDirs.h"
 
 #include <QCoreApplication>
 #include <QFile>
@@ -30,12 +31,42 @@ SponsorBlockManager *SponsorBlockManager::instance()
 
 void SponsorBlockManager::loadConfig()
 {
-    // bsb.conf 约定：exe 同目录、纯文本；首个非注释非空行 = 接口基地址。
+    // bsb.conf 为纯文本：首个非注释非空行 = 接口基地址。
     // 支持 "#" 行注释与行内空白；结尾多余的 "/" 去掉。任何解析失败都
-    // 静默保持 m_baseUrl 为空 → available=false，功能整体关闭
-    QFile f(QCoreApplication::applicationDirPath() + QStringLiteral("/bsb.conf"));
-    if (!f.open(QIODevice::ReadOnly | QIODevice::Text))
+    // 静默保持 m_baseUrl 为空 → available=false，功能整体关闭。
+    //
+    // 路径：Linux 在 ~/.config/BbQ/bsb.conf，Windows 仍在 exe 同目录
+    // （行为不变）。找不到时回退读旧位置，让 tar.gz 绿色版升级到 .deb 的
+    // 用户不会突然"配置全丢"。详见 src/core/AppDirs.h。
+    bool usedLegacy = false;
+    const QString confPath = AppDirs::resolveReadable(QStringLiteral("bsb.conf"),
+                                                      &usedLegacy);
+    QFile f(confPath);
+    if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        // 打不开有两种截然不同的含义，必须分开报，否则用户只能看到
+        // "空降助手不见了"却毫无线索：
+        //   1) 文件不存在 —— 正常状态（用户没配过这个功能），属预期；
+        //   2) 文件存在但读不了 —— 权限/编码等异常，需要用户处理。
+        // 用 QFile::exists 先区分。注意 usedLegacy 为 true 时文件必然存在
+        //（resolveReadable 只在旧路径命中时才返回它），所以这里**不可能**
+        // 是"回退路径存在却打不开"，只需按exists 判断即可。
+        if (QFile::exists(confPath)) {
+            qWarning().noquote() << QStringLiteral(
+                "[SponsorBlock] bsb.conf 存在但无法读取: %1（%2）")
+                .arg(confPath, f.errorString());
+        } else {
+            qInfo().noquote() << QStringLiteral(
+                "[SponsorBlock] 未配置 bsb.conf，空降助手功能未启用。"
+                "如需启用请在 %1 创建该文件（写入接口基地址）")
+                .arg(AppDirs::configRoot());
+        }
         return;
+    }
+    if (usedLegacy) {
+        qInfo().noquote() << QStringLiteral(
+            "[SponsorBlock] 未在 %1 找到 bsb.conf，回退使用旧位置: %2")
+            .arg(AppDirs::configRoot(), confPath);
+    }
 
     while (!f.atEnd()) {
         const QString line = QString::fromUtf8(f.readLine()).trimmed();

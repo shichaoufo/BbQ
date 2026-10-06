@@ -380,6 +380,9 @@ jobs:
           export QT_PLUGIN_PATH="$HERE/plugins"
           export QML2_IMPORT_PATH="$HERE/qml"
           export QML_IMPORT_PATH="$HERE/qml"
+          # libmpv 只要求 LC_NUMERIC=C（详见 deb 版启动脚本注释）。
+          # 不设 LC_ALL/LANG，避免界面 locale 被改成 C 而退回英文。
+          export LC_NUMERIC=C
           # stderr 落地：控制台启动会同时打到终端与日志文件
           LOG_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/BbQ"
           if mkdir -p "$LOG_DIR" 2>/dev/null; then
@@ -546,6 +549,13 @@ jobs:
           # 两个都设以免踩不同 Qt 6.x 小版本只认其中一个的坑
           export QML2_IMPORT_PATH="$PREFIX/qml"
           export QML_IMPORT_PATH="$PREFIX/qml"
+          # libmpv 硬性要求 LC_NUMERIC=C，否则 mpv_create() 直接返回 nullptr
+          # （症状：Non-C locale detected → failed to create mpv context →
+          #  播放页空白闪退）。程序内已在 initMpv() 里 setlocale 兜底，这里
+          # 再设一道环境变量，使 mpv 依赖的 ffmpeg/Chromium base 同样受益。
+          # 只设 LC_NUMERIC，**不要**设 LC_ALL/LANG：那会把界面 locale 一并
+          # 改成 C，Qt 界面会退回英文。libmpv 只要求 LC_NUMERIC 为 C。
+          export LC_NUMERIC=C
           # mpv 写日志/配置的位置（initMpv 里用 applicationDirPath() +
           # "/mpv-config"，这里指到可写目录；不可写时 mpv 会自己降级，
           # 不会导致启动失败）
