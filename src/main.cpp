@@ -4,9 +4,12 @@
 #include <QQmlEngine>
 #include <qqml.h>
 #include <QDir>
-#include <QStandardPaths>
 #include <QFile>
 #include <QFileInfo>
+// 日志目录在非 Windows 上走 AppDirs::configRoot()。显式 include 而非依赖
+// 传递 —— AppDirs.h 改动时不应让 main.cpp 突然编不过。路径相对本文件
+// 所在目录（src/），故是 core/ 而非 ../core/。
+#include "core/AppDirs.h"
 #include <QPixmapCache>
 #include <QTimer>
 #include <QDebug>
@@ -289,14 +292,28 @@ static void installCrashHandler()
 
 static void initLogFile()
 {
-    // 日志必须写到**用户可写目录**。原先写 applicationDirPath()（exe 同级），
-    // 在 deb 安装方式下不可写：/opt/bbq 由 root 拥有，普通用户启动时
-    // QFile::open 失败，而返回值被丢弃 → 日志静默丢失，排障时完全看不到
-    // 任何运行时信息。QStandardPaths::AppDataLocation 在各平台都指向
-    // 用户可写的应用数据目录（Linux: ~/.local/share/<org>/<app>）。
-    QString logDir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    // 日志路径同样按平台分开（与 AppDirs 的配置路径策略一致）：
+    //
+    // Windows：保持 exe 同目录（applicationDirPath）。用户明确要求 Windows
+    //   版行为不变——日志随目录走，删软件连日志一起删、不留残留。这条路径
+    //   本来就一直是 Windows 的既有行为（改动前 main.cpp 就是这么写的），
+    //   沿用它等于对 Windows 零改动。
+    //
+    // 非 Windows：必须改到用户可写目录。原先同样写 applicationDirPath()，
+    //   但 .deb 装到 /opt/bbq 后该目录归 root，普通用户启动时
+    //   QFile::open 失败，而原代码丢弃了返回值 → 日志静默丢失，排障时
+    //   什么都看不到。复用 AppDirs::configRoot()（Linux 上即
+    //   ~/.config/BbQ/），与 mpv.conf/bsb.conf/fonts 同目录，便于用户
+    //   一处找全所有配置与日志。
+    QString logDir;
+#ifdef Q_OS_WIN
+    logDir = QCoreApplication::applicationDirPath();
+#else
+    logDir = AppDirs::configRoot();
+#endif
+
     if (logDir.isEmpty()) {
-        // 兜底：AppDataLocation 不可用时退回用户主目录，仍好过写安装目录
+        // 兜底：路径算不出来时退回用户主目录，仍好过写安装目录
         logDir = QDir::homePath() + "/.BbQ";
     }
     QDir().mkpath(logDir);
