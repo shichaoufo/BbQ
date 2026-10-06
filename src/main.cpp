@@ -808,7 +808,7 @@ int main(int argc, char *argv[])
     {
         const QString glRenderer = QString::fromLatin1(reinterpret_cast<const char *>(glGetString(GL_RENDERER)));
         const QString glVendor = QString::fromLatin1(reinterpret_cast<const char *>(glGetString(GL_VENDOR)));
-        const QString glVersion = QString::fromLatin1(reinterpret_cast<const char *>(glGetString(GL_VERSION))));
+        const QString glVersion = QString::fromLatin1(reinterpret_cast<const char *>(glGetString(GL_VERSION)));
         QByteArray rh;
         const char *rhi = qgetenv("QSG_RHI_BACKEND");
         rh = rhi ? QByteArray(rhi) : QByteArray("<default>");
