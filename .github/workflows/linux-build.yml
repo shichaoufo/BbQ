@@ -1,9 +1,14 @@
 # Linux (x64) 手动触发编译 BbQ（OpenGL RHI + libmpv render_gl 路径）
 #
 # 目标：把 Linux 移植的"编译期"问题在 CI 上收敛（Windows 本地完全无法验证
-# 非 WIN 分支），并产出一个自包含的 BbQ-Linux-x64.tar.gz——Qt 运行库、
-# QML 模块（含 FluentUI）、libmpv 及其 ffmpeg 依赖全部内置，目标机只需
-# 具备图形驱动（mesa/GL）与窗口系统（X11/Wayland）即可运行。
+# 非 WIN 分支），并产出**两个**产物：
+#   1) BbQ-Linux-x64.tar.gz —— 自包含免安装绿色版。Qt 运行库、QML 模块
+#      （含 FluentUI）、libmpv 及其 ffmpeg 依赖全部内置，目标机只需具备
+#      图形驱动（mesa/GL）与窗口系统（X11/Wayland）即可运行。
+#   2) BbQ-Linux-amd64.deb —— 可安装的系统包。dpkg -i 后自带桌面图标、
+#      开始菜单项与卸载入口，满足"像正常软件一样点击图标运行"的诉求。
+#      运行时同样全部内置在 /opt/bbq，详见下方"Package .deb"步骤里的
+#      Depends 权衡说明。
 #
 # 依赖说明：
 #   - Qt 6.9.3 linux_gcc_64（aqtinstall / jurplel-install-qt-action）
@@ -35,10 +40,19 @@
 #   - runner 无 GUI 会话（且刻意不引入 xvfb，见 smoke test 注释），
 #     只能验证"编译通过 + 链接完整 + 打包完整"；OpenGL 渲染、mpv
 #     帧回调、弹幕 vsync 等运行期行为必须真机联调。
-#   - GStreamer 运行时**不内置**进 tar 包：Qt6 Multimedia 的 gstreamer
+#   - GStreamer 运行时**不内置**进tar 包：Qt6 Multimedia 的 gstreamer
 #     后端体积大且版本敏感，而本项目视频播放走 libmpv，Qt Multimedia
 #     仅被链接未实际使用（无 QMediaPlayer 调用）。目标机若无
 #     GStreamer，Qt Multimedia 相关功能不可用，不影响 BbQ 主功能。
+#   - .deb 与 tar.gz 均在 **glibc 2.35（Ubuntu 22.04）** 基线上编译。
+#     glibc 向后兼容但**新符号只在新系统上**，因此产物保证 2.35+ 可运行。
+#     ⚠️ 已知未覆盖：**银河麒麟 V10 是 glibc 2.31**（部分版本 2.28），
+#     低于本产物门槛，dpkg 会因 `libc6 (>= 2.35)` 拒绝安装。
+#     要真正覆盖麒麟 V10，需要把构建容器化到 CentOS 7 / older-2.28 基线
+#     （或自行编译 Qt），当前 workflow 做不到——请勿对外承诺支持麒麟 V10。
+#   - .deb 与 tar.gz 均**未在真实带 GUI 的 Linux 上运行验证过**，只做了
+#     静态校验（ldd 闭包、文件存在性、权限位、图标尺寸）。首次在真机上
+#     使用时请留意启动器是否弹窗。
 
 name: Linux Build
 
@@ -55,7 +69,14 @@ permissions:
 
 jobs:
   linux-x64:
-    runs-on: ubuntu-24.04
+    # glibc 2.35（jammy）。这个版本号直接决定两个产物的运行门槛：
+    # glibc 向后兼容但**新符号只在新系统上**，在 24.04（glibc 2.39）上编
+    # 出的二进制在 glibc < 2.38 的系统上会报
+    # "version `GLIBC_2.38' not found" 启动即退。
+    # 下调到 22.04 是为了覆盖更老的国产 Linux（银河麒麟 V10 是 2.31）。
+    # 注意：22.04 的 libmpv-dev 是 mpv 0.34.1（24.04 是 0.37+），
+    # 本项目只用了 client.h/render_gl.h 的稳定 API，不受影响。
+    runs-on: ubuntu-22.04
     timeout-minutes: 60
 
     steps:
@@ -79,7 +100,10 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          # DEBIAN_FRONTEND=noninteractive：防止某个包的 debconf 脚本弹
+          # 交互式问答（如地区/locale 选择）把非交互式 runner 挂住。
+          # 非必要，但加一条零成本。
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             ninja-build \
             git \
             ca-certificates \
@@ -192,8 +216,18 @@ jobs:
           echo "--- NEEDED entries:"
           readelf -d "$BIN" | grep NEEDED || true
 
-          # ldd 出现 "not found" 说明链接闭包有缺口——这是 runner 上
-          # 唯一能真实反映运行期动态链接是否完整的检查
+          # ldd 出现 "not found" 说明链接闭包有缺口。
+          # ⚠️ 但这条检查在 runner 上是**弱校验（近似假绿）**，必须如实理解：
+          # runner 预装了全套 X11/xcb 图形栈（我们上面还主动装了
+          # libgl1-mesa-dev / libxkbcommon-dev / gstreamer 等一整套开发包），
+          # 所以 ldd 在 runner 上几乎必然全绿，**无法证明目标机上不缺库**。
+          # 真正会缺库的是两类：
+          #   1) Qt xcb 平台插件在运行时 dlopen 的依赖（libxcb-cursor0 等）——
+          #      这些不在主程序的 NEEDED 里，ldd 主程序根本看不到；
+          #   2) 精简系统上未装的图形/字体栈。
+          # 这类缺失的典型症状是"dpkg 装成功、桌面图标出现、点开窗口不出现"
+          #（Qt 平台插件加载失败后静默退出）。因此它们必须写进 deb 的
+          # Depends 显式声明（见 Package .deb），而不能指望 ldd 拦下来。
           echo "--- ldd:"
           ldd "$BIN" | tee /tmp/ldd.txt
           if grep -q "not found" /tmp/ldd.txt; then
@@ -330,13 +364,26 @@ jobs:
           目标机要求（未内置）：
               - 图形驱动：mesa（libGL/libEGL），或厂商驱动
               - 窗口系统：X11 或 Wayland
+              - Qt xcb 平台插件的运行期依赖（重要）：libxcb-cursor0、
+                libxkbcommon-x11-0、libxkbcommon0、libfontconfig1。
+                这些**不在主程序的 NEEDED 里**（是插件在运行时 dlopen 的），
+                所以 CI 的 ldd 检查发现不了它们。缺 libxcb-cursor0 时
+                典型症状是"双击无反应 / 窗口一闪就没了"——Qt6 最经典的
+                启动即退原因。Debian/Ubuntu 上执行：
+                    sudo apt-get install libxcb-cursor0 libxkbcommon-x11-0
               - Qt Multimedia（可选）：GStreamer 运行时。本项目视频播放
                 走 libmpv，不依赖它。
+              - glibc >= 2.35（见下方已知限制）
 
           已知限制：
               - 本包由 CI 无 GUI 会话环境产出，仅验证了编译与链接完整性，
                 未做运行期验证。OpenGL 渲染、mpv 帧回调、弹幕渲染表现
                 请在真机上确认。
+              - glibc >= 2.35。**银河麒麟 V10 是 glibc 2.31，低于此门槛**，
+                无法运行。需容器化到 2.28/2.31 基线重新构建才能覆盖。
+              - CI 里的 ldd "not found" 检查是弱校验：runner 自带全套
+                xcb/图形开发包，该检查在 runner 上几乎必然全绿，不能证明
+                目标机不缺库。请以上面"目标机要求"清单为准。
           EOF
 
           # tar 本身保留权限位，这里再 chmod 一次是双保险
@@ -360,4 +407,214 @@ jobs:
         with:
           name: BbQ-Linux-x64
           path: BbQ-Linux-x64.tar.gz
+          retention-days: 14
+
+      # ===== .deb 打包 =====
+      # 用户诉求原文："我们不能编译成 .deb 文件吗，这样linux 装上后可以像
+      # 正常软件一样点击图标运行"。tar.gz 需要手动 chmod + 跑脚本，
+      # dpkg -i 之后才有桌面图标、开始菜单项、卸载入口。
+      #
+      # 与 tar.gz 并存而非替代：tar.gz 是免安装绿色版（另一台机器上直接
+      # 解压即用，不碰系统包数据库），两类用户诉求都真实存在。
+      #
+      # ---- 为什么用 /opt 而不是 /usr ----
+      # FHS 规定 /usr 全部归root 且必须能被包管理器安全覆盖。我们把整棵
+      # 自包含运行时（Qt + libmpv + ffmpeg 闭包，约 200-400MB）塞进去，
+      # 一旦与发行版自带 libqt6core6t64 之类文件重名，apt 的 file conflict
+      # 会让卸载/升级 Qt 时连带删掉 BbQ 的文件。/opt/bbq 是"第三方自备
+      # 完整运行时"的标准位置，不参与 dpkg 的 file 数据库冲突检测。
+      #
+      # ---- Depends 的权衡（重要，勿轻易改成"依赖系统 Qt"）----
+      # 本项目的 Qt 是**静态内置**在 /opt/bbq/lib 里的（Deploy 步骤从
+      # QT_PREFIX 整份拷贝），所以 dpkg 的 Depends 里**不应该**出现
+      # libqt6core6t64 / libqt6quick6t64 之类：
+      #   - 列了也没用：动态链接器会在 /opt/bbq/lib 里先命中内置的 Qt，
+      #     系统装没装 Qt6 完全不影响启动；
+      #   - 反而有害：那等于把"用户必须额外装一整套 Qt6"变成硬性前置，
+      #     直接违背"装上就能点图标运行"的诉求；
+      #   - 更麻烦的是 Qt6 的 t64 过渡包名（time_t 64位）在不同发行版上
+      #     命名不同（Ubuntu 24.04 是 libqt6core6t64，23.04 是
+      #     libqt6core6，Debian 12/trixie 又切回去了）。列进去会让 deb
+      #     在国产 Linux（银河麒麟部分版本基于 Debian 系但包名/版本各异）
+      #     上直接装不上，报 "depends on libqt6core6t64, but it is not
+      #     installable" —— 这是"装不上"，比"缺库崩溃"更难排查。
+      # 结论：只声明**系统必须提供的、我们无法内置也不该内置**的东西：
+      #   - libc6 / libstdc++6：GLIBC/GLIBCXX ABI，来自编译器而非 Qt。
+      #     我们能内置 libgcc_s/libstdc++，但**故意不内置**：libstdc++
+      #     与发行版 C 库耦合较深，内置一份反而在部分系统上与 openssl/
+      #     nss 等系统库产生两份符号冲突；且版本号锁定更清晰。
+      #   - 图形/窗口栈：libgl1 / libegl1 / libxkbcommon0 —— 内置这些会
+      #     和目标机的 mesa / 厂商驱动打架（DRI 驱动是内核模块+用户态
+      #     一对一的，混搭会黑屏甚至 X 崩溃），绝对不能内置。
+      #   - 字体与字体栈：Qt 的 fontconfig 依赖系统字体枚举，
+      #     没有 libfontconfig1 就一个汉字都渲染不出来。
+      #   - zlib：libmpv 的 ffmpeg 闭包可能动态需要；内置虽可行但
+      #     Depends 声明成本更低（任何桌面系统都有）。
+      #
+      # ---- 已知限制：glibc 版本（仍未覆盖银河麒麟 V10）----
+      # 本 CI 编在 ubuntu-22.04（glibc 2.35）。glibc 是**向后兼容**的：
+      # 新宿主提供的一切老系统也有，但**新符号只在新宿主上有**。所以产物
+      # 只保证 2.35+ 能跑，更老的系统会在加载时报
+      # "version `GLIBC_2.35' not found`（启动即退，控制台一行报错）。
+      # ⚠️ 银河麒麟 V10 是 glibc 2.31（部分版本 2.28），**低于本门槛**。
+      # 之前这里写的是 (>= 2.38)（编在 24.04），结果 dpkg 在麒麟上直接
+      # 拒绝安装——把"装不上"包装成"提前拦住"，比崩溃更难排查。
+      # 这不是 Qt 6.9 的限制：Qt 6.9 官方声明支持 Ubuntu 22.04 为基线
+      # （glibc 2.28+）；真正的约束是 **install-qt-action 拉取的 aqt
+      # 在线安装包构建于 Ubuntu 24.04（glibc 2.39）**，由分发渠道而非
+      # Qt 本身决定了产物门槛。要真正覆盖麒麟 V10，需把构建容器化到
+      # 2.28/2.31 基线，当前 workflow 做不到——请勿对外承诺支持麒麟 V10。
+      - name: Package .deb
+        run: |
+          set -euo pipefail
+          PKGROOT="$PWD/debpkg"
+          STAGE="$PWD/BbQ-Linux-x64"   # 上一步 tar 之前的目录，已 mv 到这里
+
+          test -x "$STAGE/bin/BbQ" || { echo "ERROR: staged binary missing"; exit 1; }
+          test -d "$STAGE/lib"       || { echo "ERROR: staged lib/ missing"; exit 1; }
+          test -d "$STAGE/plugins"   || { echo "ERROR: staged plugins/ missing"; exit 1; }
+          test -d "$STAGE/qml"       || { echo "ERROR: staged qml/ missing"; exit 1; }
+          test -f "$STAGE/qml/FluentUI/qmldir" || {
+            echo "ERROR: FluentUI qmldir missing in staged qml tree"; exit 1; }
+
+          # ---- 1) /opt/bbq：自包含运行时 ----
+          mkdir -p "$PKGROOT/opt/bbq"
+          cp -a "$STAGE/bin"    "$PKGROOT/opt/bbq/bin"
+          cp -a "$STAGE/lib"    "$PKGROOT/opt/bbq/lib"
+          cp -a "$STAGE/plugins" "$PKGROOT/opt/bbq/plugins"
+          cp -a "$STAGE/qml"    "$PKGROOT/opt/bbq/qml"
+          # tar.gz 里的 run-bbq.sh 相对路径写法对 deb 不适用（安装位置
+          # 固定在 /opt/bbq），deb 用下面的 /usr/bin/bbqq 绝对路径脚本
+          cp -a "$STAGE/mpv.log" "$PKGROOT/opt/bbq/" 2>/dev/null || true
+
+          # ---- 2) /usr/bin/bbqq：绝对路径启动脚本 ----
+          # 关键点：全部路径硬编码为 /opt/bbq/...。不能沿用 tar.gz 里
+          # 那套 `HERE="$(dirname "${BASH_SOURCE[0]}")"` 相对定位 ——
+          # 桌面项的 Exec 直接调 /usr/bin/bbqq，cwd 与启动方式都不可控。
+          mkdir -p "$PKGROOT/usr/bin"
+          cat > "$PKGROOT/usr/bin/bbqq" <<'EOF'
+          #!/bin/sh
+          # BbQ 启动脚本（.deb 版）：注入自包含运行时环境
+          # 全部使用绝对路径 —— 该脚本由 .desktop 的 Exec 直接调用，
+          # 依赖相对路径定位会在 cwd 不可控时失效。
+          PREFIX=/opt/bbq
+          export LD_LIBRARY_PATH="$PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          export QT_PLUGIN_PATH="$PREFIX/plugins"
+          # Qt6 已改用 QML2_IMPORT_PATH → QML_IMPORT_PATH 迁移期双名，
+          # 两个都设以免踩不同 Qt 6.x 小版本只认其中一个的坑
+          export QML2_IMPORT_PATH="$PREFIX/qml"
+          export QML_IMPORT_PATH="$PREFIX/qml"
+          # mpv 写日志/配置的位置（initMpv 里用 applicationDirPath() +
+          # "/mpv-config"，这里指到可写目录；不可写时 mpv 会自己降级，
+          # 不会导致启动失败）
+          export HOME="${HOME:-$PREFIX}"
+          exec "$PREFIX/bin/BbQ" "$@"
+          EOF
+          chmod 755 "$PKGROOT/usr/bin/bbqq"
+
+          # ---- 3) 桌面项 ----
+          # Icon=bbq 无扩展名：由图标主题查找机制映射到
+          # /usr/share/icons/hicolor/256x256/apps/bbq.png（hicolor
+          # 是 freedesktop 标准回退主题，任何桌面环境都认）
+          mkdir -p "$PKGROOT/usr/share/applications"
+          cat > "$PKGROOT/usr/share/applications/bbq.desktop" <<'EOF'
+          [Desktop Entry]
+          Type=Application
+          Version=1.0
+          Name=BbQ
+          GenericName=Bilibili 视频播放器
+          Comment=面向 B 站 的 Qt/QML 视频客户端
+          Exec=/usr/bin/bbqq
+          Icon=bbq
+          Terminal=false
+          Categories=AudioVideo;Video;Player;
+          Keywords=Bilibili;B站;视频;播放器;
+          StartupNotify=true
+          StartupWMClass=BbQ
+          EOF
+          chmod 644 "$PKGROOT/usr/share/applications/bbq.desktop"
+
+          # ---- 4) 图标：res/app.ico → 256x256 png ----
+          # .ico 是容器格式，内含多尺寸图层（16/32/48/64/128/256）。
+          # ImageMagick 默认只取**第一层**，而 .ico 的第一层通常是最小的
+          # 16x16 —— 直接 `convert app.ico out.png` 会得到 16x16 的糊图，
+          # 在启动器里显示为严重模糊的图标。必须用 -define
+          # icon:auto-resize=256 让 IM 选择 256 那一层。
+          # 装 imagemagick 是为了这一步，runner 默认不带。
+          # DEBIAN_FRONTEND=noninteractive：imagemagick 在 Ubuntu 上会
+          # 询问装 IM6 还是 IM7（display-manager 风格的选择框）。runner 无
+          # TTY，这个提问会直接把 step 卡死直到 job 超时。必须显式关掉。
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends imagemagick
+          mkdir -p "$PKGROOT/usr/share/icons/hicolor/256x256/apps"
+          convert -background none -define icon:auto-resize=256 \
+            res/app.ico -resize 256x256 -strip \
+            "$PKGROOT/usr/share/icons/hicolor/256x256/apps/bbq.png"
+          # 断言真的产出了 256x256，避免 -define 在某个 IM 版本上
+          # 行为不同而静默退化成 16x16（那是最容易漏到用户眼里的坑）
+          identify -format '%wx%h\n' "$PKGROOT/usr/share/icons/hicolor/256x256/apps/bbq.png" \
+            | grep -qx '256x256' || {
+              echo "ERROR: icon is not 256x256 (.ico multi-layer extraction failed)"; exit 1; }
+
+          # ---- 5) DEBIAN/control ----
+          # libc6 下限必须与 runner 的 glibc 严格对齐：CI 在 22.04（2.35）上编，
+          # 产物就只保证 2.35+ 能跑。把版本写进 Depends 的目的是让 dpkg 在
+          # **安装前**就明确报错并拒绝，而不是装完点击图标才在 loader 里崩。
+          # 反面教训：曾写成 (>= 2.38)，结果在银河麒麟 V10（glibc 2.31）上
+          # dpkg 直接拒绝安装——把"用户装不上"包装成了"我们提前拦住了"，
+          # 比运行时崩溃更难排查。改动 runner 时这里必须同步改。
+          mkdir -p "$PKGROOT/DEBIAN"
+          cat > "$PKGROOT/DEBIAN/control" <<'EOF'
+          Package: bbq
+          Version: 1.0.0
+          Section: video
+          Priority: optional
+          Architecture: amd64
+          Maintainer: BbQ Contributors <bbq@example.invalid>
+          Depends: libc6 (>= 2.35), libstdc++6, libgcc-s1, zlib1g, libgl1, libegl1, libxkbcommon0, libxkbcommon-x11-0, libxcb-cursor0, libfontconfig1, libfreetype6, libdbus-1-3
+          Description: B 站视频播放器（Qt6 + QML + libmpv）
+           BbQ 是一个面向 B 站 的桌面视频客户端，使用 Qt6/QML 构建界面，
+           libmpv 负责视频解码与渲染，支持视频点播与直播播放。
+           .
+           本包自带 Qt 运行库、QML 模块与 libmpv 及其 ffmpeg 依赖
+           （安装在 /opt/bbq），因此不依赖系统预装 Qt6。
+           仅需系统提供图形驱动、窗口系统与 glibc。
+          EOF
+          chmod 644 "$PKGROOT/DEBIAN/control"
+
+          # ---- 6) 构建 + 基本校验 ----
+          dpkg-deb --build --root-owner-group "$PKGROOT" BbQ-Linux-amd64.deb
+          ls -lh BbQ-Linux-amd64.deb
+
+          echo "--- package metadata:"
+          dpkg-deb --info BbQ-Linux-amd64.deb | sed -n '1,20p'
+          echo "--- installed tree summary:"
+          dpkg-deb --contents BbQ-Linux-amd64.deb \
+            | grep -E 'usr/bin/|usr/share/applications/|usr/share/icons/|opt/bbq/bin/|DEBIAN' \
+            || true
+
+          # ---- 7) 针对"装上但点不开"的静态断言 ----
+          # 这些检查能在 CI 里就抓到绝大多数"dpkg 装成功但运行失败"的
+          # 结构性原因，不必等用户回报。
+          #   a) 权限位：deb 会冻结权限位，写错的话 /usr/bin/bbqq 不可执行，
+          #      dpkg -i 不报错、桌面点击报 "Failed to execute"
+          test -x "$PKGROOT/usr/bin/bbqq" || { echo "ERROR: bbqq not executable"; exit 1; }
+          test -x "$PKGROOT/opt/bbq/bin/BbQ" || { echo "ERROR: BbQ not executable"; exit 1; }
+          #   b) desktop 文件里的路径必须真实存在（Exec 指错 → 静默点不开）
+          grep -q '^Exec=/usr/bin/bbqq$' "$PKGROOT/usr/share/applications/bbq.desktop" || {
+            echo "ERROR: desktop Exec mismatch"; exit 1; }
+          test -f "$PKGROOT/usr/share/icons/hicolor/256x256/apps/bbq.png" || {
+            echo "ERROR: desktop icon missing"; exit 1; }
+          #   c) 启动脚本引用的每个目录都要在包里
+          for d in lib plugins qml; do
+            test -d "$PKGROOT/opt/bbq/$d" || { echo "ERROR: /opt/bbq/$d missing"; exit 1; }
+          done
+          #   d) FluentUI 必须在内置 qml 树里，否则启动即找不到 FluWindow
+          test -f "$PKGROOT/opt/bbq/qml/FluentUI/qmldir" || {
+            echo "ERROR: FluentUI qmldir missing in deb qml tree"; exit 1; }
+
+      - name: Upload .deb artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: BbQ-Linux-amd64-deb
+          path: BbQ-Linux-amd64.deb
           retention-days: 14
