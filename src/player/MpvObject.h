@@ -4,6 +4,7 @@
 #include <QQuickFramebufferObject>
 #include <QTimer>
 #include <QVariantMap>
+#include <QElapsedTimer>
 
 #include <atomic>
 
@@ -136,6 +137,13 @@ private:
     bool m_playing = false;
     bool m_desiredPlaying = true;  // 加载新文件后是否自动播放
     int m_position = 0;
+    // positionChanged 信号节流：time-pos 以视频帧率上报（30fps 视频即
+    // 30 次/秒），每次 emit 都驱动 QML 进度条绑定更新 → 整窗合成。
+    // pacer tick 与 mpv 事件到达相位错开时各自触发独立呈现（关弹幕
+    // 60fps 而非 30fps 的根因）。QML 消费端 200ms 粒度足够。
+    // 与 MpvObjectD3D11 同名同语义，Linux 侧此前缺失。
+    QElapsedTimer m_posThrottleClock;
+    qint64 m_lastPosEmitMs = -1;
     int m_duration = 0;
     qreal m_volume = 1.0;
     qreal m_speed = 1.0;

@@ -1,6 +1,7 @@
 #include "DanmakuCanvas.h"
 #include "FramePacer.h"
 #include "EmoticonCache.h"
+#include "../core/AppDirs.h"
 
 #include <QCoreApplication>
 #include <QQuickWindow>
@@ -1236,15 +1237,35 @@ void DanmakuCanvas::freeSlotDeferred(int slot)
 }
 
 // ---------------------------------------------------------------------------
-// 外接字体：exe 同目录 fonts/ 下的 .ttf/.otf/.ttc 注册为进程内字体，
-// 家族名进回退链最前端；目录不存在/文件损坏时静默落到系统雅黑/黑体
+// 外接字体：配置目录 fonts/ 下的 .ttf/.otf/.ttc 注册为进程内字体，
+// 家族名进回退链最前端；目录不存在/文件损坏时静默落到系统雅黑/黑体。
+//
+// 路径：Linux 在 ~/.config/BbQ/fonts/，Windows 仍在 exe 同目录（行为不变）。
+// 若新目录没有而旧位置有（tar.gz 绿色版升级到 .deb 的用户），回退读旧位置，
+// 避免用户自定义弹幕字体突然失效。详见 src/core/AppDirs.h。
 // ---------------------------------------------------------------------------
 QStringList DanmakuCanvas::fontFamilies()
 {
     // C++11 魔法静态：进程内首次调用时扫描注册一次，此后直接返回结果
     static const QStringList families = [] {
         QStringList chain;
-        const QDir dir(QCoreApplication::applicationDirPath() + QStringLiteral("/fonts"));
+        bool usedLegacy = false;
+        // fonts/ 是目录而非单文件，直接用 configRoot()+相对路径并回退
+        QString fontDirPath = AppDirs::configRoot() + QStringLiteral("fonts");
+        if (!QDir(fontDirPath).exists()) {
+            const QString legacy = QCoreApplication::applicationDirPath()
+                                   + QStringLiteral("/fonts");
+            if (QDir(legacy).exists()) {
+                fontDirPath = legacy;
+                usedLegacy = true;
+            }
+        }
+        if (usedLegacy) {
+            qInfo().noquote() << QStringLiteral(
+                "[DanmakuCanvas] 未在 %1 找到 fonts/，回退使用旧位置: %2")
+                .arg(AppDirs::configRoot(), fontDirPath);
+        }
+        const QDir dir(fontDirPath);
         if (dir.exists()) {
             const auto files = dir.entryInfoList(
                 {QStringLiteral("*.ttf"), QStringLiteral("*.otf"), QStringLiteral("*.ttc")},
