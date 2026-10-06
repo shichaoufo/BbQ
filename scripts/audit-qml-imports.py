@@ -18,6 +18,15 @@ import os
 import re
 import sys
 
+# Windows 控制台默认编码是 cp1252（GBK 区域设置下为 cp936），本脚本输出的
+# 中文提示会触发 UnicodeEncodeError —— GitHub Actions 的 Windows runner 就是
+# cp1252，print 第一个中文即崩。reconfigure 把标准输出切到 UTF-8，让脚本
+# 在任何 runner 上行为一致。errors="replace" 保证极端情况下（编码不支持）
+# 降级为替换字符而非抛异常。
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 # ---- 项目自定义类型清单 ----
 # components/ 下的 QML 组件（QML 类型）
 COMPONENT_TYPES = {
