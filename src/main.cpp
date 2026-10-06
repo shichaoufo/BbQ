@@ -10,6 +10,10 @@
 #include <QPixmapCache>
 #include <QTimer>
 #include <QDebug>
+#ifndef Q_OS_WIN
+// 非 Windows 平台的渲染后端诊断需要直接查询 OpenGL 运行时信息
+#include <GL/gl.h>
+#endif
 #include <QDateTime>
 #include <QTextStream>
 #include <QMutex>
@@ -316,6 +320,93 @@ static void initLogFile()
     }
 }
 
+// ===== POSIX 崩溃/信号处理（Linux 等非 Windows 平台）=====
+//
+// 为什么需要：原实现只有 Windows 的 SetUnhandledExceptionFilter +
+// MiniDumpWriteDump（installCrashHandler 内含 HANDLE/CreateFileW，全是
+// Win32 API）。Linux 上**完全没有崩溃处理器**，进程被信号终止时不留任何
+// 痕迹 —— 表现为"点了没反应就没了"、日志里最后一行也无从对应，正是本次
+// 银河麒麟"重开后播放直接闪退"完全无线索的原因。
+//
+// 实现要点：
+//   - 信号处理函数里只能调用**异步信号安全**的操作。qWarning() 会加锁、
+//     可能分配内存，严格说在信号上下文里并不安全；但 Qt 的消息处理器在
+//     实际使用中不会在此路径死锁，且相比"什么都留不下"这个代价是明确
+//     的改进。这里用 write(2) 直写日志文件描述符 + 提前打开的备份 FD
+//     作为更安全的替代。
+//   - 已知危险信号（SIGSEGV/SIGBUS/SIGILL/SIGFPE/SIGABRT）不能真正"处理"，
+//     只能在原信号默认行为之前补写诊断信息，然后恢复默认并重新抛出，
+//     让进程以正确的退出码终止（避免被误判为正常退出，也便于 core dump）。
+//   - SIGPIPE 必须**忽略**而非捕获：mpv 文档明确 "every mpv_initialize()
+//     call will block SIGPIPE"，不忽略会让进程在写管道时直接死掉。
+#ifndef Q_OS_WIN
+#include <csignal>
+#include <unistd.h>
+#include <fcntl.h>
+#include <cstring>
+
+static int g_crashLogFd = -1;
+
+// 由 initLogFile 在打开 g_logFile 后一并打开一个只写 FD，供信号处理器使用
+static void openCrashLogFd()
+{
+    if (g_logFile.isOpen()) {
+        const QString path = g_logFile.fileName();
+        g_crashLogFd = ::open(QFile::encodeName(path).constData(),
+                             O_WRONLY | O_APPEND | O_CREAT, 0644);
+    }
+}
+
+static void crashLogFd(const char *fmt, ...)
+{
+    if (g_crashLogFd < 0)
+        return;
+    char buf[512];
+    va_list ap;
+    va_start(ap, fmt);
+    const int n = vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    if (n > 0) {
+        // 尽力而为：write 失败也不能再做别的事
+        ssize_t ignored = ::write(g_crashLogFd, buf, static_cast<size_t>(n));
+        (void)ignored;
+    }
+}
+
+extern "C" void bbqFatalSignalHandler(int sig)
+{
+    crashLogFd("\n================ CRASH (POSIX signal) ================\n");
+    switch (sig) {
+    case SIGSEGV: crashLogFd("signal: SIGSEGV (invalid memory access)\n"); break;
+    case SIGBUS:  crashLogFd("signal: SIGBUS (bus error, e.g. misaligned/mmap)\n"); break;
+    case SIGILL:  crashLogFd("signal: SIGILL (illegal instruction)\n"); break;
+    case SIGFPE:  crashLogFd("signal: SIGFPE (arithmetic exception, e.g. div by zero)\n"); break;
+    case SIGABRT: crashLogFd("signal: SIGABRT (abort())\n"); break;
+    default:      crashLogFd("signal: %d\n", sig); break;
+    }
+    crashLogFd("======================================================\n");
+
+    // 恢复默认处置并重新发出，让进程按信号正常终止（保留 core dump 与
+    // 正确的退出码，避免上游把崩溃误判为正常退出）
+    ::signal(sig, SIG_DFL);
+    ::raise(sig);
+}
+
+static void installPosixCrashHandler()
+{
+    // SIGPIPE 忽略：mpv 文档要求（mpv_initialize 会阻塞 SIGPIPE），
+    // 不忽略则与 mpv 交互时可能直接被信号杀死，表现为无日志的闪退
+    ::signal(SIGPIPE, SIG_IGN);
+
+    const int fatal[] = { SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGABRT };
+    for (int sig : fatal)
+        ::signal(sig, bbqFatalSignalHandler);
+
+    crashLogFd("POSIX crash handler installed (SIGSEGV/SIGBUS/SIGILL/SIGFPE/SIGABRT"
+               " -> log, SIGPIPE ignored)\n");
+}
+#endif // !Q_OS_WIN
+
 // 日志处理器会被任意线程并发调用（网络线程的 warning、主线程的日志等），
 // g_logFile 的写入必须串行化，否则并发操作同一个 QIODevice 缓冲区会导致
 // 内存损坏（表现为偶发启动闪退，AV 读野地址）。
@@ -551,6 +642,13 @@ int main(int argc, char *argv[])
     // 安装 Windows 未处理异常过滤器：崩溃时会生成 .dmp 并把崩溃点写入日志
     installCrashHandler();
     qDebug("[BiliQt] Crash handler installed");
+#else
+    // 非 Windows：安装 POSIX 信号处理器，让 SIGSEGV/SIGBUS 等致命信号
+    // 在终止前补写崩溃信息到日志（此前 Linux 上崩溃完全无痕迹，是排查
+    // "播放闪退"无从下手的直接原因）；同时忽略 SIGPIPE（mpv 要求）。
+    openCrashLogFd();
+    installPosixCrashHandler();
+    qDebug("[BiliQt] POSIX crash handler installed");
 #endif
 
     // 全局 SSL 配置：禁用对等证书验证，避免部分环境（包括 QML Image）HTTPS 图片加载失败
@@ -701,6 +799,30 @@ int main(int argc, char *argv[])
     }, Qt::QueuedConnection);
 
     engine.load(url);
+
+#ifndef Q_OS_WIN
+    // 渲染后端诊断：弹幕模糊/高频重绘卡顿这类问题，最常见成因是 Qt 悄悄
+    // 回退到软件渲染（llvmpipe/softpipe）。把实际用到的 GL renderer 与
+    // RHI backend 打进日志，下次这类问题可以直接从日志判断，不必再靠猜。
+    // 判读方法：出现 llvmpipe / softpipe 即为软件渲染，弹幕必然模糊且拖动卡顿。
+    {
+        const QString glRenderer = QString::fromLatin1(reinterpret_cast<const char *>(glGetString(GL_RENDERER)));
+        const QString glVendor = QString::fromLatin1(reinterpret_cast<const char *>(glGetString(GL_VENDOR)));
+        const QString glVersion = QString::fromLatin1(reinterpret_cast<const char *>(glGetString(GL_VERSION))));
+        QByteArray rh;
+        const char *rhi = qgetenv("QSG_RHI_BACKEND");
+        rh = rhi ? QByteArray(rhi) : QByteArray("<default>");
+        qInfo("[RHI] requested backend=%s", rh.constData());
+        qInfo("[GL] renderer=%s vendor=%s version=%s",
+              qPrintable(glRenderer), qPrintable(glVendor), qPrintable(glVersion));
+        const bool software = glRenderer.contains("llvmpipe") || glRenderer.contains("softpipe")
+                              || glRenderer.contains("SWR");
+        if (software)
+            qWarning("[RHI] 检测到**软件渲染**（%s）：弹幕等高频重绘内容会模糊且卡顿。"
+                     "请确认目标机有可用的硬件 GL 驱动，或安装 libgl1-mesa-dri。",
+                     qPrintable(glRenderer));
+    }
+#endif
 
     // 修复 FluentUI 无边框窗口缺少 WS_MINIMIZEBOX，导致点击任务栏图标无法最小化/还原的问题。
     // FluFrameless::componentComplete() 会在窗口初始化时重设窗口样式（Qt 6.7.2 还会移除 WS_MINIMIZEBOX），
