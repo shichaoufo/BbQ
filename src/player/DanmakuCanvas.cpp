@@ -233,24 +233,56 @@ DanmakuCanvas::~DanmakuCanvas()
         fclose(m_traceFile);
         m_traceFile = nullptr;
     }
-    // 节点仍挂在场景图树上，随 Item 自动析构；
-    // 纹理在场景图仍有效时手动释放（不再调用 setTexture，避免触发脏标记遍历）。
-    // 子纹理无 GPU 资源直接删；图集宿主 QRhiTexture 是渲染线程资源，
-    // 若 itemChange 路径未覆盖（极端时序）则交渲染线程 job 释放
-    if (window() && window()->isSceneGraphInitialized()) {
+    // 节点仍挂在场景图树上，随 Item 自动析构。
+    // 纹理释放必须走**渲染线程**：QSGTexture 的销毁要与其在场景图中的
+    // 最后一次使用解耦，Qt 官方对 QSGTexture/QRhiTexture 的要求是在
+    // 渲染线程删除（QSGRenderThread 上下文里），在 GUI 线程直接 delete
+    // 会与在途的渲染并发。
+    //
+    // 注意：这里与 itemChange 的路径不同——itemChange 里是主动 job，
+    // 而析构时对象即将消失、不能把 this 捕获进 job（悬垂）。因此这里
+    // 只把裸纹理指针交给 job，job 本身不持有本对象。
+    //
+    // 图集宿主 QRhiTexture 由 rhi->newTexture() 在渲染线程创建，同样
+    // 必须在渲染线程 delete（不能在设备仍引用它时释放）。
+    QQuickWindow *win = window();
+    if (win && win->isSceneGraphInitialized()) {
+        QList<QSGTexture *> textures;
         for (auto &s : m_pool) {
-            if (s.texNode)
+            if (s.texNode && s.texNode->texture())
+                textures.append(s.texNode->texture());
+        }
+        QRhiTexture *atlas = m_atlasTex.exchange(nullptr);
+        if (!textures.isEmpty() || atlas) {
+            struct TexReleaseJob : public QRunnable {
+                QList<QSGTexture *> textures;
+                QRhiTexture *atlasTex = nullptr;
+                void run() override {
+                    for (QSGTexture *t : textures) delete t;
+                    delete atlasTex;
+                }
+            };
+            auto *job = new TexReleaseJob;
+            job->textures = textures;
+            job->atlasTex = atlas;
+            win->scheduleRenderJob(job, QQuickWindow::BeforeSynchronizingStage);
+        }
+    } else {
+        // 场景图已失效（窗口先于本对象销毁）：渲染线程已不可用，投递 job
+        // 也不会再被执行 —— 此时释放 GPU 资源反而不安全。
+        // AtlasSubTexture 自身不持有 GPU 资源（rhiTexture() 只是指向宿主
+        // 图集的快照），所以这里只回收它的壳对象即可；真正的 QRhiTexture
+        // 由 RHI 随设备销毁而回收，不做显式 delete（避免在设备已销毁后
+        // 再碰它）。
+        // 注意：**不能**qDeleteAll(m_pool) —— 那是 QSGNode 队列，节点由
+        // Qt 经 cleanup(itemNodeInstance) 统一延迟删除，这里碰会重复释放。
+        for (auto &s : m_pool) {
+            if (s.texNode)          // delete 是语句，不能参与三元表达式
                 delete s.texNode->texture();
         }
-        if (m_atlasTex.load(std::memory_order_acquire)) {
-            struct AtlasReleaseJob : public QRunnable {
-                QRhiTexture *tex = nullptr;
-                void run() override { delete tex; }
-            };
-            auto *job = new AtlasReleaseJob;
-            job->tex = m_atlasTex.exchange(nullptr);
-            window()->scheduleRenderJob(job, QQuickWindow::BeforeSynchronizingStage);
-        }
+        m_pool.clear();
+        // 宿主图集指针只清引用，不 delete（理由同上）
+        m_atlasTex.store(nullptr, std::memory_order_release);
     }
 }
 
