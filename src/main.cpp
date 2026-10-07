@@ -644,6 +644,33 @@ int main(int argc, char *argv[])
 #else
     qputenv("QSG_RHI_BACKEND", "opengl");
 #endif
+
+#ifndef Q_OS_WIN
+    // 非 Windows：显式把 Qt Quick 的图形 API 锁定为 OpenGL。
+    //
+    // 为什么必须显式声明（QQuickFramebufferObject 的官方要求）：
+    // Qt 6 的场景图默认走 RHI，而 QQuickFramebufferObject 官方文档明写
+    //   "This class is only suitable when working directly with OpenGL.
+    //    It is not compatible with the RHI-based rendering path."
+    // 《Changes to Qt Quick》进一步要求："依赖 QQuickFramebufferObject 的
+    // 应用程序应在其 main() 函数中调用
+    //   QQuickWindow::setGraphicsApi(QSGRendererInterface::OpenGL)"
+    //
+    // 为什么这对我们是硬约束（不只是形式）：
+    // mpv 的 render API 只有 MPV_RENDER_API_TYPE_OPENGL / D3D11 / SW 等，
+    // Linux 上我们用的就是 OpenGL 后端。Linux 版MpvObject 继承
+    // QQuickFramebufferObject，一旦 Qt 选到非 OpenGL 的 QRhi 后端
+    // （例如某些发行版默认 Vulkan、或未来 Qt 改默认），FBO 路径会**静默
+    // 失效**——类不报错，但视频区永远空白。
+    //
+    // 上面的 QSG_RHI_BACKEND=opengl 已经能选出 OpenGL 后端；这里再用
+    // 官方 API 显式固定，是**双保险**：即使将来环境变量被外部覆盖
+    // （桌面启动器/沙箱/用户 profile），也会因为 Qt 无法初始化请求的后端
+    // 而明确失败，而不是静默黑屏。
+    //
+    // 注意：必须在 QGuiApplication 构造**之前**调用。
+    QQuickWindow::setGraphicsApi(QSGRendererInterface::OpenGL);
+#endif
     // qputenv("QSG_INFO", "1"); // 诊断时临时禁用，减少日志输出
 
     QGuiApplication app(argc, argv);
