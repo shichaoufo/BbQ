@@ -489,8 +489,16 @@ static void installPosixCrashHandler()
 
     // ---- sigaltstack：给 handler 准备独立栈 ----
     // 用 static（而非栈上数组）是因为 handler 执行时原栈可能已损坏/耗尽。
-    // SIGSTKSZ 在部分 glibc 上不是编译期常量，用一个下限兜底。
-    static char altStack[SIGSTKSZ < 65536 ? 65536 : SIGSTKSZ];
+    //
+    // ⚠️ 尺寸**不能用 SIGSTKSZ**：glibc 2.34 起 SIGSTKSZ 改为
+    // sysconf(_SC_SIGSTKSZ) 的**运行时**返回值，不再是编译期常量 ——
+    // 写 `static char altStack[SIGSTKSZ ...]` 会直接报
+    // "storage size of 'altStack' isn't constant"（Ubuntu 22.04 的
+    // glibc 2.35 正是如此，CI 实测踩过）。
+    // 这里直接用固定下界：信号处理只需一个远大于常见 SIGSTKSZ(8KB) 的栈，
+    // backtrace() 展开 64 帧的空间绰绰有余。
+    constexpr size_t kAltStackSize = 128 * 1024;
+    static char altStack[kAltStackSize];
     stack_t ss;
     ss.ss_sp = altStack;
     ss.ss_size = sizeof(altStack);
