@@ -361,6 +361,11 @@ static void initLogFile()
 #include <unistd.h>
 #include <fcntl.h>
 #include <cstring>
+// 崩溃栈捕获：backtrace()/backtrace_symbols_fd() 来自 glibc 的 execinfo.h。
+#include <execinfo.h>
+#include <sys/syscall.h>
+// sigaltstack：给信号处理函数准备一块独立的栈
+#include <cstdlib>
 
 static int g_crashLogFd = -1;
 
@@ -401,6 +406,73 @@ extern "C" void bbqFatalSignalHandler(int sig)
     case SIGABRT: crashLogFd("signal: SIGABRT (abort())\n"); break;
     default:      crashLogFd("signal: %d\n", sig); break;
     }
+
+    // ---- 第①步：先把"崩了 + 什么信号 + 哪个线程"落盘（必须在 backtrace 之前）----
+    // 【顺序至关重要】下面的 backtrace() 有残余死锁风险（libgcc unwinder
+    // 非严格 async-signal-safe）。万一它在 handler 里二次死锁，我们**至少
+    // 已经写下了这段** —— 能知道"崩了、什么信号、哪个线程"，比日志空白
+    // 强得多。因此本段与 tid 都刻意排在 backtrace 之前。
+    crashLogFd("thread tid: ");
+    {
+        // syscall(SYS_gettid) 而非 pthread_self()：后者在信号上下文里
+        // 理论上可能加锁。
+        const long tid = ::syscall(SYS_gettid);
+        crashLogFd("%ld\n", tid);
+    }
+
+    // ---- 第②步：崩溃栈捕获 ----
+    // 【为什么用 sigaltstack】信号处理函数跑在**被中断线程的栈**上。若崩溃
+    // 恰好由栈溢出引起（这正是我们最想抓的一类），处理函数自己没有可用栈、
+    // 直接二次溢出 → 连日志都写不出来。sigaltstack 让处理函数改用一块
+    // 预分配的独立栈，绕开这个死结。
+    //
+    // 【安全性取舍（glibc 官方 man page 明确说明）】
+    // backtrace(3) NOTES 原文：
+    //   "backtrace() and backtrace_symbols_fd() don't call malloc() explicitly,
+    //    but they are part of libgcc, which gets loaded **dynamically when
+    //    first used**. Dynamic loading usually triggers a call to malloc(3).
+    //    If you need certain calls to these two functions to not allocate
+    //    memory (in signal handlers, for example), you need to make sure
+    //    libgcc is loaded beforehand."
+    // 所以本handler 在安装阶段（installPosixCrashHandler，正常运行时）
+    // 先空跑一次 backtrace()，把 libgcc 的惰性加载与首次 malloc 全部提前
+    // 做完；这样崩溃当刻的调用就不再触发动态加载，显著降低在handler 内
+    // 二次死锁的概率。
+    //
+    // 仍然存在的风险（无法消除，只是概率降低）：libgcc 的unwinder 本身
+    // 并非严格 async-signal-safe。取栈失败时必须**静默继续**走下面的兜底，
+    // 绝不能在 handler 里卡死。实际使用中这是抓栈最主流的做法。
+    //
+    // 【为什么用 backtrace_symbols_fd 而不是 backtrace_symbols】man page
+    // 原文："backtrace_symbols_fd() does not call malloc(3)"。它直接
+    // write(2) 到 fd，不碰 stdio 锁，比需要 malloc 的版本安全得多。
+    //
+    // 【符号名】man page："The symbol names may be unavailable without the
+    // use of special linker options. For systems using the GNU linker, it is
+    // necessary to use the -rdynamic linker option."
+    // ⇒ Linux 构建已在 CMakeLists.txt 里加 -rdynamic（非 Windows 分支），
+    // 这样栈里能带出函数名。-rdynamic 只导出**动态符号**，static 局部函数
+    // 的名字仍不可见（man page 同段亦有说明），属预期限制。
+    //
+    // 精确原型（man backtrace(3) SYNOPSIS，glibc 2.1+）：
+    //   int  backtrace(void **buffer, int size);
+    //   void backtrace_symbols_fd(void *const *array, int size, int fd);
+    // 注意 backtrace_symbols_fd 返回 **void**（不是 char**）。
+    void *frames[64];
+    const int nptrs = ::backtrace(frames, 64);
+    if (nptrs > 0) {
+        crashLogFd("---- backtrace (%d frames, may be incomplete) ----\n", nptrs);
+        ::backtrace_symbols_fd(frames, nptrs, g_crashLogFd);
+        // fd 无效时兜底打到 stderr（终端/系统日志里也能看到）
+        if (g_crashLogFd < 0)
+            ::backtrace_symbols_fd(frames, nptrs, STDERR_FILENO);
+        crashLogFd("---- end backtrace ----\n");
+    } else {
+        // 取栈失败兜底：打印说明后继续走原来的 re-raise 流程。
+        // 此时第①步的信号名与 tid 已在日志里，不会什么都留不下。
+        crashLogFd("---- backtrace unavailable (returned 0 frames) ----\n");
+    }
+
     crashLogFd("======================================================\n");
 
     // 恢复默认处置并重新发出，让进程按信号正常终止（保留 core dump 与
@@ -415,12 +487,41 @@ static void installPosixCrashHandler()
     // 不忽略则与 mpv 交互时可能直接被信号杀死，表现为无日志的闪退
     ::signal(SIGPIPE, SIG_IGN);
 
+    // ---- sigaltstack：给 handler 准备独立栈 ----
+    // 用 static（而非栈上数组）是因为 handler 执行时原栈可能已损坏/耗尽。
+    // SIGSTKSZ 在部分 glibc 上不是编译期常量，用一个下限兜底。
+    static char altStack[SIGSTKSZ < 65536 ? 65536 : SIGSTKSZ];
+    stack_t ss;
+    ss.ss_sp = altStack;
+    ss.ss_size = sizeof(altStack);
+    ss.ss_flags = 0;
+    if (::sigaltstack(&ss, nullptr) != 0)
+        crashLogFd("sigaltstack failed; backtrace may be unavailable on stack overflow\n");
+
     const int fatal[] = { SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGABRT };
-    for (int sig : fatal)
-        ::signal(sig, bbqFatalSignalHandler);
+    for (int sig : fatal) {
+        struct sigaction sa;
+        ::memset(&sa, 0, sizeof(sa));
+        sa.sa_handler = bbqFatalSignalHandler;
+        ::sigemptyset(&sa.sa_mask);
+        // SA_ONSTACK：让 handler 跑在上面的 altStack 上。**必须**，
+        // 否则 sigaltstack 装了也不会被用上。
+        sa.sa_flags = SA_ONSTACK;
+        ::sigaction(sig, &sa, nullptr);
+    }
+
+    // 【关键预热】空跑一次 backtrace()，把 libgcc 的动态加载（dlopen）与
+    // 随之而来的首次 malloc 提前做完 —— 见 man backtrace(3) 的 NOTES。
+    // 不做这一步的话，崩溃当刻第一次调 backtrace() 会在信号上下文里触发
+    // dlopen/malloc，显著提高 handler 内二次死锁的概率（那样就什么都
+    // 留不下了）。这里在正常上下文里做，风险为零。
+    {
+        void *warmup[4];
+        (void)::backtrace(warmup, 4);   // 返回值故意忽略
+    }
 
     crashLogFd("POSIX crash handler installed (SIGSEGV/SIGBUS/SIGILL/SIGFPE/SIGABRT"
-               " -> log, SIGPIPE ignored)\n");
+               " -> log + backtrace via sigaltstack, libgcc preloaded, SIGPIPE ignored)\n");
 }
 #endif // !Q_OS_WIN
 

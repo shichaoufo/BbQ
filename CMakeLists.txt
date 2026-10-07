@@ -470,6 +470,32 @@ elseif(UNIX)
     endif()
 endif()
 
+# ---------------------------------------------------------------------------
+# 崩溃栈捕获需要符号名：仅 Linux/Unix 生效
+# ---------------------------------------------------------------------------
+# 背景：main.cpp 的 POSIX 信号处理器用 backtrace()/backtrace_symbols_fd()
+# 打印崩溃调用栈。man backtrace(3) 明确写道：
+#   "The symbol names may be unavailable without the use of special linker
+#    options. For systems using the GNU linker, it is necessary to use the
+#    -rdynamic linker option."
+# 不加的话，栈里只有"地址+偏移"，每次排查都得手工 addr2line；Release
+# 符号表被裁剪时甚至还原不出来，排查效率差一个量级。
+#
+# 为什么需要符号名：mpv 与 Qt 大量使用**函数指针**（mpv 的
+# get_proc_address、Qt 的各类虚函数回调），没有符号名根本判断不出崩在
+# 哪一层。
+#
+# 影响与隔离：
+#   - 代价是可执行文件体积略增（导出全部动态符号），Linux 独有；
+#   - 用 if(NOT WIN32) 隔离，**Windows 链接完全不受影响**
+#     （MSVC 也不认 -rdynamic）；
+#   - target_link_options 是**追加**语义（CMake 3.13+），不会覆盖项目已有的
+#     其它链接选项（-Wl,--as-needed 等由 Qt/系统库自身注入）；
+#   - 本项目 cmake_minimum_required = 3.16 > 3.13，满足该命令可用。
+if(NOT WIN32)
+    target_link_options(${PROJECT_NAME} PRIVATE -rdynamic)
+endif()
+
 install(TARGETS ${PROJECT_NAME}
     BUNDLE DESTINATION .
     RUNTIME DESTINATION bin

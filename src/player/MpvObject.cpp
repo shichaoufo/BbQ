@@ -48,6 +48,7 @@
 #include <QOpenGLFunctions>
 #include <QVariantMap>
 #include <QElapsedTimer>
+#include <QRunnable>
 // 迁移兜底用到 QFile::copy / QFileInfo::exists / QStandardPaths。
 // AppDirs.h 里也 include 了它们，但显式列出更稳妥 —— 依赖传递 include
 // 会在AppDirs.h 改动时突然编不过。
@@ -186,13 +187,19 @@ static const QString MPV_ORIGIN = "https://www.bilibili.com";
 class MpvRenderer : public QQuickFramebufferObject::Renderer
 {
 public:
-    // itemSlot 指向 MpvObject 内部的原子成员（不是裸指针）。
-    // 不用 QPointer：它没有任何线程安全声明，跨线程读写本身就不安全；
-    // 而 MpvRenderer 析构（渲染线程）确实会与 MpvObject 析构（GUI 线程）
-    // 并发。纯原子是这里唯一合法的跨线程握手手段。
-    explicit MpvRenderer(std::atomic<MpvObject *> *itemSlot, mpv_handle *mpv)
+// 【core 指针只能从 item->m_mpv 实时读取，Renderer 不得缓存】
+    //
+    // 为什么这里**没有** mpv_handle* 成员：MpvObject 与本 Renderer 的销毁
+    // 顺序没有保证 —— ~MpvObject 在 GUI 线程执行、而 delete renderer 由渲染
+    // 线程的cleanup 完成，renderer **可能更晚**。若构造时把 core 指针拷贝
+    // 一份，之后 MpvObject 析构会 mpv_terminate_destroy(m_mpv) 并置空，
+    // 那份拷贝就变成**已销毁 core 的悬垂指针**。此时若 createFramebufferObject()
+    // 还在用它调 mpv_render_context_create()，就是把野指针交给 mpv
+    // → use-after-free → SIGSEGV。
+    //
+    // 这个 bug 的触发路径见 createFramebufferObject() 内的注释。
+    explicit MpvRenderer(std::atomic<MpvObject *> *itemSlot)
         : m_itemSlot(itemSlot)
-        , m_mpv(mpv)
     {
     }
 
@@ -212,6 +219,9 @@ public:
         // ~MpvObject 已经跑完、而 m_rendererItem 应已被置空——
         // 出现这条日志说明生命周期顺序异常，需要排查。
         MpvObject *item = m_itemSlot ? m_itemSlot->load(std::memory_order_acquire) : nullptr;
+        // [DIAG] 崩溃定位用：记录 renderer 析构时刻 item 是否还活着。
+        // 若崩溃日志里**没有**这条，说明崩在打开路径而非析构路径。
+        qWarning() << "[DIAG][MpvRenderer] dtor itemAlive=" << (item != nullptr);
         if (!item) {
             qWarning() << "[MpvRenderer] destroyed after MpvObject teardown;"
                        << "(mpv resources already released by ~MpvObject)";
@@ -308,6 +318,16 @@ public:
         // free 在 ~MpvObject（GUI 线程）—— 中间由 m_renderMutex 栅栏保证
         // 渲染线程已不在 render() 里。顺序保证见 ~MpvObject 的注释。
         MpvObject *item = m_itemSlot ? m_itemSlot->load(std::memory_order_acquire) : nullptr;
+
+        // [DIAG] 崩溃定位用：真机崩溃恒定发生在"打开页面 + visible=true"，
+        // 这条日志确认是否真的进到了 FBO 创建、以及 item/core 是否还活着。
+        // 若**没有**这条日志而崩了，说明崩在更早（场景图 sync / GL 上下文）。
+        qWarning() << "[DIAG][MpvRenderer] createFbo enter size=" << size
+                   << "itemAlive=" << (item != nullptr)
+                   << "core=" << (item && item->m_mpv ? "alive" : "null")
+                   << "shuttingDown=" << (item
+                       ? item->m_shuttingDown.load(std::memory_order_acquire) : true);
+
         if (!item) {
             qWarning() << "[MpvRenderer] createFramebufferObject after item teardown";
             return fbo;
@@ -325,7 +345,28 @@ public:
                 return fbo;
             }
 
-            mpv_opengl_init_params glInitParams;
+            // 【为什么必须实时读item->m_mpv，不能用 Renderer 缓存的快照】
+        // ~MpvObject（GUI 线程）会 mpv_terminate_destroy(m_mpv) 并把成员置空，
+        // 而本 Renderer 由渲染线程 cleanup 删除、**可能晚于** item 析构
+        // （Qt 源码：~QQuickItem 只标记节点删除，实际 delete 在渲染线程）。
+        // 若 Renderer 缓存过 core 指针，此处就会把**已销毁 core** 交给 mpv
+        // → use-after-free → SIGSEGV。
+        //
+        // 读到的 m_mpv 可能为 nullptr（item 已析构/正在析构），此时**放弃创建**
+        // 即可 —— 绝不能退化去用任何缓存值。
+        //
+        // 并发说明：m_mpv 是普通指针（不是原子），但这里在持有
+        // item->m_renderMutex 的前提下读，而 ~MpvObject 写m_mpv=nullptr
+        // （GUI 线程）之前必须先拿同一把栅栏锁 —— 两者由mutex 互斥，
+        // 因此这个读是安全的。**不需要为此把 m_mpv 改成 atomic**
+        //（那会波及 100+ 处调用点，纯属扩大改动）。
+        mpv_handle *core = item->m_mpv;
+        if (!core) {
+            qWarning() << "[MpvRenderer] no live mpv core; skip render context creation";
+            return fbo;
+        }
+
+        mpv_opengl_init_params glInitParams;
             glInitParams.get_proc_address = [](void *ctx, const char *name) -> void* {
                 QOpenGLContext *glctx = static_cast<QOpenGLContext*>(ctx);
                 return reinterpret_cast<void*>(glctx->getProcAddress(QByteArray(name)));
@@ -342,9 +383,9 @@ public:
                 {MPV_RENDER_PARAM_INVALID, nullptr}
             };
 
-// 直接写入 MpvObject 持有的槽位
-                mpv_render_context *ctx = nullptr;
-                int rc = mpv_render_context_create(&ctx, m_mpv, params);
+// 用实时读到的 core，不是任何缓存快照
+            mpv_render_context *ctx = nullptr;
+            int rc = mpv_render_context_create(&ctx, core, params);
             if (rc < 0) {
                 qWarning() << "[MpvRenderer] failed to create mpv OpenGL render context, error:" << rc << mpv_error_string(rc);
             } else {
@@ -355,10 +396,38 @@ public:
                 // render() 会在入口一直 return，表现为**永久黑屏且无日志**。
                 item->m_shuttingDown.store(false, std::memory_order_release);
                 qDebug() << "[MpvRenderer] mpv OpenGL render context created";
-                mpv_render_context_set_update_callback(ctx, [](void *ctx) {
-                    MpvRenderer *renderer = static_cast<MpvRenderer*>(ctx);
-                    renderer->onUpdate();
-                }, this);
+                // update callback：mpv 持有一个裸的上下文指针，回调期间
+                // 解引用它。因此**绝不能把 this（MpvRenderer*）交给 mpv**——
+                // Renderer 由场景图 cleanup 在渲染线程删除，可能早于 mpv
+                // 停止回调（CleanupJob 又把 free 变成异步，两者时序更不确定），
+                // 那时 `renderer->onUpdate()` 就是解引用已析构对象 → UAF。
+                //
+                // 传**原子槽的地址**而不是 item 指针：m_rendererItem 在
+                // ~MpvObject 的第一件事就被置空，回调里读到的将是 nullptr，
+                // 从而安全地提前返回。
+                //
+                // ⚠️ 严格地说，槽地址本身也是 MpvObject 的成员 —— 若
+                // MpvObject 已被析构且内存已归还分配器，读它同样是不确定的。
+                // 真正的根治是"保证 mpv 不再回调"，而那由
+                // mpv_render_context_free()（在 CleanupJob 里）负责 ——
+                // context 一旦 free，mpv 不会再调本回调。本回调的唯一作用
+                // 是在那之前的窗口里安全地什么都不做。
+                mpv_render_context_set_update_callback(ctx, [](void *slotCtx) {
+                    auto *slot = static_cast<std::atomic<MpvObject *> *>(slotCtx);
+                    if (!slot)
+                        return;
+                    MpvObject *live = slot->load(std::memory_order_acquire);
+                    if (!live) {
+                        // MpvObject 已析构：这里刻意什么都不做（保持既有
+                        // "不调 update()"的行为），只是不解引用任何野指针。
+                        return;
+                    }
+                    // 既有行为：不调用 update()。
+                    // mpv update callback 频率 = 视频/直播流出帧率，与
+                    // vsync(60fps) 不一致，会干扰 QSG 动画驱动器导致其切换到
+                    // timer mode(~30fps)。QSG 渲染节奏由 16ms QTimer 与
+                    // DanmakuOverlay 的 NumberAnimation 维持，故此处空实现。
+                }, &item->m_rendererItem);
 
                 // 只有"此前确实 free 过一个已建立的 render context"才需要
                 // 重建视频链。首次创建走这里**不能**置位——此刻 mpv 里
@@ -384,26 +453,105 @@ public:
         Q_UNUSED(item)
     }
 
-    void onUpdate()
+    //注：原先的 onUpdate() 成员已移除。
+    // mpv 的 update callback 现在是createFramebufferObject() 里的一个
+    // 匿名 lambda（传原子槽地址，见那里的注释），刻意保持"空实现" ——
+    // mpv update callback 频率 = 视频/直播流出帧率，与 vsync(60fps) 不一致，
+    // 调 QQuickItem::update() 会干扰 QSG 动画驱动器、使其切换到
+    // timer mode(~30fps)。QSG 渲染节奏由 MpvObject 的 16ms QTimer 与
+    // DanmakuOverlay 的 NumberAnimation 维持。
+    // 顺带消除了"callback 里解引用 renderer"的 UAF 隐患。
+
+private:
+    // 只有握手槽，**没有 core 指针**（理由见构造函数注释）：
+    // core 只能从 item->m_mpv 实时读，缓存会变悬垂。
+    std::atomic<MpvObject *> *m_itemSlot = nullptr;
+    // mpv_render_context 指针也不在这里：它由 MpvObject 持有，
+    // create 在渲染线程、free 在 ~MpvObject（GUI 线程），
+    // 中间由 item->m_renderMutex 栅栏保证渲染线程已退出 render()。
+};
+
+// ===========================================================================
+// mpv 资源的后台清理 job（照搬 MpvObjectD3D11.cpp:142-175 的结构）
+// ===========================================================================
+// 为什么需要它：mpv_render_context_free() 与 mpv_terminate_destroy() 都要
+// 等 mpv 核心线程退出，内部是无界等待（mpv 源码 vo_libmpv.c 里
+// mp_dispatch_queue_process(ctx->dispatch, INFINITY) 一类）。在 GUI 线程
+// 同步做会把整个事件循环冻住 —— 这正是用户抱怨的"关闭播放器卡住"。
+// 投给渲染线程后台做，GUI 线程立即返回。
+//
+// 三个关键约束（都是踩过坑才写下的）：
+//  1. **绝不捕获 this**：job 可能在 MpvObject 析构之后才执行。所有需要的
+//     指针按值拷贝进来。
+//  2. **绝不持有 m_renderMutex**：job 在渲染线程跑，若它持锁，GUI 线程后续
+//     任何拿锁（如下一次析构的栅栏）都会卡死。栅栏锁只在 ~MpvObject 里
+//     "拿一次立即释放"，绝不跨越到 job。
+//  3. **free 必须先于 terminate**：mpv 文档要求"You must free the context
+//     with mpv_render_context_free() before the mpv core is destroyed"。
+//     二者在同一线程（job 线程）内顺序执行，天然满足。
+//
+// 生命周期：
+//   创建   : ~MpvObject（GUI 线程），new 出来后交给 scheduleRenderJob
+//   所有权 : 转移给 Qt —— Qt 在 job 执行完毕后 delete 它
+//            （QQuickWindow::scheduleRenderJob 文档：the window takes
+//             ownership over job and will delete it when the job is completed）
+//   执行   : 渲染线程，BeforeSynchronizingStage 阶段
+//   若窗口先销毁: Qt 会 delete 掉未执行的 job 而**不调用 run()**
+//            （Qt 文档："If rendering is shut down before job has a chance
+//             to run, the job will be run and then deleted as part of the
+//             scene graph cleanup." —— 注意这里是"run 然后 delete"；
+//             但若窗口从未曝光渲染，则只 delete 不 run，此时 mpv 资源
+//             由进程退出时的 OS 回收，不会泄漏到用户可感知的程度）。
+//
+// 关于"free 在渲染线程做是否安全"：mpv 1.105+ 已解除"必须与 create 同线程"
+// 的限制（本项目 client.h:251 的 API 版本是 2.6），且我们不设
+// MPV_RENDER_PARAM_ADVANCED_CONTROL，详见 ~MpvObject 处的说明。
+// ===========================================================================
+namespace {
+
+class CleanupJob : public QRunnable
+{
+public:
+    CleanupJob(mpv_render_context *mpvRender, mpv_handle *mpv)
+        : m_mpvRender(mpvRender)
+        , m_mpv(mpv)
     {
-        // 不调用 QQuickItem::update()。
-        // mpv update callback 频率 = 视频/直播流出帧率，与 vsync(60fps) 不一致，
-        // 会干扰 QSG 动画驱动器，导致其切换到 timer mode(~30fps)。
-        //
-        // QSG 的渲染节奏由 MpvObject 的 16ms QTimer、DanmakuOverlay._renderDriver
-        // NumberAnimation 与 frameSwapped->update() 共同维持，
-        // 使 QSG 尽量保持在 60fps。
-        // mpv item 的 render() 会随 QSG 的 60fps 帧率被调用，画面正常更新。
+        // autoDelete 默认即true —— Qt 在run() 返回后 delete 本对象。
+        setAutoDelete(true);
+    }
+
+    void run() override
+    {
+        QElapsedTimer t;
+        t.start();
+
+        // 顺序不可调换：先 free render context，再 terminate core
+        // （mpv 文档硬要求，见上方说明）。
+        qWarning() << "[MpvObject] cleanup job: freeing render context";
+        if (m_mpvRender) {
+            mpv_render_context_free(m_mpvRender);
+            m_mpvRender = nullptr;
+        }
+        qWarning() << "[MpvObject] cleanup job: terminating mpv";
+        if (m_mpv) {
+            // 同为 void 返回、无错误码可查（render.h:747 / client.h:542）。
+            mpv_terminate_destroy(m_mpv);
+            m_mpv = nullptr;
+        }
+
+        qWarning() << "[MpvObject] cleanup job done in" << t.elapsed() << "ms";
     }
 
 private:
-    // 指向 MpvObject 内部的原子槽（见构造函数的说明），**不缓存对象指针**。
-    std::atomic<MpvObject *> *m_itemSlot = nullptr;
+    mpv_render_context *m_mpvRender = nullptr;
     mpv_handle *m_mpv = nullptr;
-    // mpv_render_context 指针**不在这里**持有：它由 MpvObject 持有，
-    // 因为 create 在渲染线程、而 free 在 ~MpvObject（GUI 线程），
-    // 中间由 item->m_renderMutex 栅栏保证渲染线程已退出 render()。
 };
+
+} // namespace
+
+// ---------------------------------------------------------------------------
+// MpvObject 实现
+// ---------------------------------------------------------------------------
 
 MpvObject::MpvObject(QQuickItem *parent)
     : QQuickFramebufferObject(parent)
@@ -434,6 +582,13 @@ MpvObject::MpvObject(QQuickItem *parent)
 
 MpvObject::~MpvObject()
 {
+    // [DIAG] 崩溃定位用：记录析构时刻 mpv 资源状态。
+    // 判读：崩溃日志里若**没有**这条，说明 item 一直存活 ⇒ 问题在打开路径；
+    // 若有，且紧邻崩溃 ⇒ 是析构时序问题。
+    qWarning() << "[DIAG][MpvObject] item dtor enter"
+               << "core=" << (m_mpv ? "alive" : "null")
+               << "renderCtx=" << (m_mpvRender.load(std::memory_order_acquire)
+                                       ? "alive" : "null");
     // 【P0-2】第一件事就是断开与 renderer 的握手。
     //
     // Qt 销毁顺序：~QQuickItem 在 GUI 线程只把场景图节点标记删除，实际
@@ -445,10 +600,12 @@ MpvObject::~MpvObject()
 
     stopRenderTimer();
 
-    // 断开窗口信号，防止销毁过程中 frameSwapped 触发 update()
+    // 断开窗口信号，防止销毁过程中frameSwapped 触发 update()。
+    // 注意：**这里不能把 m_window 置空** —— 下面的 windowAlive 判断依赖它
+    // （照搬 D3D11 的顺序：先 disconnect，再在第 4 步判断窗口是否存活，
+    //  清理走投 job 还是同步做）。置空动作放在第 4 步用完窗口之后。
     if (m_window) {
         disconnect(m_window, &QQuickWindow::frameSwapped, this, &MpvObject::update);
-        m_window = nullptr;
     }
 
     // ==================================================================
@@ -490,7 +647,7 @@ MpvObject::~MpvObject()
 
     // ---- 3. 渲染栅栏：等渲染线程退出临界区（照搬 MpvObjectD3D11.cpp:122-134）----
     // 只拿锁、不在锁内做清理：拿一次锁即证明"渲染线程当前不在 mpv 调用里"，
-    // 随即释放。这与 D3D11 的用法完全一致。
+    // 随即释放。**绝不能把锁交给下面的 job**（见job 处的说明）。
     qWarning() << "[MpvObject] acquiring render mutex for sync cleanup";
     {
         QElapsedTimer t;
@@ -500,34 +657,46 @@ MpvObject::~MpvObject()
     }
     qWarning() << "[MpvObject] render thread is out of render()/createFramebufferObject()";
 
-    // ---- 4. 释放 mpv：先 free context，再 terminate core（GUI 线程，严格顺序）----
-    {
-        mpv_render_context *ctx = m_mpvRender.exchange(nullptr, std::memory_order_acq_rel);
-        if (ctx) {
-            qWarning() << "[MpvObject] freeing mpv_render_context";
-            // 注意：mpv_render_context_free() 的签名是 **void**
-            // （render.h:747 "MPV_EXPORT void mpv_render_context_free(...)"），
-            // **没有返回值可判**。失败只能通过"指针是否有效"间接发现——
-            // 而本项目所有调用点都在析构收尾路径上，没有别处能报告失败。
-            // 因此这里只能记录调用事实；真正可检测的异常情况是"重复释放"，
-            // 而那已由上面 exchange(nullptr) 的原子取出天然排除。
-            // （曾尝试写成 `if (mpv_render_context_free(ctx) < 0)`，编译器
-            //  报 "invalid operands of types 'void' and 'int'"——写出来才发现
-            //  这两个函数根本不返回错误码。特此记录，避免后人再踩。）
-            mpv_render_context_free(ctx);
+    // ---- 4. 把 mpv 清理交给后台 job（照搬 MpvObjectD3D11.cpp:136-186）----
+    //
+    // 【为什么必须投出去而不是同步做】mpv 侧这两个函数都要等核心线程退出，
+    // 内部是无界等待（mpv 源码：mp_dispatch_queue_process(..., INFINITY) 一类）。
+    // 同步做 = GUI 线程被冻住 = 整个程序卡住（用户抱怨的现象）。
+    // Windows 版从一开始就走"投job、GUI 立即返回"，Linux 版此前漏了这一半。
+    //
+    // 【窗口已销毁时只能同步做】scheduleRenderJob 依赖窗口的渲染线程；
+    // 窗口都没了就没有渲染线程可投递。那种情况（退出程序时）同步做可接受。
+    const bool windowAlive = m_window && !m_window.isNull();
+    qWarning() << "[MpvObject] window alive:" << windowAlive;
+
+    // 按值取出并本地置空：无论走哪条分支，本对象都不再持有这些指针
+    //（所有权已转移给 job，或已在下方同步释放）。
+    mpv_render_context *mpvRender = m_mpvRender.exchange(nullptr, std::memory_order_acq_rel);
+    mpv_handle *mpv = m_mpv;
+    m_mpv = nullptr;
+
+    if (windowAlive) {
+        qWarning() << "[MpvObject] scheduling cleanup job on render thread";
+        auto *job = new CleanupJob(mpvRender, mpv);
+        m_window->scheduleRenderJob(job, QQuickWindow::BeforeSynchronizingStage);
+        // 所有权已转移给 job（Qt 会在 job 执行后 delete 它）。
+        // 本对象此后不再触碰 mpvRender / mpv。
+    } else {
+        // 窗口已销毁（或从未挂到窗口）：无处投递，同步做。
+        qWarning() << "[MpvObject] window gone, releasing mpv synchronously";
+        if (mpvRender) {
+            mpv_render_context_free(mpvRender);
             qWarning() << "[MpvObject] mpv_render_context freed (void return, no error code)";
         }
-    }
-    if (m_mpv) {
-        qWarning() << "[MpvObject] terminating mpv";
-        // 同上：mpv_terminate_destroy() 也是 **void**（client.h:542），
-        // 无法检查返回值。重复调用由 mpv 文档保证"仅 send quit + destroy"，
-        // 而本路径已把 m_mpv 置空、不会二次进入。
-        mpv_terminate_destroy(m_mpv);
-        qWarning() << "[MpvObject] mpv terminated (void return, no error code)";
-        m_mpv = nullptr;
+        if (mpv) {
+            mpv_terminate_destroy(mpv);
+            qWarning() << "[MpvObject] mpv terminated (void return, no error code)";
+        }
     }
     m_mpvInitialized = false;
+    // 窗口用完了才置空（顺序见第 1 步的注释）。QPointer 本身在窗口销毁时
+    // 也会自动置空，这里显式置空是为了尽快断开与窗口的引用。
+    m_window = nullptr;
 }
 
 void MpvObject::initMpv()
@@ -721,6 +890,10 @@ void MpvObject::initMpv()
     // 写 liveMode: true 触发 applyCacheOptions() 覆盖为直播档
     applyCacheOptions();
 
+    // [DIAG] 崩溃定位用：确认崩在 mpv_initialize 之前还是之后。
+    // 若日志里出现"mpv_initialize entering"但**没有**紧随其后的
+    // "mpv_initialize done"，说明崩在 mpv 初始化期间（locale/hwdec/脚本）。
+    qWarning() << "[DIAG][MpvObject] mpv_initialize entering";
     if (mpv_initialize(m_mpv) < 0) {
         qWarning() << "[MpvObject] failed to initialize mpv";
         emit errorOccurred("Failed to initialize mpv");
@@ -728,6 +901,7 @@ void MpvObject::initMpv()
         m_mpv = nullptr;
         return;
     }
+    qWarning() << "[DIAG][MpvObject] mpv_initialize done";
     m_mpvInitialized = true;
 
     applyHttpHeaders();
@@ -949,12 +1123,16 @@ void MpvObject::applyHttpHeaders()
 
 QQuickFramebufferObject::Renderer *MpvObject::createRenderer() const
 {
+    // [DIAG] 崩溃定位用：createRenderer 由 Qt 在渲染线程、场景图 sync 阶段
+    // 调用（GUI 线程被阻塞时）。若崩溃发生在本对象进入场景期间，这条日志
+    // 应该紧邻崩溃出现。
+    qWarning() << "[DIAG][MpvObject] createRenderer enter"
+               << "core=" << (m_mpv ? "alive" : "null");
     // 传**内部原子的地址**（不是 this）：renderer 与本对象在不同线程
     // 生死，必须靠原子握手而不是裸指针/QPointer（见 ~MpvRenderer）。
     // createRenderer() 是 const，但原子本身可变（读不改变值），
     // const_cast 只为把"可写地址"交给 renderer，实际只用它 load()。
-    return new MpvRenderer(const_cast<std::atomic<MpvObject *> *>(&m_rendererItem),
-                           m_mpv);
+    return new MpvRenderer(const_cast<std::atomic<MpvObject *> *>(&m_rendererItem));
 }
 
 QString MpvObject::source() const
@@ -964,6 +1142,9 @@ QString MpvObject::source() const
 
 void MpvObject::setSource(const QString &source)
 {
+    // [DIAG] 崩溃定位用：真机日志显示崩溃恒定紧随 loadData/visible=true，
+    // 这条日志用来确认崩溃发生在设source 之前还是之后。
+    qWarning() << "[DIAG][MpvObject] setSource enter:" << source;
     if (m_source == source) return;
     m_source = source;
     emit sourceChanged();
@@ -1125,6 +1306,8 @@ void MpvObject::updatePosition()
 
 void MpvObject::loadFile(const QString &file)
 {
+    // [DIAG] 崩溃定位用：真正把媒体喂给 mpv 的入口。
+    qWarning() << "[DIAG][MpvObject] loadFile enter:" << file;
     if (!m_mpv || file.isEmpty()) return;
 
     qDebug() << "[MpvObject] loadFile:" << file;
