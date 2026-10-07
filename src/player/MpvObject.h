@@ -5,6 +5,7 @@
 #include <QTimer>
 #include <QVariantMap>
 #include <QElapsedTimer>
+#include <QMutex>
 
 #include <atomic>
 
@@ -105,18 +106,9 @@ private slots:
 
 private:
     void initMpv();
-    // ---- mpv 渲染资源收尾 ----
-    // releaseMpvRenderContext()：**唯一**合法的 mpv_render_context_free()
-    //   调用点。由 sceneGraphInvalidated(DirectConnection) 触发 —— 那里既是
-    //   渲染线程、GL 上下文又保证 current，完整满足 mpv 的线程契约。
-    //   绝不能放在 GUI 线程（那里 currentContext() 恒为 nullptr）。
-    void releaseMpvRenderContext();
-    // terminateMpvCore()：终止 mpv core。可在 GUI 线程调用（非 mpv_render_*
-    //   函数，无 GL 契约要求）。幂等。
-    void terminateMpvCore();
-    // scheduleMpvTeardown()：由 ~MpvRenderer（渲染线程）调用，只置位标志
-    //   并把 core 终止排到 GUI 线程，**不碰任何 mpv 函数**。
-    void scheduleMpvTeardown();
+    // mpv 渲染资源（render context + core）的释放**全部集中在 ~MpvObject**
+    // 内、GUI 线程、严格按"先 free context 后 terminate core"顺序执行。
+    // 依据与顺序保证说明见 MpvObject.cpp 中 ~MpvObject 的长注释。
     void applyHttpHeaders();
     void loadFile(const QString &file);
     void startRenderTimer();
@@ -133,24 +125,22 @@ private:
     // when the scenegraph is invalidated or it is removed from the scene"：
     // 尺寸变化只重建 FBO、**复用同一个 renderer**，并不会触发下面的机制。
     //
-    // 【现状：接近死代码，但保留】
-    // 触发点现在只剩 sceneGraphInvalidated 一条路径，而它通常发生在
-    // **页面切换 / 窗口关闭**时 —— 那种场景下紧接着就是 core terminate，
-    // m_mpv 已是 nullptr，verifyVideoChainAlive() 会在 `if (!m_mpv) return;`
-    // 处直接退出，什么也不做。
-    // 也就是说：m_renderContextFreed / m_videoReinitPending / reinitVideoChain()
-    // / verifyVideoChainAlive() 这整套**当前不会真正生效**。
+    // 【现状：保留，但触发条件已改变】
+    // 唯一还会置位 m_renderContextFreed 的地方是 ~MpvObject 里的
+    // mpv_render_context_free() —— 而那之后紧接着就是 mpv_terminate_destroy()，
+    // core 已死。所以正常"页面切换 / 窗口关闭"路径上，verifyVideoChainAlive()
+    // 会在 `if (!m_mpv) return;` 处直接退出，什么也不做。
     //
     // 为什么仍然保留而不是删掉：
-    //   1. sceneGraphInvalidated 并非只由"销毁"触发 —— 窗口 hide/show
-    //      （切到小窗、锁屏、切换虚拟桌面）也会触发，此时 core 仍存活，
-    //      重建 context 后**确实需要**重选视频轨，否则是黑屏。
-    //   2. 删掉等于放弃这条已验证必要的兜底，将来有人遇到黑屏会很难查。
-    // 若要清理，应连同"小窗切换后黑屏"一并验证后再删，单独删不安全。
+    //   FBO 失效/窗口重建时 Qt 会**重建 renderer 与 context，而 core 仍存活**
+    //   ——那种场景下 mpv 不会自动把 VO 重新挂到新 context 上
+    //   （mpv 源码 vo_libmpv.c 的 render_context_create() 无 reinit 逻辑），
+    //   不重选视频轨就是黑屏。这条兜底正是为它准备的。
+    //   删掉等于放弃这条已验证必要的兜底，将来有人遇到"重建后黑屏"会很难查。
+    // 若要清理，应连同"FBO 重建后黑屏"一并验证后再删，单独删不安全。
     //
-    // 原理仍然正确（mpv 源码 vo_libmpv.c：render_context_create() 无 reinit
-    // 逻辑，free 后的 context 不会自动重新挂接 VO），只是当前缺少一个
-    // "core 仍存活就重建"的实测场景来证明它工作。
+    // 原理仍然正确（见上），只是缺少一个"core 仍存活就重建"的真机实测
+    // 场景来证明它工作——这一点尚未验证，不要当成已确认有效。
     void reinitVideoChain();
     // 延迟校验重建后视频链是否存活（video-params），死链则重试重选。
     // 【当前基本不生效】见上：收尾路径下 m_mpv 已空，会立即返回。
@@ -186,17 +176,24 @@ private:
     QQuickWindow *m_window = nullptr;
     QTimer *m_renderTimer = nullptr;
 
+    // ==================================================================
+    // GUI 线程（析构）与渲染线程（createFramebufferObject/render）之间的
+    // 同步。与 MpvObjectD3D11.h:184-189 完全同名同语义。
+    //
+    // m_renderMutex 保护 mpv_render_context_render / mpv_render_context_free
+    //   不并发：析构函数用它做**栅栏**——拿一次锁即证明"渲染线程已不在
+    //   临界区里"，随后立刻释放（不是持锁做清理，见 ~MpvObject）。
+    // m_shuttingDown 让渲染入口在收尾期间提前 return，避免新的渲染进入。
+    //
+    // 为什么 Linux 版必须有这个、以及此处踩过的坑，见 MpvObject.cpp
+    // 文件顶部的「渲染线程收尾方案的历史教训」注释块。
+    // ==================================================================
+    QMutex m_renderMutex;
+    std::atomic<bool> m_shuttingDown{false};
+
     // "渲染上下文已被重建、需要重选视频轨"的标记。由 MpvRenderer 置位，
     // 下一次渲染定时器在 GUI 线程消费。渲染线程→GUI 线程，用 atomic 同步。
     std::atomic<bool> m_videoReinitPending{false};
-
-    // 【注意：一次性标志，永不复位】
-    // ~MpvRenderer（渲染线程）置位：要求渲染循环立刻停止碰 mpv。
-    // render() 每次进入先检查此标志，为真则直接返回。
-    // 置位后不再清零—— 因为 renderer 与 context 是一对一且随后一并销毁，
-    // 不存在"需要恢复"的场景。若将来加入 renderer 复用，必须在
-    // createFramebufferObject() 成功创建新 context 时复位，否则会永久黑屏。
-    std::atomic<bool> m_renderTeardownRequested{false};
 
     // renderer 与本对象之间的跨线程握手槽。
     // MpvRenderer 只持有**本成员的地址**，每帧重新 load，不缓存对象指针。
@@ -208,12 +205,13 @@ private:
     // 就不是合法用法（这也是本项目上一版方案被否的原因之一）。
     std::atomic<MpvObject *> m_rendererItem{this};
 
-    // mpv render context 指针：渲染线程 create，渲染线程
-    // sceneGraphInvalidated 时 free（那里 GL 上下文保证 current）。
+    // mpv render context 指针：渲染线程 create，GUI 线程
+    // 在 ~MpvObject 里经由"渲染栅栏"确认渲染线程已退出后 free
+    // （顺序保证见 ~MpvObject 的注释）。
     // 原本该指针是 MpvRenderer 的成员，导致"谁创建谁销毁"被跨线程打破；
-    // 现上移到 MpvObject，由 releaseMpvRenderContext() 统一 free。
+    // 现上移到 MpvObject，由 ~MpvObject 在拿到渲染栅栏后统一 free。
     // 用 atomic 是因为 createFramebufferObject（渲染线程）写、
-    // releaseMpvRenderContext（sceneGraphInvalidated，渲染线程）读+清。
+    // ~MpvObject（GUI 线程）读+清。
     std::atomic<mpv_render_context *> m_mpvRender{nullptr};
 
     // "曾经 free 掉过一个已建立的 mpv render context"标记。在
