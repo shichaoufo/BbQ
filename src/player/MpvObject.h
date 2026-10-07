@@ -6,6 +6,7 @@
 #include <QVariantMap>
 #include <QElapsedTimer>
 #include <QMutex>
+#include <QPointer>
 
 #include <atomic>
 
@@ -173,7 +174,11 @@ private:
     // 记录这个状态才能让 setLiveMode 在"QML 绑定晚于构造"时也真正生效。
     bool m_mpvInitialized = false;
 
-    QQuickWindow *m_window = nullptr;
+    // 用 QPointer 而非裸指针（与 MpvObjectD3D11.h:152 一致）：析构时需要
+    // 判断"窗口是否还活着"来决定清理走投job 还是同步做，而裸指针在窗口
+    // 先于本对象销毁时会是悬垂指针，isNull() 判断本身就会崩。
+    // QPointer 在 QQuickWindow 被销毁时自动置空，可安全查询。
+    QPointer<QQuickWindow> m_window;
     QTimer *m_renderTimer = nullptr;
 
     // ==================================================================
