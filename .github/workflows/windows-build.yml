@@ -149,9 +149,18 @@ jobs:
           Copy-Item "third_party\mpv-dev\runtime\*.dll" $binDir -Force
           Get-ChildItem $binDir | ForEach-Object { $_.Name }
 
+      # 只在 push / 手动触发时上传产物。
+      #
+      # 为什么排除 PR：PR 需要的只是"能否编译"这个信号，产物没人下载，
+      # 但每次 PR 都会上传一整个 windeployqt 部署目录（运行库 + libmpv +
+      # ffmpeg 全家桶，200+ MB）。私人仓库的 artifact 配额与 GitHub Packages
+      # 共用同一池（Free 仅 500 MB），且删除后要 6-12 小时才重算用量 ——
+      # 一旦超限，后续构建会卡在最后这步上传，整个 check 标红，
+      # 看起来像编译失败，实际前面的编译早就成功了。
       - name: Upload artifact
+        if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@v4
         with:
           name: BbQ-Windows-x64
           path: ${{ env.BIN_DIR }}
-          retention-days: 14
+          retention-days: 3

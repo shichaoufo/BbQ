@@ -169,4 +169,6 @@ jobs:
         with:
           name: BbQ-macOS-arm64
           path: BbQ-macOS-arm64.dmg
-          retention-days: 14
+          # 缩短保留期：artifact 配额与 Packages 共用（Free 500 MB），
+          # 保留太久会挤占后续构建的上传额度。手动重跑即可拿新产物。
+          retention-days: 3

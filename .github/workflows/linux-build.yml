@@ -452,7 +452,8 @@ jobs:
         with:
           name: BbQ-Linux-x64
           path: BbQ-Linux-x64.tar.gz
-          retention-days: 14
+          # 缩短保留期：artifact 配额与 Packages 共用（Free 500 MB）。
+          retention-days: 3
 
       # ===== .deb 打包 =====
       # 用户诉求原文："我们不能编译成 .deb 文件吗，这样linux 装上后可以像
@@ -693,4 +694,5 @@ jobs:
         with:
           name: BbQ-Linux-amd64-deb
           path: BbQ-Linux-amd64.deb
-          retention-days: 14
+          # 缩短保留期：artifact 配额与 Packages 共用（Free 500 MB）。
+          retention-days: 3
