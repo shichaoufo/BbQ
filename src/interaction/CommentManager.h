@@ -28,10 +28,30 @@ public:
 
     struct EmoteInfo {
         QString text;        // 表情文本如 "[微笑]"
-        QString url;         // 表情图片URL
+        QString url;         // 表情图片URL（静态，PNG）
+        QString gifUrl;      // 动图URL。服务端仅对动态表情下发 gif_url，
+                             // 且实测 web 接口无 webp_url（那是 gRPC 专有字段）
         int type;            // 表情类型
         int width;           // 图片宽度
         int height;          // 图片高度
+        bool isAnimated = false; // 是否动态表情（gif_url 非空）
+    };
+
+    // 评论正文中的可跳转项（来自 content.jump_url）。
+    // 旧实现只取了 title，把判据字段全丢了 → 只能一律染蓝，
+    // 于是实测 67% 的"链接"其实是正文里的普通词语（词搜索热词）。
+    struct JumpUrlInfo {
+        QString key;          // 原文（正则匹配用）
+        QString title;        // 显示文本
+        QString prefixIcon;   // 前缀小图标（商品/活动等）
+        QString appUrlSchema; // APP 跳转 scheme，如 bilibili://video/xxx
+        QString pcUrl;        // PC 跳转 url
+        QString icon;         // 图标
+        bool underline = false;   // 是否显示下划线
+        bool matchOnce = false;   // 是否只处理一次
+        bool isWordSearch = false; // ★ 词搜索热词。实测 54 条 jump_url 中
+                                   //   36 条（67%）为此类，正文里就是普通词语，
+                                   //   默认不染（PiliPlus 同策略，enableWordRe 默认 false）
     };
 
     struct PictureInfo {
@@ -78,10 +98,20 @@ public:
         // 表情字典：表情文本 -> 表情信息
         QMap<QString, EmoteInfo> emotes;
         // 评论中的跳转链接：原文本 -> 显示标题（用于购物链接等）
+        // 【已废弃】仅保留 title，不含判据字段。新代码请用 jumpUrlInfos。
         QMap<QString, QString> jumpUrls;
+        // 评论中的跳转链接完整信息：原文本 -> JumpUrlInfo。
+        // 承载 is_word_search / app_url_schema / prefix_icon 等判据字段，
+        // 是消除"该不该染蓝"误判的数据来源
+        QMap<QString, JumpUrlInfo> jumpUrlInfos;
         // 正文 @提及的用户名列表（来自 content.members，仅@面板插入的
         // 真提及有数据；手打 @ 不在此列）
         QStringList atNames;
+        // 正文 @提及的用户名 -> mid。有 mid 才能让 @ 真正可点。
+        // 旧实现只取了 uname，导致 @ 只能染蓝、无法跳转
+        QMap<QString, QString> atNameToMid;
+        // 正文话题标签（来自 content.topic，服务端登记过的 #话题#）
+        QStringList topics;
         // 个性装扮 - 评论卡片背景
         UserSailing userSailing;
         // 头像框

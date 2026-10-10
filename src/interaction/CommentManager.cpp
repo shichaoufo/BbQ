@@ -630,30 +630,72 @@ CommentManager::Comment CommentManager::parseCommentObject(const QJsonObject &ob
         }
     }
 
-    // 解析评论中的跳转链接 content.jump_url（用于购物链接、活动页等）
+    // 解析评论中的跳转链接 content.jump_url
+    // 实测该表里混着三类条目，必须靠 extra.is_word_search 区分：
+    //   1) 词搜索热词（正文里的普通词语被登记成可跳转项）— 默认不染
+    //   2) 商品/活动链接 — 可染可点
+    //   3) 视频链接（key 可能直接是裸 BV 号，如 "BV1do5ezGEkR"）
+    // 旧实现只取 title，判据全丢 → 一律染蓝，这是误染的主因
     if (content.contains("jump_url")) {
         QJsonValue jumpVal = content["jump_url"];
         if (jumpVal.isObject()) {
             QJsonObject jumpObj = jumpVal.toObject();
             for (auto it = jumpObj.begin(); it != jumpObj.end(); ++it) {
+                const QString key = it.key();
                 QJsonObject detail = it.value().toObject();
-                QString title = detail["title"].toString();
-                QString key = it.key();
-                // 没有 title 时回退到原文本
-                comment.jumpUrls[key] = title.isEmpty() ? key : title;
+                QJsonObject extra = detail.value("extra").toObject();
+
+                JumpUrlInfo info;
+                info.key = key;
+                info.title = detail.value("title").toString();
+                if (info.title.isEmpty()) info.title = key;
+                info.prefixIcon = detail.value("prefix_icon").toString();
+                info.icon = detail.value("icon").toString();
+                info.pcUrl = detail.value("pc_url").toString();
+                info.appUrlSchema = detail.value("app_url_schema").toString();
+                info.underline = (detail.value("underline").toInt() == 1);
+                info.matchOnce = (detail.value("match_once").toInt() == 1);
+                // 判据可能出现在 detail 顶层，也可能在 extra 里（两种都实测到过）
+                if (extra.contains("is_word_search")) {
+                    info.isWordSearch = (extra.value("is_word_search").toInt() == 1);
+                } else {
+                    info.isWordSearch = (detail.value("is_word_search").toInt() == 1);
+                }
+                comment.jumpUrlInfos.insert(key, info);
+                // 兼容旧字段（不含判据），旧调用点可继续工作
+                comment.jumpUrls[key] = info.title;
+            }
+        }
+    }
+
+    // 解析正文话题标签 content.topic（服务端登记过的 #话题#）
+    if (content.contains("topic")) {
+        QJsonValue topicVal = content["topic"];
+        if (topicVal.isObject()) {
+            QJsonObject topicObj = topicVal.toObject();
+            for (auto it = topicObj.begin(); it != topicObj.end(); ++it) {
+                if (!it.key().isEmpty()) {
+                    comment.topics.append(it.key());
+                }
             }
         }
     }
 
     // 解析正文 @提及用户 content.members（仅@面板插入的真提及，
-    // 手打 @ 服务端不登记）
+    // 手打 @ 服务端不登记）。mid 必须一起取——旧实现只取 uname，
+    // 导致 @ 只能染蓝、点不动
     if (content.contains("members")) {
         QJsonValue membersVal = content["members"];
         if (membersVal.isArray()) {
             for (const QJsonValue &mv : membersVal.toArray()) {
-                QString uname = mv.toObject()["uname"].toString();
-                if (!uname.isEmpty()) {
-                    comment.atNames.append(uname);
+                QJsonObject mObj = mv.toObject();
+                QString uname = mObj["uname"].toString();
+                if (uname.isEmpty()) continue;
+                comment.atNames.append(uname);
+                qint64 midVal = mObj["mid"].toVariant().toLongLong();
+                QString mid = (midVal > 0) ? QString::number(midVal) : mObj["mid_str"].toString();
+                if (!mid.isEmpty() && mid != "0") {
+                    comment.atNameToMid.insert(uname, mid);
                 }
             }
         }
@@ -670,6 +712,12 @@ CommentManager::Comment CommentManager::parseCommentObject(const QJsonObject &ob
                 EmoteInfo info;
                 info.text = emoteText;
                 info.url = emoteDetail["url"].toString();
+                // 动态表情：服务端额外下发 gif_url（实测为真 GIF，非 APNG/动图 WebP）。
+                // 旧实现只读 url → 动态表情退化成静态 PNG。
+                // 注意：这里只记录，是否用动图渲染由 UI 决定（Qt 富文本 <img>
+                // 即便喂 gif 也只画第一帧，白白多下载几倍体积）
+                info.gifUrl = emoteDetail["gif_url"].toString();
+                info.isAnimated = !info.gifUrl.isEmpty();
                 info.type = emoteDetail["type"].toInt();
                 if (emoteDetail.contains("meta")) {
                     QJsonObject meta = emoteDetail["meta"].toObject();
@@ -732,13 +780,47 @@ QVariantMap CommentManager::commentToMap(const Comment &comment) const
     }
     map["jumpUrls"] = jumpUrlMap;
 
+    // 完整跳转信息（含判据字段）。QML 侧优先用它，jumpUrls 仅作旧数据兼容
+    QVariantMap jumpUrlInfoMap;
+    for (auto it = comment.jumpUrlInfos.begin(); it != comment.jumpUrlInfos.end(); ++it) {
+        const JumpUrlInfo &j = it.value();
+        QVariantMap jm;
+        jm["key"] = j.key;
+        jm["title"] = j.title;
+        jm["prefixIcon"] = j.prefixIcon;
+        jm["appUrlSchema"] = j.appUrlSchema;
+        jm["pcUrl"] = j.pcUrl;
+        jm["icon"] = j.icon;
+        jm["underline"] = j.underline;
+        jm["matchOnce"] = j.matchOnce;
+        jm["isWordSearch"] = j.isWordSearch;
+        jumpUrlInfoMap[it.key()] = jm;
+    }
+    map["jumpUrlInfos"] = jumpUrlInfoMap;
+    // ListModel 存嵌套 map 时角色会失效（QML 侧 m.jumpUrlInfos[key] 取不到值），
+    // 与既有 atNamesJson 同理：序列化成 JSON 字符串往返，QML 侧 JSON.parse
+    map["jumpUrlInfosJson"] = QString::fromUtf8(
+        QJsonDocument(QJsonObject::fromVariantMap(jumpUrlInfoMap)).toJson(QJsonDocument::Compact));
+
     map["atNames"] = comment.atNames;
+
+    QVariantMap atMidMap;
+    for (auto it = comment.atNameToMid.begin(); it != comment.atNameToMid.end(); ++it) {
+        atMidMap[it.key()] = it.value();
+    }
+    map["atNameToMid"] = atMidMap;
+    map["atNameToMidJson"] = QString::fromUtf8(
+        QJsonDocument(QJsonObject::fromVariantMap(atMidMap)).toJson(QJsonDocument::Compact));
+
+    map["topics"] = comment.topics;
 
     QVariantMap emoteMap;
     for (auto it = comment.emotes.begin(); it != comment.emotes.end(); ++it) {
         QVariantMap e;
         e["text"] = it.value().text;
         e["url"] = it.value().url;
+        e["gifUrl"] = it.value().gifUrl;
+        e["isAnimated"] = it.value().isAnimated;
         e["type"] = it.value().type;
         e["width"] = it.value().width;
         e["height"] = it.value().height;
