@@ -675,89 +675,6 @@ Rectangle {
         return String(str).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
     }
 
-    function replaceEmotesInHtml(htmlText, emotes) {
-        if (!emotes) return htmlText
-        return htmlText.replace(/\[[^\[\]]+\]/g, function(match) {
-            var e = emotes[match]
-            if (!e || !e.url) return match
-            var size = e.width || 24
-            if (size <= 0) size = 24
-            return '<img src="' + e.url + '" width="' + size + '" height="' + size + '" align="middle" style="vertical-align:middle;">'
-        })
-    }
-
-    // 判断 jump_url 的 key 是否为可跳转的视频链接，返回 BV/av 号（大写 BV）或空串。
-    // 仅静态识别两类：bilibili.com/video/BVxxx|avxxx 直链、b23.tv/BVxxx|avxxx 直书短链
-    //（b23.tv 随机码短链目标不确定，mall/link 外链为商品页，均不跳转）。
-    function videoIdFromJumpKey(key) {
-        if (!key) return ""
-        var m = key.match(/bilibili\.com\/video\/(BV[0-9A-Za-z]{10}|av[0-9]+)/i)
-        if (m) return m[1]
-        m = key.match(/b23\.tv\/(BV[0-9A-Za-z]{10}|av[0-9]+)(?:[/?#]|$)/i)
-        if (m) return m[1]
-        return ""
-    }
-
-    // 返回结果已经过 HTML 转义，可直接用于 RichText。
-    // 视频类链接（bilibili.com/video 直链 / b23.tv 直书短链）替换为可点击链接，
-    // 其余（商品外链、搜索热词等）仅染蓝不可点击。
-    function replaceJumpUrls(htmlText, jumpUrls) {
-        if (!jumpUrls) return pageRoot.escapeHtml(htmlText)
-        var keys = Object.keys(jumpUrls)
-        if (keys.length === 0) return pageRoot.escapeHtml(htmlText)
-        // 按长度降序，避免短 key 先替换导致长 key 无法匹配
-        keys.sort(function(a, b) { return b.length - a.length })
-
-        var result = ""
-        var pos = 0
-        while (pos < htmlText.length) {
-            var matched = false
-            for (var i = 0; i < keys.length; i++) {
-                var key = keys[i]
-                if (htmlText.substring(pos, pos + key.length) === key) {
-                    var title = jumpUrls[key] || key
-                    var videoId = pageRoot.videoIdFromJumpKey(key)
-                    if (videoId !== "") {
-                        result += '<a href="video:' + pageRoot.escapeHtml(videoId) + '" style="color:#00A1D6;text-decoration:none;">' + pageRoot.escapeHtml(title) + '</a>'
-                    } else {
-                        result += '<span style="color:#00A1D6;">' + pageRoot.escapeHtml(title) + '</span>'
-                    }
-                    pos += key.length
-                    matched = true
-                    break
-                }
-            }
-            if (!matched) {
-                result += pageRoot.escapeHtml(htmlText[pos])
-                pos++
-            }
-        }
-        return result
-    }
-
-    // 将评论中的时间戳（MM:SS 或 HH:MM:SS，冒号支持半角/全角）替换为蓝色可点击链接，
-    // 点击后跳转播放进度。输入必须是已经过 HTML 转义的文本。
-    function replaceTimeStamps(htmlText) {
-        return htmlText.replace(/(\d{1,2})[：:](\d{2})(?:[：:](\d{2}))?/g, function(match, p1, p2, p3) {
-            var hours = 0, minutes = 0, seconds = 0
-            if (p3 !== undefined && p3 !== "") {
-                hours = parseInt(p1, 10)
-                minutes = parseInt(p2, 10)
-                seconds = parseInt(p3, 10)
-            } else {
-                minutes = parseInt(p1, 10)
-                seconds = parseInt(p2, 10)
-            }
-            // 简单校验，避免把普通数字组合误判为时间
-            if (minutes >= 60 || seconds >= 60) return match
-            var totalMs = (hours * 3600 + minutes * 60 + seconds) * 1000
-            var duration = mpvPlayer.duration > 0 ? mpvPlayer.duration
-                                                   : (pageRoot.videoDuration > 0 ? pageRoot.videoDuration * 1000 : 0)
-            if (duration > 0 && totalMs > duration) totalMs = duration
-            return '<a href="timestamp:' + totalMs + '" style="color:#00A1D6;text-decoration:none;">' + match + '</a>'
-        })
-    }
-
     // 用候选用户名集合切分楼中楼的"回复 @xxx"前缀：优先在候选集合中做最长前缀
     // 匹配（候选 = 根评论作者 + 已加载子评论作者，服务端不单独下发被回复者），
     // 匹配失败再回退到首个冒号启发式。返回 {prefix, rest} 或 null。
@@ -809,48 +726,65 @@ Rectangle {
         return m.atNames || []
     }
 
-    // 将正文中所有出现的 token 替换为染蓝 span（非重叠、顺序扫描，
-    // 不会重复匹配已插入的 span 内容）
-    function colorAllOccurrences(htmlText, token) {
-        var out = ""
-        var pos = 0
-        var idx = htmlText.indexOf(token)
-        while (idx >= 0) {
-            out += htmlText.substring(pos, idx)
-                + '<span style="color:#00A1D6;">' + token + '</span>'
-            pos = idx + token.length
-            idx = htmlText.indexOf(token, pos)
+    // 评论正文富文本渲染 —— 统一委托 GlobalState.formatCommentRichText。
+    //
+    // 旧实现是 4 个正则函数串行在"已生成的 HTML"上跑
+    //（replaceJumpUrls → replaceTimeStamps → replaceAtMentions → replaceEmotesInHtml，
+    //  见 git 历史）。它有两个根因缺陷：
+    //   1) 把服务端下发的全部 jump_url 无差别染蓝。实测 54 条 jump_url 中
+    //      36 条（67%）是"词搜索热词"——正文里的普通词语被服务端登记成可跳转项，
+    //      唯一判据是 extra.is_word_search，而旧实现把它丢了：该染的没染、
+    //      不该染的全蓝。
+    //   2) 在结果 HTML 上二次跑正则，先插入的 <a> 标题会被后续正则再次匹配，
+    //      生成嵌套 <a> 标签。
+    // 新实现只在原始纯文本上扫一遍：服务端 token 优先查表、泛化正则垫底。
+    //
+    // 参数 jumpUrlInfos：content.jump_url 的完整信息表
+    //        （{原文: {title, isWordSearch, appUrlSchema, prefixIcon, ...}}），
+    //        不再是旧版的 {原文: 标题} 字符串表。
+    // 参数 atNameToMid：正文 @提及的 用户名 -> mid，有 mid 才能点击跳转主页。
+    // 本组件持有播放器上下文，故 hasPlayer=true：时间戳在
+    // 校验（数字边界 + 不超视频时长）通过后才生成可点击链接。
+    function formatCommentContent(content, emotes, isReply, jumpUrlInfos, candidateNames, atNameToMid) {
+        var prefixHtml = ""
+        var body = content || ""
+        if (isReply) {
+            // 楼中楼"回复 @xxx："前缀用次要色单独显示（前缀切分逻辑保留原实现）
+            var sp = pageRoot.splitReplyPrefix(body, candidateNames)
+            if (sp) {
+                prefixHtml = '<span style="color:' + FluTheme.fontSecondaryColor + ';">'
+                           + pageRoot.escapeHtml(sp.prefix) + '</span>'
+                body = sp.rest
+            }
         }
-        return out + htmlText.substring(pos)
+        var bodyHtml = GlobalState.formatCommentRichText(body, emotes, {}, atNameToMid, jumpUrlInfos, {
+            linkColor: "#00A1D6",
+            hasPlayer: true,
+            durationMs: pageRoot.videoDuration > 0 ? pageRoot.videoDuration * 1000 : 0,
+            showPrefixIcon: true
+        })
+        if (prefixHtml === "") return bodyHtml
+        return prefixHtml + '<span style="color:' + FluTheme.fontPrimaryColor + ';">' + bodyHtml + '</span>'
     }
 
-    // 将正文中的 @提及（@昵称）染蓝（与链接同色）。
-    // 仅用服务端 content.members 数据精确匹配（@面板插入的真提及），
-    // 手打 @ 服务端不登记、此处也不染——与官方客户端行为完全一致。
-    // 输入必须是已经过 HTML 转义的文本。
-    function replaceAtMentions(htmlText, atNames) {
-        if (!atNames || atNames.length === 0) return htmlText
-        for (var i = 0; i < atNames.length; i++) {
-            var n = atNames[i]
-            if (!n || n.length < 1) continue
-            // 名字需与已转义文本做同样转义后匹配
-            htmlText = pageRoot.colorAllOccurrences(htmlText, "@" + pageRoot.escapeHtml(n))
+    // 取评论的 jump_url 完整信息表。ListModel 存嵌套 map 时角色会失效
+    //（m.jumpUrlInfos[key] 取不到值），故 C++ 侧另导出 jumpUrlInfosJson 字符串，
+    // 与既有 atNamesJson 同一套路；楼中楼经 JSON 往返后可能已是对象，两者兼容。
+    function jumpInfosOf(m) {
+        if (!m) return {}
+        if (m.jumpUrlInfosJson !== undefined && m.jumpUrlInfosJson !== null) {
+            try { return JSON.parse(m.jumpUrlInfosJson || "{}") } catch (e) { return {} }
         }
-        return htmlText
+        return m.jumpUrlInfos || {}
     }
 
-    function formatCommentContent(content, emotes, isReply, jumpUrls, candidateNames, atNames) {
-        var text
-        var sp = isReply ? pageRoot.splitReplyPrefix(content, candidateNames) : null
-        if (sp) {
-            var gray = FluTheme.fontSecondaryColor
-            var primary = FluTheme.fontPrimaryColor
-            text = '<span style="color:' + gray + ';">' + pageRoot.escapeHtml(sp.prefix) + '</span>'
-                 + '<span style="color:' + primary + ';">' + pageRoot.replaceAtMentions(pageRoot.replaceTimeStamps(pageRoot.replaceJumpUrls(sp.rest, jumpUrls)), atNames) + '</span>'
-        } else {
-            text = pageRoot.replaceAtMentions(pageRoot.replaceTimeStamps(pageRoot.replaceJumpUrls(content || "", jumpUrls)), atNames)
+    // 取评论的 @提及 用户名 -> mid 映射（同上，JSON 字符串往返）
+    function atMidMapOf(m) {
+        if (!m) return {}
+        if (m.atNameToMidJson !== undefined && m.atNameToMidJson !== null) {
+            try { return JSON.parse(m.atNameToMidJson || "{}") } catch (e) { return {} }
         }
-        return pageRoot.replaceEmotesInHtml(text, emotes)
+        return m.atNameToMid || {}
     }
 
     // 评论图片预览
@@ -1944,37 +1878,6 @@ Rectangle {
         return Math.floor(diff / 31536000) + "年前"
     }
     
-    // av 号转 BV 号（B站公开算法，mcfx 逆向，纯本地计算无网络请求）。
-    // 仅适用于 2020-03 前的旧号段（av < 2^31），新视频评论里 av 形态极少，
-    // 失配时换算结果无效但不崩溃（openVideo 请求会返回错误）。
-    function avToBvid(avNum) {
-        var table = "fZodR9XQDSUm21yCkr6zBqiveYah8bt4xsWpHnJE7jL5VG3guMTKNPAwcF"
-        var tr = {}
-        for (var i = 0; i < 58; i++) tr[table[i]] = i
-        var s = [11, 10, 3, 8, 4, 6]
-        var xor = 177451812
-        var add = 8728348608
-        var x = (avNum ^ xor) + add
-        var r = ['B', 'V', '1', ' ', '4', ' ', '1', ' ', '7', ' ', ' ', ' ']
-        for (var j = 0; j < 6; j++) {
-            r[s[j]] = table[Math.floor(x / Math.pow(58, j)) % 58]
-        }
-        return r.join("")
-    }
-
-    // 评论中的视频链接跳转：videoId 为 BVxxx 或 avxxx（来自 videoIdFromJumpKey）。
-    // av 号本地换算成 BV 后统一走 App.openVideo 广播，由可见页面打开播放页。
-    function openVideoFromComment(videoId) {
-        if (!videoId || videoId === "") return
-        if (videoId.startsWith("BV")) {
-            App.openVideo(videoId, "")
-        } else if (/^av\d+$/i.test(videoId)) {
-            var avNum = parseInt(videoId.substring(2), 10)
-            var bvid = pageRoot.avToBvid(avNum)
-            if (bvid) App.openVideo(bvid, "")
-        }
-    }
-
     // 切换到指定分集
     function switchEpisode(aid, cid, bvid) {
         
@@ -5241,7 +5144,7 @@ Rectangle {
                                                     }
 
                                                     FluText {
-                                                        text: pageRoot.formatCommentContent(model.content, model.emotes, false, model.jumpUrls, null, pageRoot.atNamesOf(model))
+                                                        text: pageRoot.formatCommentContent(model.content, model.emotes, false, pageRoot.jumpInfosOf(model), null, pageRoot.atMidMapOf(model))
                                                         font: FluTextStyle.Body
                                                         color: FluTheme.fontPrimaryColor
                                                         textFormat: Text.RichText
@@ -5251,11 +5154,12 @@ Rectangle {
                                                         Layout.topMargin: 14
                                                         verticalAlignment: Text.AlignTop
                                                         onLinkActivated: function(link) {
+                                                            // 时间戳：本页有播放器上下文，跳转进度
+                                                            //（是否可点已在格式化阶段按"数字边界 + 不超时长"校验过）
                                                             if (link.indexOf("timestamp:") === 0) {
-                                                                var ms = parseInt(link.substring("timestamp:".length), 10)
-                                                                mpvPlayer.seek(ms)
-                                                            } else if (link.indexOf("video:") === 0) {
-                                                                pageRoot.openVideoFromComment(link.substring("video:".length))
+                                                                mpvPlayer.seek(parseInt(link.substring("timestamp:".length), 10))
+                                                            } else if (!GlobalState.openCommentLink(link)) {
+                                                                console.warn("[VideoPlayerPage] 未识别的评论链接:", link)
                                                             }
                                                         }
                                                     }
@@ -5560,8 +5464,8 @@ Rectangle {
                                                     FluText {
                                                         // 候选用户名 = 根评论作者 + 已加载子评论作者（用于
                                                         // "回复 @xxx" 前缀的精确切分，见 splitReplyPrefix）
-                                                        text: pageRoot.formatCommentContent(modelData.content, modelData.emotes, true, modelData.jumpUrls,
-                                                                                           parent.parent.parent.replyCandidates, pageRoot.atNamesOf(modelData))
+                                                        text: pageRoot.formatCommentContent(modelData.content, modelData.emotes, true, pageRoot.jumpInfosOf(modelData),
+                                                                                           parent.parent.parent.replyCandidates, pageRoot.atMidMapOf(modelData))
                                                         font: FluTextStyle.Body
                                                         color: FluTheme.fontPrimaryColor
                                                         textFormat: Text.RichText
@@ -5571,11 +5475,12 @@ Rectangle {
                                                         Layout.topMargin: 8
                                                         verticalAlignment: Text.AlignTop
                                                         onLinkActivated: function(link) {
+                                                            // 时间戳：本页有播放器上下文，跳转进度
+                                                            //（是否可点已在格式化阶段按"数字边界 + 不超时长"校验过）
                                                             if (link.indexOf("timestamp:") === 0) {
-                                                                var ms = parseInt(link.substring("timestamp:".length), 10)
-                                                                mpvPlayer.seek(ms)
-                                                            } else if (link.indexOf("video:") === 0) {
-                                                                pageRoot.openVideoFromComment(link.substring("video:".length))
+                                                                mpvPlayer.seek(parseInt(link.substring("timestamp:".length), 10))
+                                                            } else if (!GlobalState.openCommentLink(link)) {
+                                                                console.warn("[VideoPlayerPage] 未识别的评论链接:", link)
                                                             }
                                                         }
                                                     }
