@@ -23,6 +23,10 @@ Item {
     property var previewOverlayParent: panelRoot
     property string ownerMid: ""
 
+    // 页面提供的评论永久链接基址（如 "https://www.bilibili.com/video/BVxxx"），
+    // 最终格式为 {基址}#reply{rpid}。为空时右键菜单不显示"复制评论链接"。
+    property string commentPermalinkBase: ""
+
     function isUpAuthor(mid) {
         if (!panelRoot.ownerMid || mid === undefined || mid === null || mid === "") return false
         return String(mid) === String(panelRoot.ownerMid)
@@ -56,6 +60,76 @@ Item {
     // 供页面在评论数据就绪后调用：旧内容保持原位，新数据渲染时已处于顶部
     function scrollToTop() {
         if (commentFlickable) commentFlickable.contentY = 0
+    }
+
+    // ============ 评论右键菜单（复制）============
+    // 为什么不直接做"可拖拽选中"：正文所在的 Flickable 用左键拖拽滚动（触摸手势
+    // 的桌面模拟）。而 Qt 里 TextEdit 一旦 selectByMouse 为真就会
+    // setKeepMouseGrab(true)（见 qquicktextedit.cpp）—— 这正是父 Flickable 判断
+    // "能否抢走拖拽"时要看的标志位，于是"鼠标选中"与"拖拽滚动"在 Qt 层面共用同一个
+    // 开关，拆不开（Qt 文档也承认拖拽选中"interfered with flicking when TextEdit
+    // was used inside a Flickable"）。
+    // 右键菜单只接受右键，完全不碰左键事件链 —— 拖拽滚动、链接点击、表情播放
+    // 全部零影响，正文也不必从 Text 换成 TextEdit。
+    property string contextRawText: ""
+    property string contextPermalink: ""
+
+    // 供页面在"兜底右键"里判断：菜单开着时先收菜单，不要关页面/关详情。
+    readonly property bool commentMenuOpened: commentMenu.opened
+    function closeCommentMenu() { commentMenu.close() }
+
+    // QML 没有直接的剪贴板 API。隐藏 TextEdit 走 selectAll()+copy() 是标准做法：
+    // copy() 把 QTextDocument 的选中内容写入系统剪贴板，与控件是否可见无关。
+    function copyToClipboard(text) {
+        var s = String(text || "")
+        if (s === "") return
+        clipboardHelper.text = s
+        clipboardHelper.selectAll()
+        clipboardHelper.copy()
+    }
+
+    // 评论永久链接：B 站 web 的锚点约定是 {页面地址}#reply{rpid}，楼中楼也能定位。
+    function permalinkOf(rpid) {
+        if (commentPermalinkBase === "" || rpid === undefined || rpid === null) return ""
+        var id = String(rpid)
+        if (id === "" || id === "0") return ""
+        return commentPermalinkBase + "#reply" + id
+    }
+
+    // eventPoint 优先（右键落点）；取不到时退化为被点卡片的左上角，
+    // 避免菜单飘到窗口角落。
+    function openCommentContextMenu(rawText, permalink, eventPoint, anchorItem) {
+        contextRawText = String(rawText || "")
+        contextPermalink = String(permalink || "")
+        var scene = (eventPoint && eventPoint.scenePosition)
+                  ? eventPoint.scenePosition
+                  : (anchorItem ? anchorItem.mapToItem(null, 0, 0) : null)
+        if (!scene) return
+        var p = commentMenu.parent.mapFromItem(null, scene.x, scene.y)
+        commentMenu.x = p.x
+        commentMenu.y = p.y
+        commentMenu.open()
+    }
+
+    // 剪贴板助手（不可见，不参与任何布局）
+    TextEdit {
+        id: clipboardHelper
+        visible: false
+    }
+
+    // FluMenu 继承自 QtQuick.Controls.Menu，具备 x/y/open()/close()/opened
+    FluMenu {
+        id: commentMenu
+        FluMenuItem {
+            text: "复制评论内容"
+            enabled: panelRoot.contextRawText !== ""
+            onTriggered: panelRoot.copyToClipboard(panelRoot.contextRawText)
+        }
+        FluMenuItem {
+            text: "复制评论链接"
+            visible: panelRoot.contextPermalink !== ""
+            onTriggered: panelRoot.copyToClipboard(panelRoot.contextPermalink)
+        }
     }
 
     function escapeHtml(str) {
@@ -389,6 +463,19 @@ Item {
                         color: "transparent"
                         property int commentIndex: index
                         property var parentModel: model
+
+                        // 评论右键菜单（复制）。用 TapHandler 而不是铺一层 MouseArea：
+                        // ① 只接受右键，左键事件链完全不碰（拖拽滚动 / 链接点击不受影响）；
+                        // ② Handler 不是 Item，不参与布局，也不会和卡片里已有的
+                        //    头像/用户名/图片等 MouseArea 抢左键。
+                        TapHandler {
+                            acceptedButtons: Qt.RightButton
+                            onTapped: function(eventPoint) {
+                                panelRoot.openCommentContextMenu(model.content,
+                                                                 panelRoot.permalinkOf(model.rpid),
+                                                                 eventPoint, commentItem)
+                            }
+                        }
 
                         ColumnLayout {
                             id: commentItemLayout
@@ -740,8 +827,20 @@ Item {
                                     model: parent.subReplies
 
                                     RowLayout {
+                                        id: subReplyRow
                                         Layout.fillWidth: true
                                         spacing: 8
+
+                                        // 评论右键菜单（复制）：Handler 不是 Item，
+                                        // 不参与 RowLayout 布局，也不碰左键事件
+                                        TapHandler {
+                                            acceptedButtons: Qt.RightButton
+                                            onTapped: function(eventPoint) {
+                                                panelRoot.openCommentContextMenu(modelData.content,
+                                                                                 panelRoot.permalinkOf(modelData.rpid),
+                                                                                 eventPoint, subReplyRow)
+                                            }
+                                        }
 
                                         // 子评论头像可点击：打开评论作者的用户主页
                                         Item {
