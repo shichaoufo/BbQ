@@ -1551,11 +1551,19 @@ Item {
         visible: panelRoot.commentImagePreviewVisible
         z: 104
 
+        // 预览层的鼠标交互：左键单击关闭、右键弹菜单。
+        // 注意图片本身那一块落在 ImageViewer 自己的左键 MouseArea 上（要做拖动
+        // 平移，左键必须先给它），所以那块区域里的「单击关闭」由 ImageViewer 的
+        // clicked() 补上，见下面 ImageViewer 的 onClicked；右键 ImageViewer
+        // 不接收（它只声明了 LeftButton），会落回这里。
         MouseArea {
             anchors.fill: parent
             acceptedButtons: Qt.LeftButton | Qt.RightButton
             onClicked: (mouse) => {
-                panelRoot.closeCommentImagePreview()
+                if (mouse.button === Qt.RightButton)
+                    previewMenu.openAt(mouse.x, mouse.y)
+                else
+                    panelRoot.closeCommentImagePreview()
                 mouse.accepted = true
             }
         }
@@ -1567,6 +1575,18 @@ Item {
             height: parent.height - 80
             source: panelRoot.previewCurrentImageSource()
             animated: panelRoot.previewCurrentImageIsAnimated()
+            // 左键单击（按下到松开之间没拖动）＝ 关闭预览。
+            // 放大后按住左键拖动是平移，不会走到这里。
+            onClicked: panelRoot.closeCommentImagePreview()
+        }
+
+        // 右键菜单：复制图片 / 下载图片 / 重置缩放
+        ImagePreviewMenu {
+            id: previewMenu
+            imageUrl: panelRoot.previewCurrentImageSource()
+            zoomed: previewImageViewer.zoomed
+            notifyBar: infoBar
+            onResetZoomRequested: previewImageViewer.reset()
         }
 
         // 关闭按钮
