@@ -78,6 +78,10 @@ FluPage {
     // 与评论区 commentImageMaxRatio 同口径，也与 PiliPlus imgMaxRatio 一致。
     readonly property real dynamicImageMaxRatio: 2.6
 
+    // 图片网格间距：四处 GridLayout 的 rowSpacing / columnSpacing 都是 4。
+    // 单图宽度三档里的 base = (列宽 - 2 * 间距) / 3 要用到它（PiliPlus 的 space 是 5）。
+    readonly property int dynamicImageSpacing: 4
+
     Timer {
         id: selectUpTimer
         interval: 150
@@ -121,6 +125,40 @@ FluPage {
         if (cellWidth <= 0) return 0
         var ratio = picRatio > 0 ? picRatio : 1
         return cellWidth * Math.min(ratio, dynamicImageMaxRatio)
+    }
+
+    // 单图宽度三档（PiliPlus _calcGridInfo 的 isSingle 分支逐句移植，与评论区
+    // commentSingleImageSize 完全同口径）：
+    //   picRatio = 原始 高/宽；origWidth = 原图宽（<=0 表示接口没给尺寸，此时不做「不放大」约束）
+    //   宽/高 > 1.45（很宽的横图）          -> 占满正文列宽
+    //   否则 宽 >= 高 或 高宽比 < 1.5       -> 2/3 列宽（多数横图 / 方图 / 略竖的图）
+    //   否则（很竖的图）                     -> 1/2 列宽
+    //   最后 min(原图宽) 以免把小图放大。
+    function dynamicSingleImageWidth(containerWidth, origWidth, picRatio) {
+        if (containerWidth <= 0) return 0
+        var ratio = picRatio > 0 ? picRatio : 1
+        var ratioWH = 1 / ratio
+        var base = (containerWidth - dynamicImageSpacing * 2) / 3
+        var outW
+        if (ratioWH > 1.45) {
+            outW = containerWidth
+        } else if (ratioWH >= 1 || ratio < 1.5) {
+            outW = 2 * base
+        } else {
+            outW = 1.5 * base
+        }
+        if (origWidth > 0) outW = Math.min(outW, origWidth)
+        return Math.max(1, Math.min(outW, containerWidth))
+    }
+
+    // 网格宽度：单图按三档自适应，多图仍是 2/3 列宽（与视频卡片 1/3 列宽同行）。
+    //   网格层只能用列表里的模型数据 —— 拿不到 delegate 里 onSourceSizeChanged 回填的比例，
+    //   所以接口没给尺寸时比例记 0，宽度落回 2/3 档（与改造前一致，不会因为缺数据更糟）。
+    function dynamicImageGridWidth(containerWidth, images) {
+        if (!images || images.length !== 1) return containerWidth * 2 / 3
+        var p = images[0] || {}
+        var ratio = (p.width > 0 && p.height > 0) ? p.height / p.width : 0
+        return dynamicSingleImageWidth(containerWidth, p.width > 0 ? p.width : 0, ratio)
     }
 
     // 方形缩略图的裁剪锚点。B 站图床 "@<w>w_<h>h_<anchor>.jpg" 的 anchor 实测
@@ -2189,10 +2227,13 @@ FluPage {
                                                 GridLayout {
                                                     Layout.fillWidth: false
                                                     Layout.alignment: Qt.AlignLeft
-                                                    Layout.preferredWidth: forwardColumn.width * 2 / 3
+                                                    // 单图按三档宽度自适应（见 dynamicImageGridWidth），多图仍是 2/3 列宽
+                                                    Layout.preferredWidth: itemForwardImageCount === 1
+                                                                           ? dynamic_page.dynamicImageGridWidth(forwardColumn.width, itemForward.images)
+                                                                           : forwardColumn.width * 2 / 3
                                                     columns: dynamic_page.dynamicGridColumns(itemForwardImageCount)
-                                                    rowSpacing: 4
-                                                    columnSpacing: 4
+                                                    rowSpacing: dynamic_page.dynamicImageSpacing
+                                                    columnSpacing: dynamic_page.dynamicImageSpacing
                                                     visible: itemForwardImageCount > 0
 
                                                     Repeater {
@@ -2376,10 +2417,13 @@ FluPage {
                                         GridLayout {
                                             Layout.fillWidth: false
                                             Layout.alignment: Qt.AlignLeft
-                                            Layout.preferredWidth: feedCardColumn.width * 2 / 3
+                                            // 单图按三档宽度自适应（见 dynamicImageGridWidth），多图仍是 2/3 列宽
+                                            Layout.preferredWidth: itemImageCount === 1
+                                                                   ? dynamic_page.dynamicImageGridWidth(feedCardColumn.width, itemImages)
+                                                                   : feedCardColumn.width * 2 / 3
                                             columns: dynamic_page.dynamicGridColumns(itemImageCount)
-                                            rowSpacing: 4
-                                            columnSpacing: 4
+                                            rowSpacing: dynamic_page.dynamicImageSpacing
+                                            columnSpacing: dynamic_page.dynamicImageSpacing
                                             visible: itemImageCount > 0
 
                                             Repeater {
@@ -3363,10 +3407,13 @@ FluPage {
                                     GridLayout {
                                         Layout.fillWidth: false
                                         Layout.alignment: Qt.AlignLeft
-                                        Layout.preferredWidth: detailForwardColumn.width * 2 / 3
+                                        // 单图按三档宽度自适应（见 dynamicImageGridWidth），多图仍是 2/3 列宽
+                                        Layout.preferredWidth: detailForwardCard.forwardImageCount === 1
+                                                              ? dynamic_page.dynamicImageGridWidth(detailForwardColumn.width, detailForwardCard.forwardData.images)
+                                                              : detailForwardColumn.width * 2 / 3
                                         columns: dynamic_page.dynamicGridColumns(detailForwardCard.forwardImageCount)
-                                        rowSpacing: 4
-                                        columnSpacing: 4
+                                        rowSpacing: dynamic_page.dynamicImageSpacing
+                                        columnSpacing: dynamic_page.dynamicImageSpacing
                                         visible: detailForwardCard.forwardImageCount > 0
 
                                         Repeater {
@@ -3548,11 +3595,18 @@ FluPage {
 
                             GridLayout {
                                 id: detailImageGrid
-                                Layout.fillWidth: true
-                                columns: dynamic_page.dynamicGridColumns(currentDynamic && currentDynamic.images ? currentDynamic.images.length : 0)
-                                rowSpacing: 4
-                                columnSpacing: 4
-                                visible: currentDynamic && currentDynamic.images && currentDynamic.images.length > 0
+                                // 单图走三档宽度，需要按内容宽度自适应，所以不再无条件 fillWidth；
+                                // 多图保持原来的「占满内容宽度」。
+                                Layout.fillWidth: detailImageGrid.imageCount !== 1
+                                Layout.alignment: Qt.AlignLeft
+                                Layout.preferredWidth: detailImageGrid.imageCount === 1
+                                                      ? dynamic_page.dynamicImageGridWidth(detailContentColumn.width, currentDynamic.images)
+                                                      : detailContentColumn.width
+                                property int imageCount: currentDynamic && currentDynamic.images ? currentDynamic.images.length : 0
+                                columns: dynamic_page.dynamicGridColumns(detailImageGrid.imageCount)
+                                rowSpacing: dynamic_page.dynamicImageSpacing
+                                columnSpacing: dynamic_page.dynamicImageSpacing
+                                visible: detailImageGrid.imageCount > 0
 
                                 Repeater {
                                     model: currentDynamic ? (currentDynamic.images || []) : []
