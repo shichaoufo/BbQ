@@ -605,6 +605,7 @@ static void biliQtMessageHandler(QtMsgType type, const QMessageLogContext &conte
 #include "CommentManager.h"
 #include "InteractionManager.h"
 #include "MediaDownloader.h"
+#include "ImageActions.h"
 #ifdef Q_OS_WIN
 #include "MpvObjectD3D11.h"
 #else
@@ -822,6 +823,7 @@ int main(int argc, char *argv[])
     CommentManager commentManager;
     InteractionManager interactionManager;
     MediaDownloader mediaDownloader;
+    ImageActions imageActions;
 
     QQmlApplicationEngine engine;
 
@@ -896,6 +898,16 @@ int main(int argc, char *argv[])
             Q_UNUSED(scriptEngine)
             QQmlEngine::setObjectOwnership(&mediaDownloader, QQmlEngine::CppOwnership);
             return &mediaDownloader;
+        });
+
+    // 图片预览的「复制图片 / 下载图片」：QML 没有剪贴板与写文件 API，
+    // 只能由 C++ 提供（详见 ImageActions 类注释）
+    qmlRegisterSingletonType<ImageActions>("BiliQt", 1, 0, "ImageActions",
+        [&](QQmlEngine *engine, QJSEngine *scriptEngine) -> QObject* {
+            Q_UNUSED(engine)
+            Q_UNUSED(scriptEngine)
+            QQmlEngine::setObjectOwnership(&imageActions, QQmlEngine::CppOwnership);
+            return &imageActions;
         });
 
     // 通用设置存储（QML 中通过 Settings.getBool/setBool 等访问）
