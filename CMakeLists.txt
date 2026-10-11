@@ -98,6 +98,7 @@ set(PROJECT_SOURCES
     src/user/LoginManager.cpp
     src/user/QRCodeGenerator.cpp
     src/util/WbiSigner.cpp
+    src/util/ImageActions.cpp
     src/interaction/CommentManager.cpp
     src/interaction/InteractionManager.cpp
     src/player/MediaDownloader.cpp
@@ -134,6 +135,7 @@ set(PROJECT_HEADERS
     src/user/LoginManager.h
     src/user/QRCodeGenerator.h
     src/util/WbiSigner.h
+    src/util/ImageActions.h
     src/interaction/CommentManager.h
     src/interaction/InteractionManager.h
     src/player/MediaDownloader.h
@@ -199,6 +201,7 @@ set(QML_RESOURCE_FILES
     qml/components/AvatarWithPendant.qml
     qml/components/SegmentedDigits.qml
     qml/components/ImageViewer.qml
+    qml/components/ImagePreviewMenu.qml
     qml/components/CommentRichText.qml
     qml/styles/Theme.qml
     qml/assets/icons/play.png
@@ -312,6 +315,7 @@ qt_add_qml_module(${PROJECT_NAME}
         qml/components/AvatarWithPendant.qml
         qml/components/SegmentedDigits.qml
         qml/components/ImageViewer.qml
+        qml/components/ImagePreviewMenu.qml
         qml/components/CommentRichText.qml
         qml/styles/Theme.qml
     RESOURCES
