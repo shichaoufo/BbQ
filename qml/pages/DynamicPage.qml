@@ -144,6 +144,26 @@ FluPage {
         return url
     }
 
+    // 列表取图 URL（唯一入口）：
+    //   · 单图且非长图 -> 取原比例图（不裁），客户端 PreserveAspectFit 完整显示；
+    //   · 其余（多图任意 / 单图长图）-> 服务端按**容器比例**裁切：
+    //       * 多图容器是正方形        -> 方图（锚点按朝向，见 dynamicCropAnchor）
+    //       * 单图长图容器是 1 : 2.6  -> 顶部 2.6 倍高的一段
+    //   易踩的坑：绝不能走 GlobalState.fixImageUrl(src, w, h, false) 那条路 ——
+    //   它会拼出 "@<w>w_<h>h.jpg"（不带 _1c），语义是「等比塞进 WxH 框」(contain)：
+    //   长图会被缩成几十像素宽的细条，再被客户端放大回格子 → 排布时糊、点开预览才清晰。
+    function dynamicImageSource(container) {
+        if (!container || !container.pic) return ""
+        if (container.singleImage && !container.isLongPic)
+            return GlobalState.fixImageUrl(container.pic.src,
+                                           container.width * Screen.devicePixelRatio,
+                                           0, false)
+        return dynamicImageUrl(container.pic,
+                               container.width * Screen.devicePixelRatio,
+                               container.height * Screen.devicePixelRatio,
+                               true)
+    }
+
     function _sizeValid() {
         return dynamic_page.width > 0 && dynamic_page.height > 0
     }
@@ -2232,9 +2252,7 @@ FluPage {
                                                                     anchors.fill: parent
                                                                     // 单图取原比例图（不裁）；多图非长图让 CDN 裁方省流量；
                                                                     // 多图长图取原比例图，交给客户端顶部对齐裁切
-                                                                    source: forwardImageContainer.singleImage
-                                                                                 ? GlobalState.fixImageUrl(forwardImageContainer.pic.src, forwardImageContainer.width * Screen.devicePixelRatio, 0, false)
-                                                                                 : dynamic_page.dynamicImageUrl(forwardImageContainer.pic, forwardImageContainer.width * Screen.devicePixelRatio, forwardImageContainer.height * Screen.devicePixelRatio, !forwardImageContainer.isLongPic)
+                                                                    source: dynamic_page.dynamicImageSource(forwardImageContainer)
                                                                     fillMode: (forwardImageContainer.singleImage && !forwardImageContainer.isLongPic) ? Image.PreserveAspectFit : Image.PreserveAspectCrop
                                                                     verticalAlignment: forwardImageContainer.isLongPic ? Image.AlignTop : Image.AlignVCenter
                                                                     asynchronous: true
@@ -2251,10 +2269,8 @@ FluPage {
                                                                 id: cardForwardAnimatedImage
                                                                 AnimatedImage {
                                                                     anchors.fill: parent
-                                                                    // fixImageUrl 对 .gif/.webp 返回原始 URL，保证动画可播放
-                                                                    source: forwardImageContainer.singleImage
-                                                                                 ? GlobalState.fixImageUrl(forwardImageContainer.pic.src, forwardImageContainer.width * Screen.devicePixelRatio, 0, false)
-                                                                                 : dynamic_page.dynamicImageUrl(forwardImageContainer.pic, forwardImageContainer.width * Screen.devicePixelRatio, forwardImageContainer.height * Screen.devicePixelRatio, !forwardImageContainer.isLongPic)
+                                                                    // 动图走 fixImageUrl 时短路返回原图 URL，保证动画可播放
+                                                                    source: dynamic_page.dynamicImageSource(forwardImageContainer)
                                                                     fillMode: (forwardImageContainer.singleImage && !forwardImageContainer.isLongPic) ? Image.PreserveAspectFit : Image.PreserveAspectCrop
                                                                     verticalAlignment: forwardImageContainer.isLongPic ? Image.AlignTop : Image.AlignVCenter
                                                                     cache: true
@@ -2421,11 +2437,9 @@ FluPage {
                                                         id: cardFeedStaticImage
                                                         FluImage {
                                                             anchors.fill: parent
-                                                            // 单图取原比例图（不裁）；多图非长图让 CDN 裁方省流量；
-                                                            // 多图长图取原比例图，交给客户端顶部对齐裁切
-                                                            source: feedImageContainer.singleImage
-                                                                         ? GlobalState.fixImageUrl(feedImageContainer.pic.src, feedImageContainer.width * Screen.devicePixelRatio, 0, false)
-                                                                         : dynamic_page.dynamicImageUrl(feedImageContainer.pic, feedImageContainer.width * Screen.devicePixelRatio, feedImageContainer.height * Screen.devicePixelRatio, !feedImageContainer.isLongPic)
+                                                            // 单图（非长图）取原比例图；多图任意 / 单图长图 都让 CDN 按容器比例裁
+                                                            // （走 dynamicImageSource，避免 contain 语义把长图缩糊）
+                                                            source: dynamic_page.dynamicImageSource(feedImageContainer)
                                                             fillMode: (feedImageContainer.singleImage && !feedImageContainer.isLongPic) ? Image.PreserveAspectFit : Image.PreserveAspectCrop
                                                             verticalAlignment: feedImageContainer.isLongPic ? Image.AlignTop : Image.AlignVCenter
                                                             asynchronous: true
@@ -2442,10 +2456,8 @@ FluPage {
                                                         id: cardFeedAnimatedImage
                                                         AnimatedImage {
                                                             anchors.fill: parent
-                                                            // fixImageUrl 对 .gif/.webp 返回原始 URL，保证动画可播放
-                                                            source: feedImageContainer.singleImage
-                                                                         ? GlobalState.fixImageUrl(feedImageContainer.pic.src, feedImageContainer.width * Screen.devicePixelRatio, 0, false)
-                                                                         : dynamic_page.dynamicImageUrl(feedImageContainer.pic, feedImageContainer.width * Screen.devicePixelRatio, feedImageContainer.height * Screen.devicePixelRatio, !feedImageContainer.isLongPic)
+                                                            // 动图走 fixImageUrl 时短路返回原图 URL，保证动画可播放
+                                                            source: dynamic_page.dynamicImageSource(feedImageContainer)
                                                             fillMode: (feedImageContainer.singleImage && !feedImageContainer.isLongPic) ? Image.PreserveAspectFit : Image.PreserveAspectCrop
                                                             verticalAlignment: feedImageContainer.isLongPic ? Image.AlignTop : Image.AlignVCenter
                                                             cache: true
@@ -3414,9 +3426,7 @@ FluPage {
                                                         anchors.fill: parent
                                                         // 单图取原比例图（不裁）；多图非长图让 CDN 裁方省流量；
                                                         // 多图长图取原比例图，交给客户端顶部对齐裁切
-                                                        source: forwardDetailImageContainer.singleImage
-                                                                     ? GlobalState.fixImageUrl(forwardDetailImageContainer.pic.src, forwardDetailImageContainer.width * Screen.devicePixelRatio, 0, false)
-                                                                     : dynamic_page.dynamicImageUrl(forwardDetailImageContainer.pic, forwardDetailImageContainer.width * Screen.devicePixelRatio, forwardDetailImageContainer.height * Screen.devicePixelRatio, !forwardDetailImageContainer.isLongPic)
+                                                        source: dynamic_page.dynamicImageSource(forwardDetailImageContainer)
                                                         fillMode: (forwardDetailImageContainer.singleImage && !forwardDetailImageContainer.isLongPic) ? Image.PreserveAspectFit : Image.PreserveAspectCrop
                                                         verticalAlignment: forwardDetailImageContainer.isLongPic ? Image.AlignTop : Image.AlignVCenter
                                                         asynchronous: true
@@ -3433,10 +3443,8 @@ FluPage {
                                                     id: detailForwardAnimatedImage
                                                     AnimatedImage {
                                                         anchors.fill: parent
-                                                        // fixImageUrl 对 .gif/.webp 返回原始 URL，保证动画可播放
-                                                        source: forwardDetailImageContainer.singleImage
-                                                                     ? GlobalState.fixImageUrl(forwardDetailImageContainer.pic.src, forwardDetailImageContainer.width * Screen.devicePixelRatio, 0, false)
-                                                                     : dynamic_page.dynamicImageUrl(forwardDetailImageContainer.pic, forwardDetailImageContainer.width * Screen.devicePixelRatio, forwardDetailImageContainer.height * Screen.devicePixelRatio, !forwardDetailImageContainer.isLongPic)
+                                                        // 动图走 fixImageUrl 时短路返回原图 URL，保证动画可播放
+                                                        source: dynamic_page.dynamicImageSource(forwardDetailImageContainer)
                                                         fillMode: (forwardDetailImageContainer.singleImage && !forwardDetailImageContainer.isLongPic) ? Image.PreserveAspectFit : Image.PreserveAspectCrop
                                                         verticalAlignment: forwardDetailImageContainer.isLongPic ? Image.AlignTop : Image.AlignVCenter
                                                         cache: true
@@ -3603,9 +3611,7 @@ FluPage {
                                                 anchors.fill: parent
                                                 // 单图取原比例图（不裁）；多图非长图让 CDN 裁方省流量；
                                                 // 多图长图取原比例图，交给客户端顶部对齐裁切
-                                                source: detailImageContainer.singleImage
-                                                             ? GlobalState.fixImageUrl(detailImageContainer.pic.src, detailImageContainer.width * Screen.devicePixelRatio, 0, false)
-                                                             : dynamic_page.dynamicImageUrl(detailImageContainer.pic, detailImageContainer.width * Screen.devicePixelRatio, detailImageContainer.height * Screen.devicePixelRatio, !detailImageContainer.isLongPic)
+                                                source: dynamic_page.dynamicImageSource(detailImageContainer)
                                                 fillMode: (detailImageContainer.singleImage && !detailImageContainer.isLongPic) ? Image.PreserveAspectFit : Image.PreserveAspectCrop
                                                 verticalAlignment: detailImageContainer.isLongPic ? Image.AlignTop : Image.AlignVCenter
                                                 asynchronous: true
@@ -3622,10 +3628,8 @@ FluPage {
                                             id: detailFeedAnimatedImage
                                             AnimatedImage {
                                                 anchors.fill: parent
-                                                // fixImageUrl 对 .gif/.webp 返回原始 URL，保证动画可播放
-                                                source: detailImageContainer.singleImage
-                                                             ? GlobalState.fixImageUrl(detailImageContainer.pic.src, detailImageContainer.width * Screen.devicePixelRatio, 0, false)
-                                                             : dynamic_page.dynamicImageUrl(detailImageContainer.pic, detailImageContainer.width * Screen.devicePixelRatio, detailImageContainer.height * Screen.devicePixelRatio, !detailImageContainer.isLongPic)
+                                                // 动图走 fixImageUrl 时短路返回原图 URL，保证动画可播放
+                                                source: dynamic_page.dynamicImageSource(detailImageContainer)
                                                 fillMode: (detailImageContainer.singleImage && !detailImageContainer.isLongPic) ? Image.PreserveAspectFit : Image.PreserveAspectCrop
                                                 verticalAlignment: detailImageContainer.isLongPic ? Image.AlignTop : Image.AlignVCenter
                                                 cache: true
