@@ -873,11 +873,33 @@ Item {
                                 }
                             }
 
-                    // 子评论列表
-                    ColumnLayout {
+                    // 子评论列表（展开的楼中楼）：外层套一个圆角灰底，把这一整块
+                    // 包成一个独立区块，与主评论正文拉开层次。
+                    //   · 底色 FluTheme.frameColor —— 与本文件里评论图片的占位
+                    //     底色同源，且随明暗主题自适应（浅色 ≈ #F3F3F3 / 深色 ≈
+                    //     #383838），不会在暗色下露出浅灰；
+                    //   · 圆角 Theme.radiusMedium(8) —— 项目里内层 surface 的统一
+                    //     圆角（数值 = Theme.frameRadius，且大于块内图片的 6，
+                    //     满足「外大内小」）。
+                    // 只在外层加壳：内层 ColumnLayout 的子项结构一字未动，块内
+                    // `parent.subReplies` / `parent.parent.parent.replyCandidates`
+                    // 这些父子链因此完全不受影响。
+                    // （内层保留原有缩进，便于对照 diff。）
+                    Rectangle {
                         Layout.fillWidth: true
-                        spacing: 8
+                        Layout.topMargin: 4
+                        // 内层改用 anchors 定位，不再是本 Layout 的直接子项，
+                        // 所以要显式给出高度：内容高 + 上下各 8px 内边距
+                        implicitHeight: subReplyLayout.implicitHeight + 16
+                        radius: Theme.radiusMedium
+                        color: FluTheme.frameColor
                         visible: model.repliesExpanded
+
+                        ColumnLayout {
+                            id: subReplyLayout
+                            anchors.fill: parent
+                            anchors.margins: 8
+                            spacing: 8
                         property var subReplies: JSON.parse(model.repliesJson || "[]") || []
                         // 楼中楼"回复 @xxx"前缀切分的候选用户名：
                         // 根评论作者 + 已加载子评论作者（未加载页/已删评论
@@ -1233,6 +1255,7 @@ Item {
                                     }
                                 }
                         }
+                    }
                     }
 
                     // 个性装扮 - 评论卡片右上角背景
