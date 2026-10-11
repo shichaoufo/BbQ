@@ -8,6 +8,28 @@
 #include <QUrl>
 #include <QDebug>
 
+// 服务端 JSON 的布尔字段类型并不稳定：同一个 key 实测既出现过 JSON bool
+// （true / false），也出现过数字 0 / 1。
+//
+// **QJsonValue::toInt() 对 Bool 返回默认值 0** —— 而词搜索热词的
+// extra.is_word_search 恰好下发的是 bool。旧实现用 toInt() == 1 判断，结果
+// 恒为 false：唯一判据整条失效，54 条 jump_url 全部被当成"可点可染的链接"
+// （正文里的普通词语也被染蓝、点一下还往外跳）。match_once / underline
+// 同理，都得按类型兼容。
+static bool jsonFlag(const QJsonObject &obj, const QString &key, bool defaultValue = false)
+{
+    if (!obj.contains(key)) return defaultValue;
+    const QJsonValue v = obj.value(key);
+    if (v.isBool()) return v.toBool();
+    if (v.isDouble()) return v.toInt() != 0;
+    if (v.isString()) {
+        const QString s = v.toString().trimmed().toLower();
+        if (s == "true" || s == "1") return true;
+        if (s == "false" || s == "0" || s.isEmpty()) return false;
+    }
+    return defaultValue;
+}
+
 
 const QString CommentManager::USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 const QString CommentManager::REFERER = "https://www.bilibili.com";
@@ -653,14 +675,14 @@ CommentManager::Comment CommentManager::parseCommentObject(const QJsonObject &ob
                 info.icon = detail.value("icon").toString();
                 info.pcUrl = detail.value("pc_url").toString();
                 info.appUrlSchema = detail.value("app_url_schema").toString();
-                info.underline = (detail.value("underline").toInt() == 1);
-                info.matchOnce = (detail.value("match_once").toInt() == 1);
+                info.underline = jsonFlag(detail, "underline");
+                // 缺省按 true 处理：同一 token 在正文里只渲一次可点链接
+                //（与 PiliPlus 的 matchedUrls 注释"只显示一次"一致）；
+                // 只有服务端明确下发 false 时才允许逐次渲染。
+                info.matchOnce = jsonFlag(detail, "match_once", true);
                 // 判据可能出现在 detail 顶层，也可能在 extra 里（两种都实测到过）
-                if (extra.contains("is_word_search")) {
-                    info.isWordSearch = (extra.value("is_word_search").toInt() == 1);
-                } else {
-                    info.isWordSearch = (detail.value("is_word_search").toInt() == 1);
-                }
+                info.isWordSearch = jsonFlag(extra, "is_word_search",
+                                             jsonFlag(detail, "is_word_search", false));
                 comment.jumpUrlInfos.insert(key, info);
                 // 兼容旧字段（不含判据），旧调用点可继续工作
                 comment.jumpUrls[key] = info.title;
