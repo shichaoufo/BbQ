@@ -96,6 +96,44 @@ Item {
         return commentPermalinkBase + "#reply" + id
     }
 
+    // 右键的一次「命中」= 一条评论的原文 + 它的永久链接。挂在卡片/楼中楼行上，
+    // 由 commentMetaAt() 在右键时取用（见那边的注释）。
+    function commentMetaOf(rawText, rpid) {
+        return { text: String(rawText || ""), permalink: permalinkOf(rpid) }
+    }
+
+    // 从落点解析出「这次右键点的是哪条评论」。
+    //
+    // 为什么需要它：卡片上的右键 Handler 只有一个（整张卡片一个），但卡片里嵌着
+    // 已展开的楼中楼 —— 落点到底属于主评论还是某条子评论，得自己算。
+    // 做法是两步：
+    //   ① 从卡片往下逐层 childAt，钻到落点处最深的那个可见 Item ——
+    //      QQuickItem::childAt() 只看 visible 且 opacity≠0 的子项，所以楼中楼没
+    //      展开时天然钻不进它的分支；
+    //   ② 再沿 parent 往上找第一个带 commentMeta 标记的祖先。**近者优先**，
+    //      于是楼中楼行永远赢过它所属的卡片。
+    // 这个判定与声明顺序、与 Qt 的 handler 投递/抓取顺序都无关，是确定性的。
+    //
+    // 为什么不"主评论挂一个 Handler、楼中楼再挂一个"：两个 Handler 上下重叠时，
+    // 这次 tap 给谁由 Qt 的投递与抓取顺序决定（实测外层卡片赢），语义不稳定。
+    function commentMetaAt(root, sceneX, sceneY) {
+        var it = root
+        var guard = 0
+        while (it && guard < 64) {
+            var local = it.mapFromItem(null, sceneX, sceneY)
+            var child = it.childAt(local.x, local.y)
+            if (!child) break
+            it = child
+            guard++
+        }
+        while (it) {
+            var meta = it.commentMeta
+            if (meta !== undefined && meta !== null) return meta
+            it = it.parent
+        }
+        return null
+    }
+
     // eventPoint 优先（右键落点）；取不到时退化为被点卡片的左上角，
     // 避免菜单飘到窗口角落。
     function openCommentContextMenu(rawText, permalink, eventPoint, anchorItem) {
@@ -120,6 +158,25 @@ Item {
     // FluMenu 继承自 QtQuick.Controls.Menu，具备 x/y/open()/close()/opened
     FluMenu {
         id: commentMenu
+
+        // 「菜单开着时右键别处 = 先收菜单、不关页面」正是靠这里的 modal 拿到的。
+        // Qt 6 qquickpopup.cpp 的 handlePress() 按顺序做两件事：
+        //   ① tryClose(point, CloseOnPressOutside) —— 按下那一刻菜单就关了；
+        //   ② return blockInput(item, point) —— 决定这次按下要不要拦下来。
+        // 而 blockInput() 对**非模态**弹窗一律返回 false（源码注释原话：don't block
+        // presses and releases ... outside a non-modal popup）。于是同一次右键的按下
+        // 继续传给页面兜底的 MouseArea，等到 release 触发兜底的 onClicked 时 opened
+        // 已经是 false —— 兜底判断不出来，就把页面/详情关了。这就是那个 bug 的成因。
+        // 设成 modal 后 blockInput() 返回 true，Overlay 的 eventFilter 直接吞掉这次
+        // 按下（源码注释也写明了 non-dimming modal popups block the event），页面兜底
+        // 根本收不到，只有菜单自己收起来。
+        modal: true
+        // dim 必须显式关掉：modal 会连带把 dim 置为 true，而 FluMenu 给模态弹窗画的
+        // 遮罩是半透明全窗矩形（它自己的 T.Overlay.modal），右键菜单不该把整个窗口压暗。
+        // modal + dim=false 时 Qt 不创建 dimmer，blockInput() 里 `!dimmer` 分支成立，
+        // 拦截照旧生效 —— 这正是源码里说的 "non-dimming modal popup"。
+        dim: false
+
         FluMenuItem {
             text: "复制评论内容"
             enabled: panelRoot.contextRawText !== ""
@@ -464,15 +521,25 @@ Item {
                         property int commentIndex: index
                         property var parentModel: model
 
-                        // 评论右键菜单（复制）。用 TapHandler 而不是铺一层 MouseArea：
+                        // 右键"命中归属"标记：commentMetaAt() 从最深的子项往上找它，
+                        // 楼中楼行上也有同名标记 —— 近者优先，所以子评论赢过卡片。
+                        property var commentMeta: panelRoot.commentMetaOf(model.content, model.rpid)
+
+                        // 评论右键菜单（复制）。整张卡片只此一个右键 Handler，主评论与
+                        // 楼中楼都由它经 commentMetaAt() 判定归属（原因见 commentMetaAt
+                        // 的注释：两个重叠 Handler 谁赢不稳定）。
+                        // 用 TapHandler 而不是铺一层 MouseArea：
                         // ① 只接受右键，左键事件链完全不碰（拖拽滚动 / 链接点击不受影响）；
                         // ② Handler 不是 Item，不参与布局，也不会和卡片里已有的
                         //    头像/用户名/图片等 MouseArea 抢左键。
                         TapHandler {
                             acceptedButtons: Qt.RightButton
                             onTapped: function(eventPoint) {
-                                panelRoot.openCommentContextMenu(model.content,
-                                                                 panelRoot.permalinkOf(model.rpid),
+                                var sp = eventPoint.scenePosition
+                                var meta = panelRoot.commentMetaAt(commentItem, sp.x, sp.y)
+                                               || commentItem.commentMeta   // 兜底：至少给主评论
+                                if (!meta) return
+                                panelRoot.openCommentContextMenu(meta.text, meta.permalink,
                                                                  eventPoint, commentItem)
                             }
                         }
@@ -831,16 +898,12 @@ Item {
                                         Layout.fillWidth: true
                                         spacing: 8
 
-                                        // 评论右键菜单（复制）：Handler 不是 Item，
-                                        // 不参与 RowLayout 布局，也不碰左键事件
-                                        TapHandler {
-                                            acceptedButtons: Qt.RightButton
-                                            onTapped: function(eventPoint) {
-                                                panelRoot.openCommentContextMenu(modelData.content,
-                                                                                 panelRoot.permalinkOf(modelData.rpid),
-                                                                                 eventPoint, subReplyRow)
-                                            }
-                                        }
+                                        // 右键"命中归属"标记：这条行比外层卡片更靠近落点，
+                                        // 所以 commentMetaAt() 往上找时会先撞到它 —— 楼中楼
+                                        // 的右键菜单因此拿到的是子评论自己的内容。
+                                        // （不需要单独的 TapHandler：卡片上那一个就够了，
+                                        //   两个重叠 Handler 谁拿到 tap 由 Qt 投递顺序决定。）
+                                        property var commentMeta: panelRoot.commentMetaOf(modelData.content, modelData.rpid)
 
                                         // 子评论头像可点击：打开评论作者的用户主页
                                         Item {
