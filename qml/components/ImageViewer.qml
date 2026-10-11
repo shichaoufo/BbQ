@@ -11,9 +11,23 @@ Item {
     property real maxScale: 10.0
     property real wheelStep: 0.15
 
+    // 左键「单击」（按下到松开之间没有拖动）时发出 —— 预览层据此关闭预览。
+    // 与 PiliPlus 的图片预览口径一致：单击关闭、滚轮缩放、放大后左键拖动平移、
+    // 右键弹菜单（菜单由各预览层自己挂，本组件只做手势识别，不碰菜单）。
+    signal clicked()
+
+    // 拖动判定阈值（px）。取 4，与播放页小窗「拖视频区移动窗口」的判定同值。
+    // 桌面鼠标按下时的手抖远小于 4px，而真要拖动平移基本都会超过它。
+    property real dragThreshold: 4
+
+    // 是否处于放大状态（供右键菜单决定「重置缩放」是否显示）
+    readonly property bool zoomed: _scale > minScale + 0.0001
+
     property real _scale: 1.0
     property real _offsetX: 0
     property real _offsetY: 0
+    // 本次按下是否已升级成拖动。见下方左键 MouseArea。
+    property bool _dragged: false
 
     function reset() {
         _scale = 1.0
@@ -76,6 +90,7 @@ Item {
         }
     }
 
+    // 左键：拖动平移；若按下到松开之间没拖动过，则抛 clicked()（关闭预览）
     MouseArea {
         anchors.fill: parent
         acceptedButtons: Qt.LeftButton
@@ -91,15 +106,32 @@ Item {
             pressY = mouse.y
             startOffsetX = root._offsetX
             startOffsetY = root._offsetY
+            root._dragged = false
         }
         onPositionChanged: (mouse) => {
-            if (pressed && root._scale > root.minScale) {
+            if (!pressed)
+                return
+            // 超过阈值即认定为拖动，松手时不再抛 clicked()。
+            // 这里不能只看「底下那位有没有真的平移」：未放大时平移分支不执行，
+            // 但用户仍可能在拖（只是没得平移），只看平移会把拖动当成单击而误关预览。
+            if (Math.abs(mouse.x - pressX) > root.dragThreshold
+                    || Math.abs(mouse.y - pressY) > root.dragThreshold) {
+                root._dragged = true
+            }
+            if (root._scale > root.minScale) {
                 root._offsetX = startOffsetX + (mouse.x - pressX)
                 root._offsetY = startOffsetY + (mouse.y - pressY)
                 root.clampOffset()
             }
         }
-        onDoubleClicked: root.reset()
+        // 双击不再重置缩放：左键单击已改作「关闭预览」，而双击的第一下就已经
+        // 把预览关掉了，保留 onDoubleClicked 只会得到一句永远跑不到的死代码。
+        // 「重置缩放」挪到右键菜单里（见 ImagePreviewMenu），滚轮缩到底等效。
+        onClicked: {
+            if (!root._dragged)
+                root.clicked()
+        }
+        onCanceled: root._dragged = false
     }
 
     MouseArea {
