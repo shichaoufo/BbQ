@@ -30,6 +30,23 @@ static bool jsonFlag(const QJsonObject &obj, const QString &key, bool defaultVal
     return defaultValue;
 }
 
+// 用户主动发起的评论动作（点赞 / 取消赞 / 点踩 / 取消踩 / 删评论）统一走
+// actionSuccess 回执；列表拉取（get_comments / get_sub_comments）与评论发送
+// （send_comment）各有自己的信号，不在此列。
+//
+// 这个判定被两处共用，必须保持一致：
+//   1) onReplyFinished 的网络错误分支 —— 请求根本没发出去/没回来，同样要给动作
+//      发一次「失败回执」，否则用户点了赞只看到计数涨、什么提示都没有；
+//   2) parseActionData —— 拿到了响应但 JSON 不合法（代理错误页、空 body）时同理。
+// 踩过：这两处原先都直接 return / 只发 errorOccurred，而 errorOccurred 在页面侧
+// 只用来落「加载中」的闸、不弹提示 → 断网点赞成了「数字 +1，零反馈」。
+static bool commentActionUsesReceipt(const QString &action)
+{
+    return action != QLatin1String("get_comments")
+        && action != QLatin1String("get_sub_comments")
+        && action != QLatin1String("send_comment");
+}
+
 
 const QString CommentManager::USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 const QString CommentManager::REFERER = "https://www.bilibili.com";
@@ -313,6 +330,14 @@ void CommentManager::onReplyFinished()
         QString errorMsg = QString("Network error: %1").arg(reply->errorString());
         qDebug() << "[CommentManager] network error:" << errorMsg;
         emit errorOccurred(errorMsg);
+        // 用户主动发起的动作（点赞/点踩/删除）必须给回执：只发 errorOccurred 的话
+        // 页面侧只落「加载中」的闸、不弹提示，而界面上的计数已经乐观地加过了 ——
+        // 就是「断网点个赞，数字涨了、其它毫无反应」。列表拉取与 send_comment 各有
+        // 自己的信号路径（后者见「发送面板」待办），不在此列。
+        if (commentActionUsesReceipt(ctx.action)) {
+            emit actionSuccess(ctx.action, ctx.pendingRootRpid, false,
+                               QStringLiteral("网络错误，请检查网络后重试"));
+        }
         reply->deleteLater();
         return;
     }
@@ -527,7 +552,15 @@ void CommentManager::parseSubCommentsData(const QByteArray &data, qint64 rootRpi
 void CommentManager::parseActionData(const QByteArray &data, const QString &action, qint64 rpid)
 {
     QJsonDocument doc = QJsonDocument::fromJson(data);
-    if (!doc.isObject()) return;
+    if (!doc.isObject()) {
+        // 代理/网关的错误页、被截断或空的 body 都会落到这里。**不能静默 return**：
+        // 动作类请求（点赞/点踩/删除）同样要给一次失败回执，否则用户只看到计数涨。
+        if (commentActionUsesReceipt(action)) {
+            emit actionSuccess(action, rpid, false,
+                               QStringLiteral("响应异常，请稍后重试"));
+        }
+        return;
+    }
 
     QJsonObject root = doc.object();
     int code = root["code"].toInt();
