@@ -55,8 +55,20 @@ Rectangle {
     property string replyToUser: ""
     property string replyRpid: ""
     property string replyRootRpid: ""
+
+    // 退出「回复某人」状态。三个字段必须一起清 —— 只清 replyToUser 会让
+    // replyRpid / replyRootRpid 残留，之后直接发普通评论会被服务端当成楼中楼
+    // 回复挂到旧楼层下面。取消与发布都走这里（与 CommentPanel 同名同义）。
+    function cancelReply() {
+        pageRoot.replyToUser = ""
+        pageRoot.replyRpid = ""
+        pageRoot.replyRootRpid = ""
+    }
     property bool commentSortByHeat: true
     property int commentTotal: 0
+    // 首屏评论是否在请求中（commentLoadingMore 只管"加载更多"）。
+    // 用来区分"还没拿到数据"与"这个视频就是没评论"。
+    property bool commentLoading: false
     property int commentPage: 0
     property bool commentLoadingMore: false
     property bool commentHasNextPage: true
@@ -1588,6 +1600,7 @@ Rectangle {
         pageRoot.commentTotal = 0
         pageRoot.commentPage = 0
         pageRoot.commentLoadingMore = false
+        pageRoot.commentLoading = false
         pageRoot.commentHasNextPage = true
         pageRoot.uploadPage = 1
         pageRoot._commentsLoaded = false
@@ -1968,6 +1981,7 @@ Rectangle {
         pageRoot.commentPage = 1
         pageRoot.commentTotal = 0
         pageRoot.commentLoadingMore = false
+        pageRoot.commentLoading = true
         pageRoot.commentHasNextPage = true
         var sort = pageRoot.commentSortByHeat ? 2 : 1
         CommentManager.getComments(pageRoot.aid, 1, 1, 20, sort)
@@ -1979,6 +1993,7 @@ Rectangle {
         if (page < 1) page = 1
         pageRoot.commentPage = page
         pageRoot.commentLoadingMore = true
+        pageRoot.commentLoading = true
         var sort = pageRoot.commentSortByHeat ? 2 : 1
         CommentManager.getComments(pageRoot.aid, 1, page, count || 20, sort)
     }
@@ -2872,6 +2887,7 @@ Rectangle {
                 pageRoot.commentPage = page
             }
             pageRoot.commentLoadingMore = false
+            pageRoot.commentLoading = false
             // 只在第一页或尚未有总数时更新主评论总数，避免翻页到最后一页时比例失真导致页数跳变
             if (pageRoot.commentPage <= 1 || pageRoot.commentTotal <= 0) {
                 pageRoot.commentTotal = total || comments.length
@@ -2971,10 +2987,18 @@ Rectangle {
             }
         }
         function onActionSuccess(action, rpid, success, message) {
+            // 点赞/点踩失败此前被完全吞掉（这里是空函数）：用户点了没反应、
+            // 界面上的计数还已经乐观地加过了，只能干看着。失败一律给提示；
+            // 成功不提示（计数与图标的变化本身就是反馈）。
+            if (!success) {
+                pageInfoBar.showWarning((message && message.length > 0) ? message : "操作失败")
+            }
         }
         function onErrorOccurred(error) {
             console.warn("[VideoPlayerPage] CommentManager error:", error)
             pageRoot.commentLoadingMore = false
+            // 首屏请求失败也要落闸，否则空列表会永远停在「正在加载评论...」
+            pageRoot.commentLoading = false
         }
     }
 
@@ -6136,7 +6160,10 @@ Rectangle {
 
                                 FluText {
                                     width: parent.width
-                                    text: pageRoot.commentModel.count === 0 ? "暂无评论" : "正在加载评论..."
+                                    // 空列表时才有意义：请求中「正在加载评论...」，请求结束
+                                    // 仍为空才是「暂无评论」。原写法两分支都挂在 count === 0
+                                    // 上、而 visible 也要求 count === 0 —— 后者永远取不到。
+                                    text: pageRoot.commentLoading ? "正在加载评论..." : "暂无评论"
                                     font: FluTextStyle.Caption
                                     color: FluTheme.fontSecondaryColor
                                     horizontalAlignment: Text.AlignHCenter
@@ -6163,7 +6190,7 @@ Rectangle {
                                 font: FluTextStyle.Caption
                                 textColor: FluTheme.fontSecondaryColor
                                 visible: pageRoot.replyToUser !== ""
-                                onClicked: { pageRoot.replyToUser = "" }
+                                onClicked: pageRoot.cancelReply()
                             }
 
                             FluButton {
@@ -6176,9 +6203,7 @@ Rectangle {
                                     var parentId = pageRoot.replyRpid
                                     CommentManager.sendComment(pageRoot.aid, commentInput.text, 1, rootId, parentId)
                                     commentInput.text = ""
-                                    pageRoot.replyToUser = ""
-                                    pageRoot.replyRpid = ""
-                                    pageRoot.replyRootRpid = ""
+                                    pageRoot.cancelReply()
                                 }
                             }
                         }
