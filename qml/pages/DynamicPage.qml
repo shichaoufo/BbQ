@@ -74,6 +74,10 @@ FluPage {
     property var detailPreviewImages: []
     property int detailPreviewIndex: 0
 
+    // 动态正文图片：单图高宽比超过此值即视为「长图」（容器高度封顶、取顶部一截 + 角标）。
+    // 与评论区 commentImageMaxRatio 同口径，也与 PiliPlus imgMaxRatio 一致。
+    readonly property real dynamicImageMaxRatio: 2.6
+
     Timer {
         id: selectUpTimer
         interval: 150
@@ -85,6 +89,59 @@ FluPage {
             loadVideos(mid)
             loadFeed(mid)
         }
+    }
+
+    // ============================================================================
+    // 动态正文图片：排布 / 裁剪辅助（与评论区 commentXxx 系列、PiliPlus ImageGridView 同口径）
+    //   图片数据统一为 {src, width, height}
+    // ============================================================================
+
+    // 网格列数：1 张 1 列；2 张 / 4 张 2 列；其余多图 3 列。
+    //   4 张若按 3 列会排成「上三下一」，最后一张孤零零只占 1/3 宽。
+    function dynamicGridColumns(count) {
+        if (count <= 1) return 1
+        if (count === 2 || count === 4) return 2
+        return 3
+    }
+
+    // 长图判定（PiliPlus isLongPic 同口径）：高/宽 超过 2.6 倍，且原图足够宽。
+    //   origWidth <= 0 表示接口没给尺寸（此时靠解码回填的比值判断，不再额外限宽）；
+    //   宽 <= 100 的细长条不做封顶，避免把本来就窄的图再压扁。
+    function dynamicImageIsLongPic(picRatio, origWidth) {
+        if (picRatio <= 0) return false
+        if (picRatio <= dynamicImageMaxRatio) return false
+        return origWidth <= 0 || origWidth > 100
+    }
+
+    // 单图容器高度 = 单元格宽 × min(高宽比, 2.6)。超出 2.6 倍的部分靠顶部对齐裁掉，
+    // 避免一张 1:10 的长图把卡片拉成一条。
+    //   picRatio 传调用点的「已含解码回填」的比值（接口没给尺寸时用 onSourceSizeChanged 补上），
+    //   传对象反而会让兜底失效（对象里 width=0 时拿不到回填值）。
+    function dynamicSingleImageHeight(cellWidth, picRatio) {
+        if (cellWidth <= 0) return 0
+        var ratio = picRatio > 0 ? picRatio : 1
+        return cellWidth * Math.min(ratio, dynamicImageMaxRatio)
+    }
+
+    // 方形缩略图的裁剪锚点。B 站图床 "@<w>w_<h>h_<anchor>.jpg" 的 anchor 实测
+    // （fix3/cdn_crop_probe*.py 逐像素定位）：1e_1c = 居中；1e_2c = 左上；1e_3c = 右下。
+    // 锚点是**服务端**裁剪，客户端再设 verticalAlignment 也救不回来 —— 必须在这里选对。
+    //   竖图/方图（高 >= 宽）在方形格子里有多余的纵向空间 -> 取顶部(1e_2c)，
+    //     否则会像官方预设那样把头部、正文开头居中裁掉；
+    //   横图（高 < 宽）纵向没有余量，纵向锚点毫无意义，而 1e_2c 会连带变成「靠左裁」，
+    //     所以横图继续用居中(1e_1c)。
+    function dynamicCropAnchor(pic) {
+        if (pic && pic.width > 0 && pic.height > 0 && pic.height >= pic.width) return "1e_2c"
+        return "1e_1c"
+    }
+
+    // 动态图片 URL：包一层 GlobalState.fixImageUrl，把方形缩略图的服务端裁剪锚点
+    // 由固定居中(1e_1c)换成按图片朝向选择（见 dynamicCropAnchor）。crop=false 时与 fixImageUrl 完全一致。
+    function dynamicImageUrl(pic, width, height, crop) {
+        var url = GlobalState.fixImageUrl(pic && pic.src ? pic.src : "", width, height, crop)
+        if (crop && url.indexOf("_1e_1c.") >= 0)
+            url = url.replace("_1e_1c.", "_" + dynamicCropAnchor(pic) + ".")
+        return url
     }
 
     function _sizeValid() {
@@ -773,7 +830,15 @@ FluPage {
                     var draw = dynamicData.dyn_draw || {}
                     var drawItems = draw.items || []
                     for (var k = 0; k < drawItems.length; k++) {
-                        result.images.push(drawItems[k].src || "")
+                        // 接口在每张图上同时给了 src / width / height，必须一并保留：
+                        //   width/height 用于按原始比例决定单图容器高度、判定长图、选择裁剪锚点。
+                        //   只存 src 就会丢失比例信息，只能退回「正方形 + 居中裁」，正是要修的问题。
+                        var drawItem = drawItems[k]
+                        result.images.push({
+                            src: drawItem.src || "",
+                            width: drawItem.width || 0,
+                            height: drawItem.height || 0
+                        })
                     }
                 } else if (dataType === "MDL_DYN_TYPE_ARCHIVE") {
                     var archive = dynamicData.dyn_archive || {}
@@ -1526,14 +1591,20 @@ FluPage {
         }
     }
 
+    // 预览图元素取值：detailPreviewImages 现为 {src,width,height} 对象数组，
+    // 这里统一取 src 并兼容可能残留的纯字符串元素。
+    function previewImageSrc(pic) {
+        if (pic === null || pic === undefined) return ""
+        if (typeof pic === "object") return pic.src || ""
+        return String(pic)
+    }
+
     function previewCurrentImageUrl() {
-        var url = detailPreviewImages[detailPreviewIndex] || ""
-        return GlobalState.fixImageUrl(url)
+        return GlobalState.fixImageUrl(previewImageSrc(detailPreviewImages[detailPreviewIndex]))
     }
 
     function previewCurrentImageIsAnimated() {
-        var url = detailPreviewImages[detailPreviewIndex] || ""
-        return GlobalState.isAnimatedImageUrl(url)
+        return GlobalState.isAnimatedImageUrl(previewImageSrc(detailPreviewImages[detailPreviewIndex]))
     }
 
     function previewNextImage() {
@@ -2099,7 +2170,7 @@ FluPage {
                                                     Layout.fillWidth: false
                                                     Layout.alignment: Qt.AlignLeft
                                                     Layout.preferredWidth: forwardColumn.width * 2 / 3
-                                                    columns: (itemForwardImageCount === 1) ? 1 : 3
+                                                    columns: dynamic_page.dynamicGridColumns(itemForwardImageCount)
                                                     rowSpacing: 4
                                                     columnSpacing: 4
                                                     visible: itemForwardImageCount > 0
@@ -2110,7 +2181,9 @@ FluPage {
                                                         Rectangle {
                                                             id: forwardImageContainer
                                                             Layout.fillWidth: true
-                                                            Layout.preferredHeight: width
+                                                            Layout.preferredHeight: forwardImageContainer.singleImage
+                                                                                    ? dynamic_page.dynamicSingleImageHeight(forwardImageContainer.width, forwardImageContainer.picRatio)
+                                                                                    : forwardImageContainer.width
                                                             radius: 6
                                                             color: FluTheme.frameColor
                                                             clip: true
@@ -2125,8 +2198,16 @@ FluPage {
                                                                 }
                                                             }
 
-                                                            property var imageUrl: modelData || ""
+                                                            property var pic: modelData || {}
                                                             property bool singleImage: itemForwardImageCount === 1
+                                                            // 接口没给尺寸时，用解码出的真实宽高比回填（与评论区同口径）
+                                                            property real decodedRatio: 0
+                                                            property real picRatio: {
+                                                                if (pic.width > 0 && pic.height > 0) return pic.height / pic.width
+                                                                if (decodedRatio > 0) return decodedRatio
+                                                                return 0
+                                                            }
+                                                            property bool isLongPic: dynamic_page.dynamicImageIsLongPic(picRatio, pic.width)
 
                                                             Rectangle {
                                                                 id: forwardImageMask
@@ -2142,24 +2223,26 @@ FluPage {
                                                             // 动图（.gif/.webp）用 AnimatedImage 播放，静态图用 FluImage
                                                             Loader {
                                                                 anchors.fill: parent
-                                                                sourceComponent: GlobalState.isAnimatedImageUrl(imageUrl) ? cardForwardAnimatedImage : cardForwardStaticImage
+                                                                sourceComponent: GlobalState.isAnimatedImageUrl(forwardImageContainer.pic.src) ? cardForwardAnimatedImage : cardForwardStaticImage
                                                             }
 
                                                             Component {
                                                                 id: cardForwardStaticImage
                                                                 FluImage {
                                                                     anchors.fill: parent
+                                                                    // 单图取原比例图（不裁）；多图非长图让 CDN 裁方省流量；
+                                                                    // 多图长图取原比例图，交给客户端顶部对齐裁切
                                                                     source: forwardImageContainer.singleImage
-                                                                                 ? GlobalState.fixImageUrl(forwardImageContainer.imageUrl, forwardImageContainer.width * Screen.devicePixelRatio, 0, false)
-                                                                                 : GlobalState.fixImageUrl(forwardImageContainer.imageUrl, forwardImageContainer.width * Screen.devicePixelRatio, forwardImageContainer.height * Screen.devicePixelRatio, true)
-                                                                    fillMode: forwardImageContainer.singleImage ? Image.PreserveAspectFit : Image.PreserveAspectCrop
+                                                                                 ? GlobalState.fixImageUrl(forwardImageContainer.pic.src, forwardImageContainer.width * Screen.devicePixelRatio, 0, false)
+                                                                                 : dynamic_page.dynamicImageUrl(forwardImageContainer.pic, forwardImageContainer.width * Screen.devicePixelRatio, forwardImageContainer.height * Screen.devicePixelRatio, !forwardImageContainer.isLongPic)
+                                                                    fillMode: (forwardImageContainer.singleImage && !forwardImageContainer.isLongPic) ? Image.PreserveAspectFit : Image.PreserveAspectCrop
+                                                                    verticalAlignment: forwardImageContainer.isLongPic ? Image.AlignTop : Image.AlignVCenter
                                                                     asynchronous: true
                                                                     cache: true
                                                                     smooth: true
                                                                     onSourceSizeChanged: {
-                                                                        if (forwardImageContainer.singleImage && sourceSize.width > 0 && forwardImageContainer.width > 0) {
-                                                                            forwardImageContainer.Layout.preferredHeight = forwardImageContainer.width * sourceSize.height / sourceSize.width
-                                                                        }
+                                                                        if (forwardImageContainer.pic.width <= 0 && sourceSize.width > 0 && sourceSize.height > 0)
+                                                                            forwardImageContainer.decodedRatio = sourceSize.height / sourceSize.width
                                                                     }
                                                                 }
                                                             }
@@ -2170,17 +2253,37 @@ FluPage {
                                                                     anchors.fill: parent
                                                                     // fixImageUrl 对 .gif/.webp 返回原始 URL，保证动画可播放
                                                                     source: forwardImageContainer.singleImage
-                                                                                 ? GlobalState.fixImageUrl(forwardImageContainer.imageUrl, forwardImageContainer.width * Screen.devicePixelRatio, 0, false)
-                                                                                 : GlobalState.fixImageUrl(forwardImageContainer.imageUrl, forwardImageContainer.width * Screen.devicePixelRatio, forwardImageContainer.height * Screen.devicePixelRatio, true)
-                                                                    fillMode: forwardImageContainer.singleImage ? Image.PreserveAspectFit : Image.PreserveAspectCrop
+                                                                                 ? GlobalState.fixImageUrl(forwardImageContainer.pic.src, forwardImageContainer.width * Screen.devicePixelRatio, 0, false)
+                                                                                 : dynamic_page.dynamicImageUrl(forwardImageContainer.pic, forwardImageContainer.width * Screen.devicePixelRatio, forwardImageContainer.height * Screen.devicePixelRatio, !forwardImageContainer.isLongPic)
+                                                                    fillMode: (forwardImageContainer.singleImage && !forwardImageContainer.isLongPic) ? Image.PreserveAspectFit : Image.PreserveAspectCrop
+                                                                    verticalAlignment: forwardImageContainer.isLongPic ? Image.AlignTop : Image.AlignVCenter
                                                                     cache: true
                                                                     smooth: true
                                                                     playing: true
                                                                     onSourceSizeChanged: {
-                                                                        if (forwardImageContainer.singleImage && sourceSize.width > 0 && forwardImageContainer.width > 0) {
-                                                                            forwardImageContainer.Layout.preferredHeight = forwardImageContainer.width * sourceSize.height / sourceSize.width
-                                                                        }
+                                                                        if (forwardImageContainer.pic.width <= 0 && sourceSize.width > 0 && sourceSize.height > 0)
+                                                                            forwardImageContainer.decodedRatio = sourceSize.height / sourceSize.width
                                                                     }
+                                                                }
+                                                            }
+
+                                                            // 长图角标：提示只显示了顶部一截，点开可看完整
+                                                            Rectangle {
+                                                                anchors.right: parent.right
+                                                                anchors.bottom: parent.bottom
+                                                                anchors.margins: 6
+                                                                width: forwardLongTag.implicitWidth + 10
+                                                                height: forwardLongTag.implicitHeight + 4
+                                                                radius: 4
+                                                                color: Qt.rgba(0, 0, 0, 0.55)
+                                                                visible: forwardImageContainer.isLongPic
+
+                                                                FluText {
+                                                                    id: forwardLongTag
+                                                                    anchors.centerIn: parent
+                                                                    text: "长图"
+                                                                    font: FluTextStyle.Caption
+                                                                    color: "white"
                                                                 }
                                                             }
                                                         }
@@ -2258,7 +2361,7 @@ FluPage {
                                             Layout.fillWidth: false
                                             Layout.alignment: Qt.AlignLeft
                                             Layout.preferredWidth: feedCardColumn.width * 2 / 3
-                                            columns: itemImageCount === 1 ? 1 : 3
+                                            columns: dynamic_page.dynamicGridColumns(itemImageCount)
                                             rowSpacing: 4
                                             columnSpacing: 4
                                             visible: itemImageCount > 0
@@ -2269,7 +2372,9 @@ FluPage {
                                                 Rectangle {
                                                     id: feedImageContainer
                                                     Layout.fillWidth: true
-                                                    Layout.preferredHeight: width
+                                                    Layout.preferredHeight: feedImageContainer.singleImage
+                                                                           ? dynamic_page.dynamicSingleImageHeight(feedImageContainer.width, feedImageContainer.picRatio)
+                                                                           : feedImageContainer.width
                                                     radius: 6
                                                     color: FluTheme.frameColor
                                                     clip: true
@@ -2284,8 +2389,16 @@ FluPage {
                                                         }
                                                     }
 
-                                                    property var imageUrl: modelData || ""
+                                                    property var pic: modelData || {}
                                                     property bool singleImage: itemImageCount === 1
+                                                    // 接口没给尺寸时，用解码出的真实宽高比回填（与评论区同口径）
+                                                    property real decodedRatio: 0
+                                                    property real picRatio: {
+                                                        if (pic.width > 0 && pic.height > 0) return pic.height / pic.width
+                                                        if (decodedRatio > 0) return decodedRatio
+                                                        return 0
+                                                    }
+                                                    property bool isLongPic: dynamic_page.dynamicImageIsLongPic(picRatio, pic.width)
 
                                                     Rectangle {
                                                         id: feedImageMask
@@ -2301,24 +2414,26 @@ FluPage {
                                                     // 动图（.gif/.webp）用 AnimatedImage 播放，静态图用 FluImage
                                                     Loader {
                                                         anchors.fill: parent
-                                                        sourceComponent: GlobalState.isAnimatedImageUrl(imageUrl) ? cardFeedAnimatedImage : cardFeedStaticImage
+                                                        sourceComponent: GlobalState.isAnimatedImageUrl(feedImageContainer.pic.src) ? cardFeedAnimatedImage : cardFeedStaticImage
                                                     }
 
                                                     Component {
                                                         id: cardFeedStaticImage
                                                         FluImage {
                                                             anchors.fill: parent
+                                                            // 单图取原比例图（不裁）；多图非长图让 CDN 裁方省流量；
+                                                            // 多图长图取原比例图，交给客户端顶部对齐裁切
                                                             source: feedImageContainer.singleImage
-                                                                         ? GlobalState.fixImageUrl(feedImageContainer.imageUrl, feedImageContainer.width * Screen.devicePixelRatio, 0, false)
-                                                                         : GlobalState.fixImageUrl(feedImageContainer.imageUrl, feedImageContainer.width * Screen.devicePixelRatio, feedImageContainer.height * Screen.devicePixelRatio, true)
-                                                            fillMode: feedImageContainer.singleImage ? Image.PreserveAspectFit : Image.PreserveAspectCrop
+                                                                         ? GlobalState.fixImageUrl(feedImageContainer.pic.src, feedImageContainer.width * Screen.devicePixelRatio, 0, false)
+                                                                         : dynamic_page.dynamicImageUrl(feedImageContainer.pic, feedImageContainer.width * Screen.devicePixelRatio, feedImageContainer.height * Screen.devicePixelRatio, !feedImageContainer.isLongPic)
+                                                            fillMode: (feedImageContainer.singleImage && !feedImageContainer.isLongPic) ? Image.PreserveAspectFit : Image.PreserveAspectCrop
+                                                            verticalAlignment: feedImageContainer.isLongPic ? Image.AlignTop : Image.AlignVCenter
                                                             asynchronous: true
                                                             cache: true
                                                             smooth: true
                                                             onSourceSizeChanged: {
-                                                                if (feedImageContainer.singleImage && sourceSize.width > 0 && feedImageContainer.width > 0) {
-                                                                    feedImageContainer.Layout.preferredHeight = feedImageContainer.width * sourceSize.height / sourceSize.width
-                                                                }
+                                                                if (feedImageContainer.pic.width <= 0 && sourceSize.width > 0 && sourceSize.height > 0)
+                                                                    feedImageContainer.decodedRatio = sourceSize.height / sourceSize.width
                                                             }
                                                         }
                                                     }
@@ -2329,17 +2444,37 @@ FluPage {
                                                             anchors.fill: parent
                                                             // fixImageUrl 对 .gif/.webp 返回原始 URL，保证动画可播放
                                                             source: feedImageContainer.singleImage
-                                                                         ? GlobalState.fixImageUrl(feedImageContainer.imageUrl, feedImageContainer.width * Screen.devicePixelRatio, 0, false)
-                                                                         : GlobalState.fixImageUrl(feedImageContainer.imageUrl, feedImageContainer.width * Screen.devicePixelRatio, feedImageContainer.height * Screen.devicePixelRatio, true)
-                                                            fillMode: feedImageContainer.singleImage ? Image.PreserveAspectFit : Image.PreserveAspectCrop
+                                                                         ? GlobalState.fixImageUrl(feedImageContainer.pic.src, feedImageContainer.width * Screen.devicePixelRatio, 0, false)
+                                                                         : dynamic_page.dynamicImageUrl(feedImageContainer.pic, feedImageContainer.width * Screen.devicePixelRatio, feedImageContainer.height * Screen.devicePixelRatio, !feedImageContainer.isLongPic)
+                                                            fillMode: (feedImageContainer.singleImage && !feedImageContainer.isLongPic) ? Image.PreserveAspectFit : Image.PreserveAspectCrop
+                                                            verticalAlignment: feedImageContainer.isLongPic ? Image.AlignTop : Image.AlignVCenter
                                                             cache: true
                                                             smooth: true
                                                             playing: true
                                                             onSourceSizeChanged: {
-                                                                if (feedImageContainer.singleImage && sourceSize.width > 0 && feedImageContainer.width > 0) {
-                                                                    feedImageContainer.Layout.preferredHeight = feedImageContainer.width * sourceSize.height / sourceSize.width
-                                                                }
+                                                                if (feedImageContainer.pic.width <= 0 && sourceSize.width > 0 && sourceSize.height > 0)
+                                                                    feedImageContainer.decodedRatio = sourceSize.height / sourceSize.width
                                                             }
+                                                        }
+                                                    }
+
+                                                    // 长图角标：提示只显示了顶部一截，点开可看完整
+                                                    Rectangle {
+                                                        anchors.right: parent.right
+                                                        anchors.bottom: parent.bottom
+                                                        anchors.margins: 6
+                                                        width: feedLongTag.implicitWidth + 10
+                                                        height: feedLongTag.implicitHeight + 4
+                                                        radius: 4
+                                                        color: Qt.rgba(0, 0, 0, 0.55)
+                                                        visible: feedImageContainer.isLongPic
+
+                                                        FluText {
+                                                            id: feedLongTag
+                                                            anchors.centerIn: parent
+                                                            text: "长图"
+                                                            font: FluTextStyle.Caption
+                                                            color: "white"
                                                         }
                                                     }
                                                 }
@@ -3217,7 +3352,7 @@ FluPage {
                                         Layout.fillWidth: false
                                         Layout.alignment: Qt.AlignLeft
                                         Layout.preferredWidth: detailForwardColumn.width * 2 / 3
-                                        columns: detailForwardCard.forwardImageCount === 1 ? 1 : 3
+                                        columns: dynamic_page.dynamicGridColumns(detailForwardCard.forwardImageCount)
                                         rowSpacing: 4
                                         columnSpacing: 4
                                         visible: detailForwardCard.forwardImageCount > 0
@@ -3228,7 +3363,9 @@ FluPage {
                                             Rectangle {
                                                 id: forwardDetailImageContainer
                                                 Layout.fillWidth: true
-                                                Layout.preferredHeight: width
+                                                Layout.preferredHeight: forwardDetailImageContainer.singleImage
+                                                                        ? dynamic_page.dynamicSingleImageHeight(forwardDetailImageContainer.width, forwardDetailImageContainer.picRatio)
+                                                                        : forwardDetailImageContainer.width
                                                 radius: 6
                                                 color: FluTheme.frameColor
                                                 clip: true
@@ -3243,8 +3380,16 @@ FluPage {
                                                     }
                                                 }
 
-                                                property var imageUrl: modelData || ""
+                                                property var pic: modelData || {}
                                                 property bool singleImage: detailForwardCard.forwardImageCount === 1
+                                                // 接口没给尺寸时，用解码出的真实宽高比回填（与评论区同口径）
+                                                property real decodedRatio: 0
+                                                property real picRatio: {
+                                                    if (pic.width > 0 && pic.height > 0) return pic.height / pic.width
+                                                    if (decodedRatio > 0) return decodedRatio
+                                                    return 0
+                                                }
+                                                property bool isLongPic: dynamic_page.dynamicImageIsLongPic(picRatio, pic.width)
 
                                                 Rectangle {
                                                     id: forwardDetailImageMask
@@ -3260,24 +3405,26 @@ FluPage {
                                                 // 动图（.gif/.webp）用 AnimatedImage 播放，静态图用 FluImage
                                                 Loader {
                                                     anchors.fill: parent
-                                                    sourceComponent: GlobalState.isAnimatedImageUrl(forwardDetailImageContainer.imageUrl) ? detailForwardAnimatedImage : detailForwardStaticImage
+                                                    sourceComponent: GlobalState.isAnimatedImageUrl(forwardDetailImageContainer.pic.src) ? detailForwardAnimatedImage : detailForwardStaticImage
                                                 }
 
                                                 Component {
                                                     id: detailForwardStaticImage
                                                     FluImage {
                                                         anchors.fill: parent
+                                                        // 单图取原比例图（不裁）；多图非长图让 CDN 裁方省流量；
+                                                        // 多图长图取原比例图，交给客户端顶部对齐裁切
                                                         source: forwardDetailImageContainer.singleImage
-                                                                     ? GlobalState.fixImageUrl(forwardDetailImageContainer.imageUrl, forwardDetailImageContainer.width * Screen.devicePixelRatio, 0, false)
-                                                                     : GlobalState.fixImageUrl(forwardDetailImageContainer.imageUrl, forwardDetailImageContainer.width * Screen.devicePixelRatio, forwardDetailImageContainer.height * Screen.devicePixelRatio, true)
-                                                        fillMode: forwardDetailImageContainer.singleImage ? Image.PreserveAspectFit : Image.PreserveAspectCrop
+                                                                     ? GlobalState.fixImageUrl(forwardDetailImageContainer.pic.src, forwardDetailImageContainer.width * Screen.devicePixelRatio, 0, false)
+                                                                     : dynamic_page.dynamicImageUrl(forwardDetailImageContainer.pic, forwardDetailImageContainer.width * Screen.devicePixelRatio, forwardDetailImageContainer.height * Screen.devicePixelRatio, !forwardDetailImageContainer.isLongPic)
+                                                        fillMode: (forwardDetailImageContainer.singleImage && !forwardDetailImageContainer.isLongPic) ? Image.PreserveAspectFit : Image.PreserveAspectCrop
+                                                        verticalAlignment: forwardDetailImageContainer.isLongPic ? Image.AlignTop : Image.AlignVCenter
                                                         asynchronous: true
                                                         cache: true
                                                         smooth: true
                                                         onSourceSizeChanged: {
-                                                            if (forwardDetailImageContainer.singleImage && sourceSize.width > 0 && forwardDetailImageContainer.width > 0) {
-                                                                forwardDetailImageContainer.Layout.preferredHeight = forwardDetailImageContainer.width * sourceSize.height / sourceSize.width
-                                                            }
+                                                            if (forwardDetailImageContainer.pic.width <= 0 && sourceSize.width > 0 && sourceSize.height > 0)
+                                                                forwardDetailImageContainer.decodedRatio = sourceSize.height / sourceSize.width
                                                         }
                                                     }
                                                 }
@@ -3288,17 +3435,37 @@ FluPage {
                                                         anchors.fill: parent
                                                         // fixImageUrl 对 .gif/.webp 返回原始 URL，保证动画可播放
                                                         source: forwardDetailImageContainer.singleImage
-                                                                     ? GlobalState.fixImageUrl(forwardDetailImageContainer.imageUrl, forwardDetailImageContainer.width * Screen.devicePixelRatio, 0, false)
-                                                                     : GlobalState.fixImageUrl(forwardDetailImageContainer.imageUrl, forwardDetailImageContainer.width * Screen.devicePixelRatio, forwardDetailImageContainer.height * Screen.devicePixelRatio, true)
-                                                        fillMode: forwardDetailImageContainer.singleImage ? Image.PreserveAspectFit : Image.PreserveAspectCrop
+                                                                     ? GlobalState.fixImageUrl(forwardDetailImageContainer.pic.src, forwardDetailImageContainer.width * Screen.devicePixelRatio, 0, false)
+                                                                     : dynamic_page.dynamicImageUrl(forwardDetailImageContainer.pic, forwardDetailImageContainer.width * Screen.devicePixelRatio, forwardDetailImageContainer.height * Screen.devicePixelRatio, !forwardDetailImageContainer.isLongPic)
+                                                        fillMode: (forwardDetailImageContainer.singleImage && !forwardDetailImageContainer.isLongPic) ? Image.PreserveAspectFit : Image.PreserveAspectCrop
+                                                        verticalAlignment: forwardDetailImageContainer.isLongPic ? Image.AlignTop : Image.AlignVCenter
                                                         cache: true
                                                         smooth: true
                                                         playing: true
                                                         onSourceSizeChanged: {
-                                                            if (forwardDetailImageContainer.singleImage && sourceSize.width > 0 && forwardDetailImageContainer.width > 0) {
-                                                                forwardDetailImageContainer.Layout.preferredHeight = forwardDetailImageContainer.width * sourceSize.height / sourceSize.width
-                                                            }
+                                                            if (forwardDetailImageContainer.pic.width <= 0 && sourceSize.width > 0 && sourceSize.height > 0)
+                                                                forwardDetailImageContainer.decodedRatio = sourceSize.height / sourceSize.width
                                                         }
+                                                    }
+                                                }
+
+                                                // 长图角标：提示只显示了顶部一截，点开可看完整
+                                                Rectangle {
+                                                    anchors.right: parent.right
+                                                    anchors.bottom: parent.bottom
+                                                    anchors.margins: 6
+                                                    width: forwardDetailLongTag.implicitWidth + 10
+                                                    height: forwardDetailLongTag.implicitHeight + 4
+                                                    radius: 4
+                                                    color: Qt.rgba(0, 0, 0, 0.55)
+                                                    visible: forwardDetailImageContainer.isLongPic
+
+                                                    FluText {
+                                                        id: forwardDetailLongTag
+                                                        anchors.centerIn: parent
+                                                        text: "长图"
+                                                        font: FluTextStyle.Caption
+                                                        color: "white"
                                                     }
                                                 }
 
@@ -3374,7 +3541,7 @@ FluPage {
                             GridLayout {
                                 id: detailImageGrid
                                 Layout.fillWidth: true
-                                columns: currentDynamic && currentDynamic.images && currentDynamic.images.length === 1 ? 1 : 3
+                                columns: dynamic_page.dynamicGridColumns(currentDynamic && currentDynamic.images ? currentDynamic.images.length : 0)
                                 rowSpacing: 4
                                 columnSpacing: 4
                                 visible: currentDynamic && currentDynamic.images && currentDynamic.images.length > 0
@@ -3385,7 +3552,9 @@ FluPage {
                                     Rectangle {
                                         id: detailImageContainer
                                         Layout.fillWidth: true
-                                        Layout.preferredHeight: width
+                                        Layout.preferredHeight: detailImageContainer.singleImage
+                                                                ? dynamic_page.dynamicSingleImageHeight(detailImageContainer.width, detailImageContainer.picRatio)
+                                                                : detailImageContainer.width
                                         radius: 6
                                         color: FluTheme.frameColor
                                         clip: true
@@ -3400,8 +3569,16 @@ FluPage {
                                             }
                                         }
 
-                                        property var imageUrl: modelData || ""
+                                        property var pic: modelData || {}
                                         property bool singleImage: currentDynamic && currentDynamic.images && currentDynamic.images.length === 1
+                                        // 接口没给尺寸时，用解码出的真实宽高比回填（与评论区同口径）
+                                        property real decodedRatio: 0
+                                        property real picRatio: {
+                                            if (pic.width > 0 && pic.height > 0) return pic.height / pic.width
+                                            if (decodedRatio > 0) return decodedRatio
+                                            return 0
+                                        }
+                                        property bool isLongPic: dynamic_page.dynamicImageIsLongPic(picRatio, pic.width)
 
                                         Rectangle {
                                             id: detailImageMask
@@ -3417,24 +3594,26 @@ FluPage {
                                         // 动图（.gif/.webp）用 AnimatedImage 播放，静态图用 FluImage
                                         Loader {
                                             anchors.fill: parent
-                                            sourceComponent: GlobalState.isAnimatedImageUrl(detailImageContainer.imageUrl) ? detailFeedAnimatedImage : detailFeedStaticImage
+                                            sourceComponent: GlobalState.isAnimatedImageUrl(detailImageContainer.pic.src) ? detailFeedAnimatedImage : detailFeedStaticImage
                                         }
 
                                         Component {
                                             id: detailFeedStaticImage
                                             FluImage {
                                                 anchors.fill: parent
+                                                // 单图取原比例图（不裁）；多图非长图让 CDN 裁方省流量；
+                                                // 多图长图取原比例图，交给客户端顶部对齐裁切
                                                 source: detailImageContainer.singleImage
-                                                             ? GlobalState.fixImageUrl(detailImageContainer.imageUrl, detailImageContainer.width * Screen.devicePixelRatio, 0, false)
-                                                             : GlobalState.fixImageUrl(detailImageContainer.imageUrl, detailImageContainer.width * Screen.devicePixelRatio, detailImageContainer.height * Screen.devicePixelRatio, true)
-                                                fillMode: detailImageContainer.singleImage ? Image.PreserveAspectFit : Image.PreserveAspectCrop
+                                                             ? GlobalState.fixImageUrl(detailImageContainer.pic.src, detailImageContainer.width * Screen.devicePixelRatio, 0, false)
+                                                             : dynamic_page.dynamicImageUrl(detailImageContainer.pic, detailImageContainer.width * Screen.devicePixelRatio, detailImageContainer.height * Screen.devicePixelRatio, !detailImageContainer.isLongPic)
+                                                fillMode: (detailImageContainer.singleImage && !detailImageContainer.isLongPic) ? Image.PreserveAspectFit : Image.PreserveAspectCrop
+                                                verticalAlignment: detailImageContainer.isLongPic ? Image.AlignTop : Image.AlignVCenter
                                                 asynchronous: true
                                                 cache: true
                                                 smooth: true
                                                 onSourceSizeChanged: {
-                                                    if (detailImageContainer.singleImage && sourceSize.width > 0 && detailImageContainer.width > 0) {
-                                                        detailImageContainer.Layout.preferredHeight = detailImageContainer.width * sourceSize.height / sourceSize.width
-                                                    }
+                                                    if (detailImageContainer.pic.width <= 0 && sourceSize.width > 0 && sourceSize.height > 0)
+                                                        detailImageContainer.decodedRatio = sourceSize.height / sourceSize.width
                                                 }
                                             }
                                         }
@@ -3445,17 +3624,37 @@ FluPage {
                                                 anchors.fill: parent
                                                 // fixImageUrl 对 .gif/.webp 返回原始 URL，保证动画可播放
                                                 source: detailImageContainer.singleImage
-                                                             ? GlobalState.fixImageUrl(detailImageContainer.imageUrl, detailImageContainer.width * Screen.devicePixelRatio, 0, false)
-                                                             : GlobalState.fixImageUrl(detailImageContainer.imageUrl, detailImageContainer.width * Screen.devicePixelRatio, detailImageContainer.height * Screen.devicePixelRatio, true)
-                                                fillMode: detailImageContainer.singleImage ? Image.PreserveAspectFit : Image.PreserveAspectCrop
+                                                             ? GlobalState.fixImageUrl(detailImageContainer.pic.src, detailImageContainer.width * Screen.devicePixelRatio, 0, false)
+                                                             : dynamic_page.dynamicImageUrl(detailImageContainer.pic, detailImageContainer.width * Screen.devicePixelRatio, detailImageContainer.height * Screen.devicePixelRatio, !detailImageContainer.isLongPic)
+                                                fillMode: (detailImageContainer.singleImage && !detailImageContainer.isLongPic) ? Image.PreserveAspectFit : Image.PreserveAspectCrop
+                                                verticalAlignment: detailImageContainer.isLongPic ? Image.AlignTop : Image.AlignVCenter
                                                 cache: true
                                                 smooth: true
                                                 playing: true
                                                 onSourceSizeChanged: {
-                                                    if (detailImageContainer.singleImage && sourceSize.width > 0 && detailImageContainer.width > 0) {
-                                                        detailImageContainer.Layout.preferredHeight = detailImageContainer.width * sourceSize.height / sourceSize.width
-                                                    }
+                                                    if (detailImageContainer.pic.width <= 0 && sourceSize.width > 0 && sourceSize.height > 0)
+                                                        detailImageContainer.decodedRatio = sourceSize.height / sourceSize.width
                                                 }
+                                            }
+                                        }
+
+                                        // 长图角标：提示只显示了顶部一截，点开可看完整
+                                        Rectangle {
+                                            anchors.right: parent.right
+                                            anchors.bottom: parent.bottom
+                                            anchors.margins: 6
+                                            width: detailLongTag.implicitWidth + 10
+                                            height: detailLongTag.implicitHeight + 4
+                                            radius: 4
+                                            color: Qt.rgba(0, 0, 0, 0.55)
+                                            visible: detailImageContainer.isLongPic
+
+                                            FluText {
+                                                id: detailLongTag
+                                                anchors.centerIn: parent
+                                                text: "长图"
+                                                font: FluTextStyle.Caption
+                                                color: "white"
                                             }
                                         }
 
