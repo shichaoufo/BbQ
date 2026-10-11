@@ -6518,11 +6518,18 @@ Rectangle {
         visible: pageRoot.commentImagePreviewVisible
         z: 100
 
+        // 预览层的鼠标交互：左键单击关闭、右键弹菜单。
+        // 图片本身那一块由 ImageViewer 自己的左键 MouseArea 接管（拖动平移），
+        // 那块区域里的「单击关闭」由 ImageViewer 的 clicked() 补上（见下）；
+        // 右键 ImageViewer 不接收，会落回这里。
         MouseArea {
             anchors.fill: parent
             acceptedButtons: Qt.LeftButton | Qt.RightButton
             onClicked: (mouse) => {
-                pageRoot.closeCommentImagePreview()
+                if (mouse.button === Qt.RightButton)
+                    previewMenu.openAt(mouse.x, mouse.y)
+                else
+                    pageRoot.closeCommentImagePreview()
                 mouse.accepted = true
             }
         }
@@ -6534,6 +6541,17 @@ Rectangle {
             height: parent.height - 80
             source: pageRoot.previewCurrentImageSource()
             animated: pageRoot.previewCurrentImageIsAnimated()
+            // 左键单击（未拖动）＝ 关闭预览；放大后的拖动平移不会走到这里
+            onClicked: pageRoot.closeCommentImagePreview()
+        }
+
+        // 右键菜单：复制图片 / 下载图片 / 重置缩放
+        ImagePreviewMenu {
+            id: previewMenu
+            imageUrl: pageRoot.previewCurrentImageSource()
+            zoomed: previewImageViewer.zoomed
+            notifyBar: pageInfoBar
+            onResetZoomRequested: previewImageViewer.reset()
         }
 
         // 关闭按钮
