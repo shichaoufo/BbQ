@@ -94,6 +94,131 @@ QtObject {
         var m = /^(https?:\/\/[-A-Za-z0-9+&@#\/%?=~_|!:,.;]*[-A-Za-z0-9+&@#\/%=~_|])/.exec(u)
         return m ? m[1] : u
     }
+
+    // ============ 链接目标解析 ============
+    // 一条硬规矩：**绝不把非 http(s) 的 scheme 交给系统去打开**。
+    //
+    // 实测教训（用户亲历）：
+    //   · 词搜索热词的 app_url_schema 是 bilibili://search?...，
+    //     Windows 上没有注册 bilibili:// 处理程序时，ShellExecute 会
+    //     "跳到微软商店搜索该协议" —— 用户点热词看到的就是这个；
+    //   · 商品链接的 schema 还会是 tbopen://（淘宝）/ openapp.jdmobile://（京东）
+    //     之类，交给系统则完全没反应。
+    // 所以一律先把目标解析成"应用内动作"或"等价网页地址"，解析不出来就
+    // 退化成只染色、不可点 —— 宁可点不动，也不能把用户扔到商店去。
+    function _cmtSearchUrl(kw) {
+        return "https://search.bilibili.com/all?keyword=" + encodeURIComponent(String(kw || ""))
+    }
+    function _cmtSearchKeyword(s) {
+        var m = /[?&]keyword=([^&]*)/.exec(String(s || ""))
+        if (!m) return ""
+        var kw = m[1].replace(/\+/g, " ")
+        try { return decodeURIComponent(kw) } catch (e) { return kw }
+    }
+    // bilibili:// 官方 scheme -> 等价网页地址；解析不出返回 ""
+    function _cmtSchemaToWeb(schema, fallbackKeyword) {
+        var s = String(schema || "")
+        if (!s) return ""
+        if (s.indexOf("http") === 0) return s        // 本来就是网页地址
+        if (s.indexOf("bilibili://") !== 0) return "" // 第三方 scheme 一律不认
+        var m
+        if (s.indexOf("bilibili://search") === 0) {
+            return _cmtSearchUrl(_cmtSearchKeyword(s) || fallbackKeyword)
+        }
+        if ((m = /^bilibili:\/\/video\/(BV[0-9A-Za-z]{10}|av[0-9]+)/i.exec(s))) {
+            return "https://www.bilibili.com/video/" + m[1]
+        }
+        if ((m = /^bilibili:\/\/space\/(\d+)/.exec(s))) {
+            return "https://space.bilibili.com/" + m[1]
+        }
+        if ((m = /^bilibili:\/\/live\/(\d+)/.exec(s))) {
+            return "https://live.bilibili.com/" + m[1]
+        }
+        if ((m = /^bilibili:\/\/bangumi\/play\/(ep|ss)(\d+)/i.exec(s))) {
+            return "https://www.bilibili.com/bangumi/play/" + m[1].toLowerCase() + m[2]
+        }
+        if ((m = /^bilibili:\/\/read\/(?:cv)?(\d+)/.exec(s))) {
+            return "https://www.bilibili.com/read/cv" + m[1]
+        }
+        return ""
+    }
+    // 解析一条服务端 jump_url 该指向哪里。
+    // 返回 { href: 内部目标（空=不可点）, web: 等价网页地址 }
+    function _cmtResolveTarget(tok, e) {
+        var web = ""
+        var http = /^https?:\/\//i
+
+        // 1) 视频号：token / schema / pc_url 任一处认得出 BV|av，就走应用内播放页
+        var vid = _cmtVideoIdOf(tok) || _cmtVideoIdOf(e.appUrlSchema) || _cmtVideoIdOf(e.pcUrl)
+        if (vid) return { href: "video:" + vid, web: "https://www.bilibili.com/video/" + vid }
+
+        // 2) 词搜索热词：判据是服务端 extra.is_word_search（解析见 CommentManager::jsonFlag）。
+        //    产品决定：保持染蓝 + 前置放大镜图标，但点击**改为打开官网搜索**，
+        //    不再把 bilibili://search 丢给系统（那会跳微软商店）。
+        if (e.isWordSearch === true) {
+            var kw = _cmtSearchKeyword(e.appUrlSchema) || String(e.title || tok || "")
+            if (!kw) return { href: "", web: "" }
+            return { href: "search:" + kw, web: _cmtSearchUrl(kw) }
+        }
+
+        // 3) 网页目标优先序：pc_url → app_url_schema（可解析时）→ token 本身。
+        //    商品链接实测 key 就是 https://b23.tv/mall-XXXX，必须能兜到这里：
+        //    它的 app_url_schema 可能是 tbopen:// 这类打不开的第三方 scheme。
+        if (http.test(String(e.pcUrl || ""))) web = e.pcUrl
+        if (!web) web = _cmtSchemaToWeb(e.appUrlSchema, String(e.title || tok || ""))
+        if (!web && http.test(tok)) web = _cmtTrimUrlTail(tok)
+        if (web) return { href: "web:" + web, web: web }
+
+        // 4) 解析不出目标：只染色不可点
+        return { href: "", web: "" }
+    }
+
+    // ============ 前缀图标 ============
+    // 实测：词搜索的前置放大镜图标，画布是 36x66，而图案本体只有 27x27，
+    // 且贴在画布上沿（下方 28px 全是透明留白）。
+    // 旧实现硬写 width=19 height=19，Qt 富文本会把图**非等比**塞进这个方框：
+    // 横向 36→19、纵向 66→19，纵比横多缩了一倍多 —— 看上去就是"被压扁"。
+    // 站内 CDN 支持图片处理后缀，先裁成正方形再等比缩放即可解决：
+    //   @36w_36h_1c.png → 32~36 像素的居中方形裁剪（实测返回 36x36）
+    // 只对站内 CDN 且未带处理后缀的地址加工；其他来源原样使用，避免改坏。
+    function _cmtIconSrc(u) {
+        var s = String(u || "")
+        if (!s) return ""
+        if (s.indexOf("hdslb.com/") < 0) return s
+        if (s.indexOf("@") >= 0) return s
+        return s + "@36w_36h_1c.png"
+    }
+    function _cmtIconImg(u) {
+        var src = _cmtIconSrc(u)
+        if (!src) return ""
+        return '<img src="' + _cmtEscAttr(src)
+             + '" width="18" height="18" style="vertical-align:middle;">'
+    }
+    // ============ 断行 ============
+    // 长 URL 在 Text.Wrap 下整串被当成一个"词"，没有任何断行机会，
+    // 于是连续多个购物链接会横着顶出边界、整段不换行。
+    // 在**可见文本**里插入零宽空格提供断点：不可见、不影响复制，
+    // 但让 Qt 能在 / - . ? & = 之后换行（href 本身不加）。
+    // 协议头（https://）整体保留，避免断成 "https:/" 换行。
+    function _cmtBreakable(s) {
+        var str = String(s)
+        var head = ""
+        var m = /^[a-zA-Z][a-zA-Z0-9+.\-]*:\/\//.exec(str)
+        if (m) {
+            head = m[0]
+            str = str.substring(head.length)
+        }
+        var t = str.replace(/([\/\-_.?&=#,])/g, "$1\u200B")
+        // 兜底：不含任何标点的超长拉丁串，每 24 字符插一个断点
+        t = t.replace(/[0-9A-Za-z]{25,}/g, function (chunk) {
+            var out = ""
+            for (var i = 0; i < chunk.length; i += 24) {
+                out += (i ? "\u200B" : "") + chunk.substring(i, i + 24)
+            }
+            return out
+        })
+        return head + t
+    }
     // 从服务端 token / 原文里提取视频号。key 可能本身就是裸 BV/av 号
     //（实测 key="BV1do5ezGEkR"，app_url_schema 为空），旧实现只认带域名的
     // 形态，故裸号一律识别不出 → 不可点。
@@ -105,13 +230,17 @@ QtObject {
         if (m) return m[1]
         m = /b23\.tv\/(BV[0-9A-Za-z]{10}|av[0-9]+)(?:[\/?#]|$)/i.exec(s)
         if (m) return m[1]
+        // 服务端 schema 形态：bilibili://video/BV1xxxxxxxxx
+        m = /bilibili:\/\/video\/(BV[0-9A-Za-z]{10}|av[0-9]+)/i.exec(s)
+        if (m) return m[1]
         return ""
     }
-    // 生成可点击链接
+    // 生成可点击链接。可见文本先过 _cmtBreakable 插零宽空格，
+    // 否则长 URL 会整串顶出边界（见该函数注释）；href 保持原样不加。
     function _cmtLink(href, text, color, underline) {
         var deco = underline ? "underline" : "none"
         return '<a href="' + _cmtEscAttr(href) + '" style="color:' + color
-             + ';text-decoration:' + deco + ';">' + _cmtEscText(text) + '</a>'
+             + ';text-decoration:' + deco + ';">' + _cmtEscText(_cmtBreakable(text)) + '</a>'
     }
     // 只染蓝、不可点
     function _cmtColorOnly(text, color) {
@@ -123,9 +252,10 @@ QtObject {
         var e = (entry && typeof entry === "object") ? entry
               : { title: (entry === undefined || entry === null) ? tok : String(entry) }
 
-        // ★ 核心修复：词搜索热词默认不染
-        //   实测 54 条 jump_url 中 36 条（67%）是词搜索热词，正文里就是普通词语
-        //   （"一口气看完""先把规矩立住"，甚至人名）。旧实现把判据字段丢了 → 一律染蓝。
+        // 词搜索热词（服务端 extra.is_word_search）：
+        //   产品决定为"染蓝 + 前置图标 + 点击跳官网搜索"（默认开启）。
+        //   若哪天觉得正文里的普通词被染得吵，调用方传 enableWordRe:false 即可
+        //   退回"不染灰字"（PiliPlus 的默认行为）。
         if (e.isWordSearch === true && !wordRe) return _cmtEscText(tok)
 
         // 去重：同一 token 在同一段正文里只渲染一次可点链接。
@@ -138,20 +268,14 @@ QtObject {
         }
 
         var title = e.title ? String(e.title) : tok
-        var href = ""
-        var vid = _cmtVideoIdOf(tok)
-        if (vid) href = "video:" + vid
-        else if (e.appUrlSchema) href = "schema:" + e.appUrlSchema
-        else if (e.pcUrl) href = "web:" + e.pcUrl
-        else if (/^https?:\/\//.test(tok)) href = "web:" + tok
+        var t = _cmtResolveTarget(tok, e)
 
         var icon = ""
         if (opts && opts.showPrefixIcon === true && e.prefixIcon) {
-            icon = '<img src="' + _cmtEscAttr(e.prefixIcon)
-                 + '" width="19" height="19" align="middle" style="vertical-align:middle;">'
+            icon = _cmtIconImg(e.prefixIcon)
         }
-        if (!href) return icon + _cmtColorOnly(title, color)
-        return icon + _cmtLink(href, title, color, e.underline === true)
+        if (!t.href) return icon + _cmtColorOnly(title, color)
+        return icon + _cmtLink(t.href, title, color, e.underline === true)
     }
 
     // 渲染单个 token
@@ -172,21 +296,24 @@ QtObject {
         if (tok.charAt(0) === "@") {
             var nm = tok.substring(1)
             if (Object.prototype.hasOwnProperty.call(ctx.atNameToMid, nm)) {
-                return _cmtLink("bili://user/" + ctx.atNameToMid[nm], tok, ctx.color)
+                return _cmtLink("user:" + ctx.atNameToMid[nm], tok, ctx.color)
             }
         }
 
-        // (c) #话题#：同样只认服务端登记
+        // (c) #话题#：同样只认服务端登记。本项目没有话题落地页，
+        //     跳官网搜索（比"点不动"好，也不再走 bilibili://tag 那种会被
+        //     系统丢给微软商店的 scheme）。
         if (tok.charAt(0) === "#" && tok.length > 2 && tok.charAt(tok.length - 1) === "#") {
             var kw = tok.substring(1, tok.length - 1)
             if (Object.prototype.hasOwnProperty.call(ctx.topics, kw)) {
-                return _cmtLink("bili://tag/" + encodeURIComponent(kw), tok, ctx.color)
+                return _cmtLink("search:" + kw, tok, ctx.color)
             }
         }
 
-        // (d) 投票
+        // (d) 投票：本项目无投票页，也没有等价网页地址 —— 只染色不可点
+        //     （旧实现给的是 bili://vote/id，点下去什么都不会发生）
         if (/^\{vote:\d+\}$/.test(tok)) {
-            return _cmtLink("bili://vote/" + tok.replace(/[^0-9]/g, ""), "投票", ctx.color)
+            return _cmtColorOnly("投票", ctx.color)
         }
 
         // (e) 服务端登记的跳转链接
@@ -236,6 +363,8 @@ QtObject {
     // jumpUrls     { "原文": {title, prefixIcon, appUrlSchema, pcUrl, underline, matchOnce, isWordSearch} }
     //              兼容旧格式：值直接是 title 字符串
     // opts         { durationMs, hasPlayer, enableWordRe, linkColor, showPrefixIcon }
+    //              enableWordRe 控制词搜索热词是否染蓝可点，**默认开启**；
+    //              传 false 即退回 PiliPlus 的默认行为（热词按普通文字显示）。
     // 返回可直接给 Text.RichText 的 HTML
     function formatCommentRichText(message, emotes, topics, atNameToMid, jumpUrls, opts) {
         var o = opts || {}
@@ -247,7 +376,7 @@ QtObject {
             jumpUrls: jumpUrls || {},
             used: {},
             color: o.linkColor || "#00A1D6",
-            wordRe: (o.enableWordRe === true),
+            wordRe: (o.enableWordRe !== false),
             hasPlayer: (o.hasPlayer === true),
             durationMs: (o.durationMs > 0) ? o.durationMs : 0,
             opts: o
@@ -466,9 +595,15 @@ QtObject {
     //   timestamp:<毫秒>         跳转播放进度 —— 需要播放器上下文，由页面自行处理
     //   bili://tag|vote/...      本项目暂无对应页面，返回 false 交由调用方决定
     // 返回 true 表示已消费该链接。
-    function openCommentLink(href) {
+    function openCommentLink(href, hostApp) {
         if (!href) return false
         var h = String(href)
+        // 应用内跳转需要 App 对象。**本文件是 QML 单例，取不到 main.cpp 用
+        // setContextProperty 注册的上下文属性 App**（页面里能取到，单例里
+        // 解析不到 → ReferenceError 被下面的 catch 吞掉 → 表现为"点了没反应"）。
+        // 所以由调用页面把自己的 App 显式传进来；传不进来时退化成用系统
+        // 浏览器打开等价网页，而不是静默失败。
+        var app = hostApp || null
         try {
             // 时间戳必须由持有 mpvPlayer 的页面处理，这里不接管
             if (h.indexOf("timestamp:") === 0) return false
@@ -476,17 +611,46 @@ QtObject {
             if (h.indexOf("video:") === 0) {
                 var vid = h.substring("video:".length)
                 if (vid.length === 0) return false
-                if (/^[Bb][Vv][A-Za-z0-9]{8,}$/.test(vid)) {
-                    App.openVideo(vid, "")
-                    return true
-                }
+                var bvid = vid
                 if (/^[Aa][Vv][0-9]+$/.test(vid)) {
-                    var bvid = _cmtAvToBvid(parseInt(vid.substring(2), 10))
-                    if (bvid) { App.openVideo(bvid, ""); return true }
+                    bvid = _cmtAvToBvid(parseInt(vid.substring(2), 10))
+                    if (!bvid) return false
+                } else if (!/^[Bb][Vv][A-Za-z0-9]{8,}$/.test(vid)) {
+                    return false
                 }
-                return false
+                if (app) {
+                    app.openVideo(bvid, "")
+                } else {
+                    Qt.openUrlExternally("https://www.bilibili.com/video/" + bvid)
+                }
+                return true
             }
 
+            if (h.indexOf("user:") === 0) {
+                var mid = h.substring("user:".length)
+                var q = mid.indexOf("?")
+                if (q >= 0) mid = mid.substring(0, q)
+                var sh = mid.indexOf("#")
+                if (sh >= 0) mid = mid.substring(0, sh)
+                if (!/^[0-9]+$/.test(mid) || mid === "0") return false
+                if (app) {
+                    app.openUserProfile(mid, "", "")
+                } else {
+                    Qt.openUrlExternally("https://space.bilibili.com/" + mid)
+                }
+                return true
+            }
+
+            // 词搜索热词 / 话题：系统浏览器打开 B 站官网搜索
+            if (h.indexOf("search:") === 0) {
+                var kw = h.substring("search:".length)
+                if (!kw) return false
+                Qt.openUrlExternally(_cmtSearchUrl(kw))
+                return true
+            }
+
+            // 网页地址：只放行 http(s)。**刻意不再支持 scheme: 形态** ——
+            // 把 bilibili:// 之类的协议交给系统，Windows 会跳到微软商店。
             if (h.indexOf("web:") === 0) {
                 var u = h.substring("web:".length)
                 if (u.indexOf("http") !== 0) return false
@@ -494,30 +658,17 @@ QtObject {
                 return true
             }
 
-            if (h.indexOf("schema:") === 0) {
-                var sc = h.substring("schema:".length)
-                if (sc.indexOf("http") === 0 || sc.indexOf("bilibili://") === 0) {
-                    Qt.openUrlExternally(sc)
-                    return true
-                }
-                return false
-            }
-
+            // 兼容可能残留在旧 HTML 里的形态（bili://user/<mid>）
             if (h.indexOf("bili://user/") === 0) {
-                var mid = h.substring("bili://user/".length)
-                var q = mid.indexOf("?")
-                if (q >= 0) mid = mid.substring(0, q)
-                var sh = mid.indexOf("#")
-                if (sh >= 0) mid = mid.substring(0, sh)
-                if (/^[0-9]+$/.test(mid) && mid !== "0") {
-                    App.openUserProfile(mid, "", "")
-                    return true
+                var mid2 = h.substring("bili://user/".length).split("?")[0].split("#")[0]
+                if (!/^[0-9]+$/.test(mid2) || mid2 === "0") return false
+                if (app) {
+                    app.openUserProfile(mid2, "", "")
+                } else {
+                    Qt.openUrlExternally("https://space.bilibili.com/" + mid2)
                 }
-                return false
+                return true
             }
-
-            // 话题 / 投票：暂无落地页，交由调用方决定是否提示
-            if (h.indexOf("bili://tag/") === 0 || h.indexOf("bili://vote/") === 0) return false
 
             if (h.indexOf("http://") === 0 || h.indexOf("https://") === 0) {
                 Qt.openUrlExternally(h)
