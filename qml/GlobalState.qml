@@ -382,7 +382,7 @@ QtObject {
 
     // ===== 主入口 =====
     // message      原始正文（未转义，可含 \n）
-    // emotes       { "[微笑]": {url, width, height} }
+    // emotes       { "[微笑]": {url, width, height, gifUrl, isAnimated} }
     // topics       { "话题名": ... }
     // atNameToMid  { "用户名": mid }
     // jumpUrls     { "原文": {title, prefixIcon, appUrlSchema, pcUrl, underline, matchOnce, isWordSearch} }
@@ -390,8 +390,10 @@ QtObject {
     // opts         { durationMs, hasPlayer, enableWordRe, linkColor, showPrefixIcon }
     //              enableWordRe 控制词搜索热词是否染蓝可点，**默认开启**；
     //              传 false 即退回 PiliPlus 的默认行为（热词按普通文字显示）。
-    // 返回可直接给 Text.RichText 的 HTML
-    function formatCommentRichText(message, emotes, topics, atNameToMid, jumpUrls, opts) {
+
+    // 把"收集 token + 组装总正则"抽出来，供下面两个渲染入口共用。
+    // 每次调用都新建正则对象 —— 正则带 lastIndex 状态，复用会串味。
+    function _cmtBuildScanner(message, emotes, topics, atNameToMid, jumpUrls, opts) {
         var o = opts || {}
         var raw = (message === undefined || message === null) ? "" : String(message)
         var ctx = {
@@ -423,9 +425,14 @@ QtObject {
         alts.push("(?:\\d{1,2})[:：]\\d{2}(?:[:：]\\d{2})?")
         alts.push("\\{vote:\\d+\\}")
         alts.push("https?:\\/\\/[-A-Za-z0-9+&@#\\/%?=~_|!:,.;]*[-A-Za-z0-9+&@#\\/%=~_|]")
-        var re = new RegExp(alts.join("|"), "g")
+        return { raw: raw, ctx: ctx, re: new RegExp(alts.join("|"), "g") }
+    }
 
-        // 3) 单次扫描（QML 没有 splitMapJoin，用 exec 循环等价实现）
+    // 单一 HTML 输出（原有行为，绝大多数评论走这条）。
+    // 返回可直接给 Text.RichText 的 HTML
+    function formatCommentRichText(message, emotes, topics, atNameToMid, jumpUrls, opts) {
+        var sc = _cmtBuildScanner(message, emotes, topics, atNameToMid, jumpUrls, opts)
+        var raw = sc.raw, re = sc.re, ctx = sc.ctx
         var out = ""
         var last = 0
         var m
@@ -437,6 +444,79 @@ QtObject {
         }
         out += _cmtEscText(raw.substring(last))
         return out
+    }
+
+    // 分段输出：把**动态表情**单独切出来交给 QML 侧的 AnimatedImage 播。
+    //
+    // 为什么非得分段：Qt 富文本里的 <img> 永远只画第一帧（QTextDocument 把图片
+    // 当静态资源缓存），而 AnimatedImage 又没法嵌进 Text 内部。所以要让动态表情
+    // 动起来，只能把正文拆成若干段、用 Flow 排版：
+    //   文本段 -> Text（RichText，排版仍由 Qt 负责）
+    //   表情段 -> AnimatedImage
+    // 静态表情不受影响，仍然留在文本段里用 <img> 渲染。
+    //
+    // 返回 [{t:"text", html, breakAfter}, {t:"emote", url, gifUrl, size}]
+    //   breakAfter=true 表示该段之后原文有换行 —— 渲染时该段宽度要占满整行，
+    //   后续 item 才会从新行开始（等价于原文的换行）。
+    //   Flow 的 item 是矩形，若把含 <br> 的一整块交给一个 Text，
+    //   它的宽度是最长行的宽度，后面的表情会跑到"最长行"右侧而不是"最后一行"
+    //   右侧，位置就错了 —— 所以 <br> 也必须切段。
+    function formatCommentSegments(message, emotes, topics, atNameToMid, jumpUrls, opts) {
+        var sc = _cmtBuildScanner(message, emotes, topics, atNameToMid, jumpUrls, opts)
+        var raw = sc.raw, re = sc.re, ctx = sc.ctx
+        var segs = []
+        var buf = ""
+
+        // 原文换行在 _cmtEscText 里已经变成 <br>，这里按 <br> 把缓冲再切开。
+        // 连续换行产生的空段直接丢弃 —— 代价是"空行"会少一次，
+        // 换来的是渲染层少一个"占位空行"的特殊分支。
+        function flush() {
+            if (buf === "") return
+            var parts = buf.split("<br>")
+            for (var i = 0; i < parts.length; i++) {
+                if (parts[i] === "") continue
+                segs.push({ t: "text", html: parts[i], breakAfter: (i < parts.length - 1) })
+            }
+            buf = ""
+        }
+
+        var last = 0
+        var m
+        while ((m = re.exec(raw)) !== null) {
+            if (m[0].length === 0) { re.lastIndex++; continue }
+            var em = ctx.emotes[m[0]]
+            if (em && _cmtEmoteIsAnimated(em)) {
+                buf += _cmtEscText(raw.substring(last, m.index))
+                flush()
+                segs.push(_cmtEmoteSegment(em))
+            } else {
+                buf += _cmtEscText(raw.substring(last, m.index))
+                buf += _cmtRenderToken(m[0], m.index, raw, ctx)
+            }
+            last = m.index + m[0].length
+        }
+        buf += _cmtEscText(raw.substring(last))
+        flush()
+        return segs
+    }
+
+    // 该表情是否带动态版本（服务端在 emote 条目上下发 gif_url）。
+    // C++ 侧已把 gifUrl / isAnimated 导出，这里对多种形态做容错。
+    function _cmtEmoteIsAnimated(em) {
+        if (!em || typeof em !== "object") return false
+        if (em.isAnimated === true) return true
+        if (em.gifUrl && String(em.gifUrl) !== "") return true
+        return /\.(gif|webp)([?#]|$)/i.test(String(em.url || ""))
+    }
+    function _cmtEmoteSegment(em) {
+        var sz = (em.width > 0) ? em.width : 24
+        // 这里只补协议相对 URL，**绝不追加 CDN 格式后缀**：
+        // fixImageUrl 在未给宽高时会给 URL 拼 "@.jpg"，动图被拼成 jpg 就只剩第一帧了。
+        var g = String(em.gifUrl || em.url || "")
+        if (g.indexOf("//") === 0) g = "https:" + g
+        var u = String(em.url || "")
+        if (u.indexOf("//") === 0) u = "https:" + u
+        return { t: "emote", url: u, gifUrl: g, size: sz }
     }
 
     // 通用格式化工具函数
