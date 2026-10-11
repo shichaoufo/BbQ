@@ -36,6 +36,9 @@ FluPage {
     property bool detailCommentSortByHeat: true
     property int detailCommentPage: 1
     property int detailCommentTotal: 0
+    // 详情区首屏评论是否在请求中（detailCommentLoadingMore 只管"加载更多"）。
+    // 经 CommentPanel 的 commentLoading 传入，用于区分"还没拿到数据"与"确实没评论"。
+    property bool detailCommentLoading: false
     property bool detailCommentHasNextPage: true
     property bool detailCommentLoadingMore: false
 
@@ -1510,6 +1513,7 @@ FluPage {
         currentDynamic = dynamic
         detailCommentModel.clear()
         detailCommentTotal = 0
+        detailCommentLoading = false
         detailCommentHasNextPage = true
         if (dynamic && dynamic.id_str) {
             Api.getDynamicDetail(dynamic.id_str)
@@ -1542,6 +1546,7 @@ FluPage {
             currentDynamic = null
             detailCommentModel.clear()
             detailCommentTotal = 0
+            detailCommentLoading = false
             detailCommentHasNextPage = true
             detailCommentPage = 1
             detailCommentSortByHeat = true
@@ -1719,6 +1724,7 @@ FluPage {
         detailCommentPage = 1
         detailCommentTotal = 0
         detailCommentLoadingMore = false
+        detailCommentLoading = true
         detailCommentHasNextPage = true
         var sort = detailCommentSortByHeat ? 2 : 1
         CommentManager.getComments(oid, type, 1, 20, sort)
@@ -1732,6 +1738,7 @@ FluPage {
         if (page < 1) page = 1
         detailCommentPage = page
         detailCommentLoadingMore = true
+        detailCommentLoading = true
         var sort = detailCommentSortByHeat ? 2 : 1
         CommentManager.getComments(oid, type, page, count || 20, sort)
     }
@@ -3836,6 +3843,7 @@ FluPage {
                                           : ""
                     sortByHeat: detailCommentSortByHeat
                     commentTotal: detailCommentTotal
+                    commentLoading: detailCommentLoading
                     commentPage: detailCommentPage
                     commentHasNextPage: detailCommentHasNextPage
                     onRequestSort: function(byHeat) {
@@ -4105,6 +4113,7 @@ FluPage {
                 detailCommentPage = page
             }
             detailCommentLoadingMore = false
+            detailCommentLoading = false
             if (detailCommentPage <= 1 || detailCommentTotal <= 0) {
                 detailCommentTotal = total || comments.length
             }
@@ -4194,10 +4203,17 @@ FluPage {
             }
         }
         function onActionSuccess(action, rpid, success, message) {
+            // 点赞/点踩失败此前被完全吞掉（空函数），用户点了没反应、计数却已经
+            // 乐观地加过。失败一律提示；成功不提示（计数与图标变化即反馈）。
+            if (!success) {
+                infoBar.showWarning((message && message.length > 0) ? message : "操作失败")
+            }
         }
         function onErrorOccurred(error) {
             console.warn("[DynamicPage] CommentManager error:", error)
             detailCommentLoadingMore = false
+            // 首屏请求失败也要落闸，否则空列表会永远停在「正在加载评论...」
+            detailCommentLoading = false
         }
     }
 
