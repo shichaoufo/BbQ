@@ -460,9 +460,11 @@ Item {
                                         Layout.topMargin: 14
                                         verticalAlignment: Text.AlignTop
                                         onLinkActivated: function(link) {
-                                            // 统一路由：video: / web: / schema: / bili://user/ 等
+                                            // 统一路由：video: / user: / search: / web: 等
+                                            // App 必须显式传入：GlobalState 是 pragma Singleton，
+                                            // 内部解析不到 main.cpp 的上下文属性 App
                                             // 本组件无播放器上下文，格式化器不会产出 timestamp: 链接
-                                            if (!GlobalState.openCommentLink(link)) {
+                                            if (!GlobalState.openCommentLink(link, App)) {
                                                 console.warn("[CommentPanel] 未识别的评论链接:", link)
                                             }
                                         }
@@ -788,9 +790,10 @@ Item {
                                                 Layout.topMargin: 8
                                                 verticalAlignment: Text.AlignTop
                                                 onLinkActivated: function(link) {
-                                                    // 统一路由：video: / web: / schema: / bili://user/ 等
+                                                    // 统一路由：video: / user: / search: / web: 等
+                                                    // App 必须显式传入（原因同上）
                                                     // 本组件无播放器上下文，格式化器不会产出 timestamp: 链接
-                                                    if (!GlobalState.openCommentLink(link)) {
+                                                    if (!GlobalState.openCommentLink(link, App)) {
                                                         console.warn("[CommentPanel] 未识别的评论链接:", link)
                                                     }
                                                 }
