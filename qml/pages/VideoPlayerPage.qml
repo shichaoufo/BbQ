@@ -93,6 +93,34 @@ Rectangle {
     property int __bangumiPlayLoopCount: 0      // 同 (epId,cid) 上 normal→PGC 的回退次数，≥2 就直接硬调 PGC 接口
     property bool __forcePgcPlayUrl: false      // =true 时，real-bvid 分支直接调 PGC getSeasonPlayUrl，不再尝试普通 getPlayUrl
 
+    // ===== 兜底右键（必须声明在最前面）=====
+    // QML 同层"后声明者在上"。这条若留在文件末尾，就会盖住整个内容区，导致评论
+    // 卡片上的右键菜单永远收不到事件（这也正是"右键任何地方都关页面"的原因）。
+    // 放在最前它才是真正的"兜底"：内容区里没人处理的右键才轮到它。
+    //（内容区里会接右键的只有评论卡片的 TapHandler；图片预览层与迷你窗都声明在
+    //  本条之后，仍在它之上，优先级不变。）
+    MouseArea {
+        anchors.fill: parent
+        acceptedButtons: Qt.RightButton
+        onClicked: (mouse) => {
+            // 评论右键菜单开着时：右键只收菜单，不关页面（右键菜单的通行约定）。
+            // 这里显式判断，不依赖"弹窗会不会吃掉外部按下"这种不确定行为。
+            if (commentMenu.opened) {
+                commentMenu.close()
+                mouse.accepted = true
+                return
+            }
+            // 全屏状态下：右键先退出全屏（符合常见播放器交互预期），再右键才关闭页面
+            if (pageRoot.isFullScreen) {
+                pageRoot.isFullScreen = false
+                mouse.accepted = true
+                return
+            }
+            closePopups()
+            App.closeVideo()
+        }
+    }
+
     FluInfoBar {
         id: pageInfoBar
         root: pageRoot
@@ -106,6 +134,71 @@ Rectangle {
         hoverEnabled: true
         acceptedButtons: Qt.NoButton
         onWheel: (wheel) => wheel.accepted = true
+    }
+
+    // ============ 评论右键菜单（复制）============
+    // 为什么不直接做"可拖拽选中"：评论列表用左键拖拽滚动（触摸手势的桌面模拟）。
+    // 而 Qt 里 TextEdit 一旦 selectByMouse 为真就会 setKeepMouseGrab(true)
+    // （见 qquicktextedit.cpp）—— 这正是父 Flickable 判断"能否抢走拖拽"时要看的
+    // 标志位，于是"鼠标选中"与"拖拽滚动"在 Qt 层面共用同一个开关，拆不开。
+    // 右键菜单只接受右键，完全不碰左键事件链，正文也不必从 Text 换成 TextEdit。
+    property string contextRawText: ""
+    property string contextPermalink: ""
+
+    function closeCommentMenu() { commentMenu.close() }
+
+    // QML 没有直接的剪贴板 API。隐藏 TextEdit 走 selectAll()+copy() 是标准做法：
+    // copy() 把 QTextDocument 的选中内容写入系统剪贴板，与控件是否可见无关。
+    function copyToClipboard(text) {
+        var s = String(text || "")
+        if (s === "") return
+        clipboardHelper.text = s
+        clipboardHelper.selectAll()
+        clipboardHelper.copy()
+    }
+
+    // 评论永久链接：B 站 web 的锚点约定是 {页面地址}#reply{rpid}，楼中楼也能定位。
+    function commentPermalinkOf(rpid) {
+        if (pageRoot.bvid === "" || rpid === undefined || rpid === null) return ""
+        var id = String(rpid)
+        if (id === "" || id === "0") return ""
+        return "https://www.bilibili.com/video/" + pageRoot.bvid + "#reply" + id
+    }
+
+    // eventPoint 优先（右键落点）；取不到时退化为被点卡片的左上角，
+    // 避免菜单飘到窗口角落。
+    function openCommentContextMenu(rawText, permalink, eventPoint, anchorItem) {
+        contextRawText = String(rawText || "")
+        contextPermalink = String(permalink || "")
+        var scene = (eventPoint && eventPoint.scenePosition)
+                  ? eventPoint.scenePosition
+                  : (anchorItem ? anchorItem.mapToItem(null, 0, 0) : null)
+        if (!scene) return
+        var p = commentMenu.parent.mapFromItem(null, scene.x, scene.y)
+        commentMenu.x = p.x
+        commentMenu.y = p.y
+        commentMenu.open()
+    }
+
+    // 剪贴板助手（不可见，不参与布局）
+    TextEdit {
+        id: clipboardHelper
+        visible: false
+    }
+
+    // FluMenu 继承自 QtQuick.Controls.Menu，具备 x/y/open()/close()/opened
+    FluMenu {
+        id: commentMenu
+        FluMenuItem {
+            text: "复制评论内容"
+            enabled: pageRoot.contextRawText !== ""
+            onTriggered: pageRoot.copyToClipboard(pageRoot.contextRawText)
+        }
+        FluMenuItem {
+            text: "复制评论链接"
+            visible: pageRoot.contextPermalink !== ""
+            onTriggered: pageRoot.copyToClipboard(pageRoot.contextPermalink)
+        }
     }
 
     property ListModel commentModel: ListModel {}
@@ -5081,6 +5174,20 @@ Rectangle {
                                         property int commentIndex: index
                                         property var parentModel: model
 
+                                        // 评论右键菜单（复制）。用 TapHandler 而不是铺一层
+                                        // MouseArea：① 只接受右键，左键事件链完全不碰
+                                        // （拖拽滚动 / 链接点击不受影响）；② Handler 不是
+                                        // Item，不参与布局，也不和卡片里已有的头像/用户名/
+                                        // 图片 MouseArea 抢左键。
+                                        TapHandler {
+                                            acceptedButtons: Qt.RightButton
+                                            onTapped: function(eventPoint) {
+                                                pageRoot.openCommentContextMenu(model.content,
+                                                                                pageRoot.commentPermalinkOf(model.rpid),
+                                                                                eventPoint, commentItem)
+                                            }
+                                        }
+
                                         ColumnLayout {
                                             id: commentItemLayout
                                             anchors.top: parent.top
@@ -5423,8 +5530,20 @@ Rectangle {
                                             model: parent.subReplies
 
                                             RowLayout {
+                                                id: subReplyRow
                                         Layout.fillWidth: true
                                         spacing: 8
+
+                                                // 评论右键菜单（复制）：Handler 不是 Item，
+                                                // 不参与 RowLayout 布局，也不碰左键事件
+                                                TapHandler {
+                                                    acceptedButtons: Qt.RightButton
+                                                    onTapped: function(eventPoint) {
+                                                        pageRoot.openCommentContextMenu(modelData.content,
+                                                                                        pageRoot.commentPermalinkOf(modelData.rpid),
+                                                                                        eventPoint, subReplyRow)
+                                                    }
+                                                }
 
                                                 // 子评论头像可点击：打开评论作者的用户主页
                                                 Item {
@@ -6154,21 +6273,6 @@ Rectangle {
                     }
                 }
             }
-        }
-    }
-
-    MouseArea {
-        anchors.fill: parent
-        acceptedButtons: Qt.RightButton
-        onClicked: (mouse) => {
-            // 全屏状态下：右键先退出全屏（符合常见播放器交互预期），再右键才关闭页面
-            if (pageRoot.isFullScreen) {
-                pageRoot.isFullScreen = false
-                mouse.accepted = true
-                return
-            }
-            closePopups()
-            App.closeVideo()
         }
     }
 
