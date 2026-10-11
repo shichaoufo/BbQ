@@ -5158,7 +5158,9 @@ Rectangle {
                                                             //（是否可点已在格式化阶段按"数字边界 + 不超时长"校验过）
                                                             if (link.indexOf("timestamp:") === 0) {
                                                                 mpvPlayer.seek(parseInt(link.substring("timestamp:".length), 10))
-                                                            } else if (!GlobalState.openCommentLink(link)) {
+                                                            } else if (!GlobalState.openCommentLink(link, App)) {
+                                                                // App 必须显式传入：GlobalState 是 pragma Singleton，
+                                                                // 内部解析不到 main.cpp 的上下文属性 App
                                                                 console.warn("[VideoPlayerPage] 未识别的评论链接:", link)
                                                             }
                                                         }
@@ -5479,7 +5481,9 @@ Rectangle {
                                                             //（是否可点已在格式化阶段按"数字边界 + 不超时长"校验过）
                                                             if (link.indexOf("timestamp:") === 0) {
                                                                 mpvPlayer.seek(parseInt(link.substring("timestamp:".length), 10))
-                                                            } else if (!GlobalState.openCommentLink(link)) {
+                                                            } else if (!GlobalState.openCommentLink(link, App)) {
+                                                                // App 必须显式传入：GlobalState 是 pragma Singleton，
+                                                                // 内部解析不到 main.cpp 的上下文属性 App
                                                                 console.warn("[VideoPlayerPage] 未识别的评论链接:", link)
                                                             }
                                                         }
