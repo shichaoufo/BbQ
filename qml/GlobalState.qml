@@ -587,13 +587,20 @@ QtObject {
     }
 
     // 评论正文链接统一路由，供各页面的 onLinkActivated 复用。
+    // 《重要》调用时必须把页面的 App 传进来：GlobalState 是 pragma Singleton，
+    // 内部解析不到 main.cpp 注册的上下文属性 App（详见函数内说明）。
+    //
     // href 契约（由 formatCommentRichText 生成）：
     //   video:<BV|av>            应用内打开视频（裸 BV/av 号，来自服务端 jump_url）
-    //   bili://user/<mid>        打开用户主页（@提及）
+    //   user:<mid>               打开用户主页（@提及）
+    //   search:<关键词>          系统浏览器打开 B 站官网搜索（词搜索热词 / #话题#）
     //   web:<url>                系统浏览器打开（商品/番剧/专栏/直播/opus/任意 http）
-    //   schema:<bilibili://...>  服务端下发的 APP scheme，交系统处理
     //   timestamp:<毫秒>         跳转播放进度 —— 需要播放器上下文，由页面自行处理
-    //   bili://tag|vote/...      本项目暂无对应页面，返回 false 交由调用方决定
+    //   http(s)://...            bili://user/ 等旧形态的兼容兜底
+    //
+    // 刻意不支持 bilibili:// 之类的 APP scheme：直接交给系统外壳时，Windows 找不到
+    // 注册项会跳转微软商店搜索，体验错误。服务端 scheme 一律在下游翻译成 http(s)。
+    // 本项目暂无对应页面的类型（tag / vote）返回 false，交由调用方决定。
     // 返回 true 表示已消费该链接。
     function openCommentLink(href, hostApp) {
         if (!href) return false
