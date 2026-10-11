@@ -73,7 +73,13 @@ void ImageActions::fetch(const QString &url, bool save)
         return;
     }
 
-    QNetworkRequest request(QUrl(src));
+    // 先把 QUrl 落到具名变量再传，不要写成 QNetworkRequest request(QUrl(src));
+    // —— 那种写法里 QUrl(src) 会被当成「参数类型 + 参数名」的**函数声明**
+    // （C++ 的 most vexing parse），request 于是成了函数，后面所有
+    // request.setRawHeader(...) 都会报「is of non-class type」。
+    // MediaDownloader.cpp 也是同样的两步写法，保持一致。
+    const QUrl requestUrl(src);
+    QNetworkRequest request(requestUrl);
     request.setRawHeader(QByteArray("User-Agent"), QByteArray(kUserAgent));
     request.setRawHeader(QByteArray("Referer"), QByteArray("https://www.bilibili.com/"));
     request.setRawHeader(QByteArray("Origin"), QByteArray("https://www.bilibili.com"));
