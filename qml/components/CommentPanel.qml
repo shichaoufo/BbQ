@@ -357,34 +357,85 @@ Item {
         return {}
     }
 
-    function calcCommentGridImageSize(containerWidth) {
-        var spacing = 8
-        var half = Math.floor(containerWidth / 2)
-        var size = half - spacing
-        return Math.max(1, size)
+    // ============================================================
+    // 评论区图片排布（参照 PiliPlus ImageGridView._calcGridInfo）
+    // ============================================================
+    // 对齐 PiliPlus 的部分：
+    //   ① 列数：4 张 -> 2 列，其余多图 -> 3 列（PiliPlus: column = isFour ? 2 : 3）
+    //   ② 单图：按原始宽高比分三档定宽 + 高度 2.6 倍宽封顶。这是唯一不裁剪的分支，
+    //      也是「裁出来总是不是关键部位」这个问题的正解。
+    //   ③ 长图：高/宽 > 2.6 时把裁剪锚点从居中改成顶部 —— 长截图的关键内容在顶部。
+    // 有意保留的差异：
+    //   ① 圆角沿用本项目评论图片的 6（PiliPlus 是 10），且每张图独立圆角，
+    //      不用 PiliPlus 那种「只圆整块外圈」的拼图式圆角；
+    //   ② 间距沿用本项目的 8（PiliPlus 是 5）；
+    //   ③ 4 张时的单元格取「半宽」而不是 PiliPlus 的「1/3 宽」：后者会让 2x2 只占
+    //      正文列宽的 2/3，右边空一大块，在评论卡片里观感像没排好。
+    readonly property int commentImageSpacing: 8
+    readonly property real commentImageMaxRatio: 2.6
+
+    // 网格列数。PiliPlus 内部把「2 张」的 column 记作 3、再单独把单元格取成半宽，
+    // 实际效果就是一行 2 张；这里直接按实际行数写，列数才与单元格宽度自洽。
+    //   1 张 -> 1 列；2 张 / 4 张 -> 2 列；其余多图 -> 3 列
+    function commentGridColumns(count) {
+        if (count <= 1) return 1
+        if (count === 2 || count === 4) return 2
+        return 3
     }
 
-    function calcCommentPictureSize(w, h, maxW, maxH) {
-        if (maxW <= 0) return Qt.size(100, 100)
-        var width = w || maxW
-        var height = h || maxW
-        if (width <= 0 || height <= 0) return Qt.size(maxW, maxW)
-        var aspect = width / height
-        var outW = Math.min(width, maxW)
-        var outH = outW / aspect
-        if (outH > maxH) {
-            outH = maxH
-            outW = outH * aspect
+    // 多图单元格边长（正方形）
+    function commentSquareCellSize(containerWidth, count) {
+        var cols = panelRoot.commentGridColumns(count)
+        var usable = containerWidth - panelRoot.commentImageSpacing * (cols - 1)
+        return Math.max(1, Math.floor(usable / cols))
+    }
+
+    // 单图尺寸：按原始宽高比自适应（PiliPlus isSingle 分支的逐句移植）。
+    //   ratioHW = 原始高 / 原始宽；origWidth <= 0 表示接口没给尺寸，此时不做「不放大」约束。
+    //   ratioWH > 1.45（很宽）              -> 占满正文列宽
+    //   否则 ratioWH >= 1 或 高宽比 < 1.5   -> 2/3 正文列宽
+    //   否则（很竖）                        -> 1/2 正文列宽
+    // 宽度再取 min(列宽, 原图宽) 以免放大；高度 = 宽度 × min(高宽比, 2.6)。
+    function commentSingleImageSize(containerWidth, origWidth, ratioHW) {
+        if (containerWidth <= 0) return Qt.size(100, 100)
+        var ratio = ratioHW > 0 ? ratioHW : 1
+        var ratioWH = 1 / ratio
+        var base = (containerWidth - panelRoot.commentImageSpacing * 2) / 3
+        var outW
+        if (ratioWH > 1.45) {
+            outW = containerWidth
+        } else if (ratioWH >= 1 || (ratio > 1 && ratio < 1.5)) {
+            outW = 2 * base
+        } else {
+            outW = 1.5 * base
         }
-        return Qt.size(Math.max(1, outW), Math.max(1, outH))
+        if (origWidth > 0) outW = Math.min(outW, origWidth)
+        outW = Math.max(1, Math.min(outW, containerWidth))
+        var outH = outW * Math.min(ratio, panelRoot.commentImageMaxRatio)
+        return Qt.size(outW, Math.max(1, outH))
     }
 
-    function getCommentImageThumbnailUrl(src, width, isAnimated) {
-        if (!src) return ""
-        if (isAnimated) return src
+    // 单元格尺寸：单图走按比例分支，多图走正方形分支
+    function commentCellSize(containerWidth, count, origWidth, ratioHW) {
+        if (count <= 1) return panelRoot.commentSingleImageSize(containerWidth, origWidth, ratioHW)
+        var s = panelRoot.commentSquareCellSize(containerWidth, count)
+        return Qt.size(s, s)
+    }
+
+    // 评论图片缩略图 URL。
+    //   crop=false -> "@<w>w.jpg"             只按宽缩放、保持原始比例，交给客户端适配/裁剪
+    //   crop=true  -> "@<w>w_<h>h_1e_1c.jpg"  服务端直接居中裁成目标尺寸（省流量）
+    // 请求宽度取显示宽度的 5 倍（沿用 wiliwili 的做法），避免缩略图分辨率过低被过度放大。
+    // 动图（.gif/.webp）必须取原图：追加 @ 转换参数会被 CDN 按静态 jpg 返回，只剩第一帧。
+    function commentThumbUrl(pic, width, height, crop) {
+        if (!pic || !pic.imgSrc) return ""
+        var src = pic.imgSrc
+        if (pic.isAnimated) return src
         if (src.indexOf("@") >= 0) return src
-        var w = Math.round(width * 5)
-        return src + "@" + w + "w_85q_!note-comment-multiple.jpg"
+        var w = Math.max(1, Math.round(width * 5))
+        if (!crop) return src + "@" + w + "w.jpg"
+        var h = Math.max(1, Math.round(height * 5))
+        return src + "@" + w + "w_" + h + "h_1e_1c.jpg"
     }
 
     function openCommentImagePreview(images, startIndex) {
@@ -659,24 +710,36 @@ Item {
                                     Grid {
                                         Layout.topMargin: 4
                                         Layout.fillWidth: true
-                                        columns: 2
-                                        rowSpacing: 8
-                                        columnSpacing: 8
+                                        property int imageCount: panelRoot.commentPicCount(commentItem.parentModel.pictures)
+                                        columns: panelRoot.commentGridColumns(imageCount)
+                                        rowSpacing: panelRoot.commentImageSpacing
+                                        columnSpacing: panelRoot.commentImageSpacing
 
                                         Repeater {
-                                            model: {
-                                                var pics = commentItem.parentModel.pictures
-                                                var count = panelRoot.commentPicCount(pics)
-                                                return count
-                                            }
+                                            model: panelRoot.commentPicCount(commentItem.parentModel.pictures)
 
                                             Rectangle {
                                                 id: mainImageContainer
                                                 property var pic: panelRoot.commentPicAt(commentItem.parentModel.pictures, index)
-                                                property int imageSize: panelRoot.calcCommentGridImageSize(commentItemLayout.width - 48)
-                                                property bool picIsSmallerThanContainer: pic.width > 0 && pic.height > 0 && pic.width < imageSize && pic.height < imageSize
-                                                width: imageSize
-                                                height: imageSize
+                                                property int picCount: panelRoot.commentPicCount(commentItem.parentModel.pictures)
+                                                property bool isSinglePic: picCount === 1
+                                                // 接口没给 img_width/img_height 时，用解码出来的真实宽高比回填
+                                                property real decodedRatio: 0
+                                                property real picRatio: {
+                                                    if (pic.width > 0 && pic.height > 0)
+                                                        return pic.height / pic.width
+                                                    if (decodedRatio > 0)
+                                                        return decodedRatio
+                                                    return 0
+                                                }
+                                                // 长图：高/宽 超过 2.6 倍（与 PiliPlus isLongPic 同口径）
+                                                property bool isLongPic: picRatio > panelRoot.commentImageMaxRatio
+                                                // 单图按原始比例、多图正方形（见 commentCellSize 注释）
+                                                property size cellSize: panelRoot.commentCellSize(commentItemLayout.width - 48,
+                                                                                                 picCount, pic.width, picRatio)
+
+                                                width: cellSize.width
+                                                height: cellSize.height
                                                 radius: 6
                                                 color: FluTheme.frameColor
                                                 clip: true
@@ -707,11 +770,23 @@ Item {
                                                     id: commentStaticImageComponent
                                                     FluImage {
                                                         anchors.fill: parent
-                                                        source: GlobalState.fixImageUrl(panelRoot.getCommentImageThumbnailUrl(mainImageContainer.pic.imgSrc, mainImageContainer.imageSize, false))
-                                                        fillMode: mainImageContainer.picIsSmallerThanContainer ? Image.PreserveAspectFit : Image.PreserveAspectCrop
+                                                        // 只有「多图且非长图」才让 CDN 居中裁成正方形来省流量；
+                                                        // 单图（按原始比例，不裁）和长图（要顶部对齐）都必须取原比例图
+                                                        source: GlobalState.fixImageUrl(panelRoot.commentThumbUrl(
+                                                                                            mainImageContainer.pic,
+                                                                                            mainImageContainer.width,
+                                                                                            mainImageContainer.height,
+                                                                                            !mainImageContainer.isSinglePic && !mainImageContainer.isLongPic))
+                                                        fillMode: (mainImageContainer.isSinglePic && !mainImageContainer.isLongPic)
+                                                                  ? Image.PreserveAspectFit : Image.PreserveAspectCrop
+                                                        verticalAlignment: mainImageContainer.isLongPic ? Image.AlignTop : Image.AlignVCenter
                                                         asynchronous: true
                                                         cache: true
                                                         smooth: true
+                                                        onSourceSizeChanged: {
+                                                            if (mainImageContainer.pic.width <= 0 && sourceSize.width > 0 && sourceSize.height > 0)
+                                                                mainImageContainer.decodedRatio = sourceSize.height / sourceSize.width
+                                                        }
                                                     }
                                                 }
 
@@ -719,11 +794,42 @@ Item {
                                                     id: commentAnimatedImageComponent
                                                     AnimatedImage {
                                                         anchors.fill: parent
-                                                        source: GlobalState.fixImageUrl(panelRoot.getCommentImageThumbnailUrl(mainImageContainer.pic.imgSrc, mainImageContainer.imageSize, true))
-                                                        fillMode: mainImageContainer.picIsSmallerThanContainer ? Image.PreserveAspectFit : Image.PreserveAspectCrop
+                                                        // 动图必须取原图，不能加任何 CDN 转换参数
+                                                        source: GlobalState.fixImageUrl(panelRoot.commentThumbUrl(
+                                                                                            mainImageContainer.pic,
+                                                                                            mainImageContainer.width,
+                                                                                            mainImageContainer.height,
+                                                                                            false))
+                                                        fillMode: (mainImageContainer.isSinglePic && !mainImageContainer.isLongPic)
+                                                                  ? Image.PreserveAspectFit : Image.PreserveAspectCrop
+                                                        verticalAlignment: mainImageContainer.isLongPic ? Image.AlignTop : Image.AlignVCenter
                                                         cache: true
                                                         smooth: true
                                                         playing: true
+                                                        onSourceSizeChanged: {
+                                                            if (mainImageContainer.pic.width <= 0 && sourceSize.width > 0 && sourceSize.height > 0)
+                                                                mainImageContainer.decodedRatio = sourceSize.height / sourceSize.width
+                                                        }
+                                                    }
+                                                }
+
+                                                // 长图角标：提示这张图只显示了顶部一截，点开可看完整
+                                                Rectangle {
+                                                    anchors.right: parent.right
+                                                    anchors.bottom: parent.bottom
+                                                    anchors.margins: 6
+                                                    width: mainLongTag.implicitWidth + 10
+                                                    height: mainLongTag.implicitHeight + 4
+                                                    radius: 4
+                                                    color: Qt.rgba(0, 0, 0, 0.55)
+                                                    visible: mainImageContainer.isLongPic
+
+                                                    FluText {
+                                                        id: mainLongTag
+                                                        anchors.centerIn: parent
+                                                        text: "长图"
+                                                        font: FluTextStyle.Caption
+                                                        color: "white"
                                                     }
                                                 }
 
@@ -1015,24 +1121,34 @@ Item {
                                             Grid {
                                                 Layout.topMargin: 4
                                                 Layout.fillWidth: true
-                                                columns: 2
-                                                rowSpacing: 8
-                                                columnSpacing: 8
+                                                property int imageCount: panelRoot.commentPicCount(modelData.pictures)
+                                                columns: panelRoot.commentGridColumns(imageCount)
+                                                rowSpacing: panelRoot.commentImageSpacing
+                                                columnSpacing: panelRoot.commentImageSpacing
 
                                                 Repeater {
-                                                    model: {
-                                                        var pics = modelData.pictures
-                                                        var count = panelRoot.commentPicCount(pics)
-                                                        return count
-                                                    }
+                                                    model: panelRoot.commentPicCount(modelData.pictures)
 
                                                     Rectangle {
                                                         id: replyImageContainer
                                                         property var pic: panelRoot.commentPicAt(modelData.pictures, index)
-                                                        property int imageSize: panelRoot.calcCommentGridImageSize(commentItemLayout.width - 48)
-                                                        property bool picIsSmallerThanContainer: pic.width > 0 && pic.height > 0 && pic.width < imageSize && pic.height < imageSize
-                                                        width: imageSize
-                                                        height: imageSize
+                                                        property int picCount: panelRoot.commentPicCount(modelData.pictures)
+                                                        property bool isSinglePic: picCount === 1
+                                                        // 接口没给 img_width/img_height 时，用解码出来的真实宽高比回填
+                                                        property real decodedRatio: 0
+                                                        property real picRatio: {
+                                                            if (pic.width > 0 && pic.height > 0)
+                                                                return pic.height / pic.width
+                                                            if (decodedRatio > 0)
+                                                                return decodedRatio
+                                                            return 0
+                                                        }
+                                                        property bool isLongPic: picRatio > panelRoot.commentImageMaxRatio
+                                                        property size cellSize: panelRoot.commentCellSize(commentItemLayout.width - 48,
+                                                                                                         picCount, pic.width, picRatio)
+
+                                                        width: cellSize.width
+                                                        height: cellSize.height
                                                         radius: 6
                                                         color: FluTheme.frameColor
                                                         clip: true
@@ -1063,11 +1179,22 @@ Item {
                                                             id: replyStaticImageComponent
                                                             FluImage {
                                                                 anchors.fill: parent
-                                                                source: GlobalState.fixImageUrl(panelRoot.getCommentImageThumbnailUrl(replyImageContainer.pic.imgSrc, replyImageContainer.imageSize, false))
-                                                                fillMode: replyImageContainer.picIsSmallerThanContainer ? Image.PreserveAspectFit : Image.PreserveAspectCrop
+                                                                // 只有「多图且非长图」才让 CDN 居中裁成正方形来省流量
+                                                                source: GlobalState.fixImageUrl(panelRoot.commentThumbUrl(
+                                                                                                    replyImageContainer.pic,
+                                                                                                    replyImageContainer.width,
+                                                                                                    replyImageContainer.height,
+                                                                                                    !replyImageContainer.isSinglePic && !replyImageContainer.isLongPic))
+                                                                fillMode: (replyImageContainer.isSinglePic && !replyImageContainer.isLongPic)
+                                                                          ? Image.PreserveAspectFit : Image.PreserveAspectCrop
+                                                                verticalAlignment: replyImageContainer.isLongPic ? Image.AlignTop : Image.AlignVCenter
                                                                 asynchronous: true
                                                                 cache: true
                                                                 smooth: true
+                                                                onSourceSizeChanged: {
+                                                                    if (replyImageContainer.pic.width <= 0 && sourceSize.width > 0 && sourceSize.height > 0)
+                                                                        replyImageContainer.decodedRatio = sourceSize.height / sourceSize.width
+                                                                }
                                                             }
                                                         }
 
@@ -1075,11 +1202,42 @@ Item {
                                                             id: replyAnimatedImageComponent
                                                             AnimatedImage {
                                                                 anchors.fill: parent
-                                                                source: GlobalState.fixImageUrl(panelRoot.getCommentImageThumbnailUrl(replyImageContainer.pic.imgSrc, replyImageContainer.imageSize, true))
-                                                                fillMode: replyImageContainer.picIsSmallerThanContainer ? Image.PreserveAspectFit : Image.PreserveAspectCrop
+                                                                // 动图必须取原图，不能加任何 CDN 转换参数
+                                                                source: GlobalState.fixImageUrl(panelRoot.commentThumbUrl(
+                                                                                                    replyImageContainer.pic,
+                                                                                                    replyImageContainer.width,
+                                                                                                    replyImageContainer.height,
+                                                                                                    false))
+                                                                fillMode: (replyImageContainer.isSinglePic && !replyImageContainer.isLongPic)
+                                                                          ? Image.PreserveAspectFit : Image.PreserveAspectCrop
+                                                                verticalAlignment: replyImageContainer.isLongPic ? Image.AlignTop : Image.AlignVCenter
                                                                 cache: true
                                                                 smooth: true
                                                                 playing: true
+                                                                onSourceSizeChanged: {
+                                                                    if (replyImageContainer.pic.width <= 0 && sourceSize.width > 0 && sourceSize.height > 0)
+                                                                        replyImageContainer.decodedRatio = sourceSize.height / sourceSize.width
+                                                                }
+                                                            }
+                                                        }
+
+                                                        // 长图角标：提示这张图只显示了顶部一截，点开可看完整
+                                                        Rectangle {
+                                                            anchors.right: parent.right
+                                                            anchors.bottom: parent.bottom
+                                                            anchors.margins: 6
+                                                            width: replyLongTag.implicitWidth + 10
+                                                            height: replyLongTag.implicitHeight + 4
+                                                            radius: 4
+                                                            color: Qt.rgba(0, 0, 0, 0.55)
+                                                            visible: replyImageContainer.isLongPic
+
+                                                            FluText {
+                                                                id: replyLongTag
+                                                                anchors.centerIn: parent
+                                                                text: "长图"
+                                                                font: FluTextStyle.Caption
+                                                                color: "white"
                                                             }
                                                         }
 
