@@ -16,6 +16,9 @@ Item {
     property string aid: ""
     property bool sortByHeat: true
     property int commentTotal: 0
+    // 首屏评论是否在请求中。由页面维护（本组件不自己发请求）。
+    // 用来区分"还没拿到数据"与"服务端就是没有评论" —— 见下方空列表文案。
+    property bool commentLoading: false
     property int commentPage: 1
     property bool commentHasNextPage: true
     property int commentType: 1
@@ -47,6 +50,17 @@ Item {
     property string replyToUser: ""
     property string replyRpid: ""
     property string replyRootRpid: ""
+
+    // 退出「回复某人」状态。
+    // 三个字段必须一起清 —— 只清 replyToUser 会让 replyRpid / replyRootRpid 残留，
+    // 用户点完「取消」再直接发一条普通评论时，requestSendComment 会带着上一轮的
+    // root/parent 发出去，被服务端当成楼中楼回复挂到旧楼层下面。
+    // 取消与发布两条路径都走这里，避免再出现"一处清三个、一处只清一个"的漂移。
+    function cancelReply() {
+        replyToUser = ""
+        replyRpid = ""
+        replyRootRpid = ""
+    }
 
     property bool commentImagePreviewVisible: false
     property var commentPreviewImages: []
@@ -1465,7 +1479,11 @@ Item {
 
                 FluText {
                     width: parent.width
-                    text: panelRoot.commentModel && panelRoot.commentModel.count === 0 ? "暂无评论" : "正在加载评论..."
+                    // 空列表时才有意义：请求中显示「正在加载评论...」，请求结束仍为空
+                    // 才是「暂无评论」。原写法两个分支都挂在 count === 0 上，而 visible
+                    // 又要求 count === 0 —— text 永远只能取到「暂无评论」，
+                    // 「正在加载评论...」是一句走不到的死分支。
+                    text: panelRoot.commentLoading ? "正在加载评论..." : "暂无评论"
                     font: FluTextStyle.Caption
                     color: FluTheme.fontSecondaryColor
                     horizontalAlignment: Text.AlignHCenter
@@ -1494,7 +1512,7 @@ Item {
                 font: FluTextStyle.Caption
                 textColor: FluTheme.fontSecondaryColor
                 visible: panelRoot.replyToUser !== ""
-                onClicked: { panelRoot.replyToUser = "" }
+                onClicked: panelRoot.cancelReply()
             }
 
             FluButton {
@@ -1534,9 +1552,7 @@ Item {
                         panelRoot.requestSendComment(commentInput.text, rootId, parentId)
                     }
                     commentInput.text = ""
-                    panelRoot.replyToUser = ""
-                    panelRoot.replyRpid = ""
-                    panelRoot.replyRootRpid = ""
+                    panelRoot.cancelReply()
                 }
             }
         }
