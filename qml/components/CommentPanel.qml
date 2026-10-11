@@ -783,13 +783,13 @@ Item {
                                                     id: commentStaticImageComponent
                                                     FluImage {
                                                         anchors.fill: parent
-                                                        // 只有「多图且非长图」才让 CDN 居中裁成正方形来省流量；
-                                                        // 单图（按原始比例，不裁）和长图（要顶部对齐）都必须取原比例图
+                                                        // 单图（非长图）取原比例图不裁；其余（多图任意 / 单图长图）都让 CDN 按容器比例裁；
+                                                        // 注意不能用 "@Ww_Hh.jpg"（无 _1c）—— contain 语义会把长图缩成细条再放大，排布就糊了
                                                         source: GlobalState.fixImageUrl(panelRoot.commentThumbUrl(
                                                                                             mainImageContainer.pic,
                                                                                             mainImageContainer.width,
                                                                                             mainImageContainer.height,
-                                                                                            !mainImageContainer.isSinglePic && !mainImageContainer.isLongPic))
+                                                                                            !mainImageContainer.isSinglePic || mainImageContainer.isLongPic))
                                                         fillMode: (mainImageContainer.isSinglePic && !mainImageContainer.isLongPic)
                                                                   ? Image.PreserveAspectFit : Image.PreserveAspectCrop
                                                         verticalAlignment: mainImageContainer.isLongPic ? Image.AlignTop : Image.AlignVCenter
@@ -1192,12 +1192,12 @@ Item {
                                                             id: replyStaticImageComponent
                                                             FluImage {
                                                                 anchors.fill: parent
-                                                                // 只有「多图且非长图」才让 CDN 居中裁成正方形来省流量
+                                                                // 单图（非长图）取原比例图不裁；其余（多图任意 / 单图长图）都让 CDN 按容器比例裁
                                                                 source: GlobalState.fixImageUrl(panelRoot.commentThumbUrl(
                                                                                                     replyImageContainer.pic,
                                                                                                     replyImageContainer.width,
                                                                                                     replyImageContainer.height,
-                                                                                                    !replyImageContainer.isSinglePic && !replyImageContainer.isLongPic))
+                                                                                                    !replyImageContainer.isSinglePic || replyImageContainer.isLongPic))
                                                                 fillMode: (replyImageContainer.isSinglePic && !replyImageContainer.isLongPic)
                                                                           ? Image.PreserveAspectFit : Image.PreserveAspectCrop
                                                                 verticalAlignment: replyImageContainer.isLongPic ? Image.AlignTop : Image.AlignVCenter
