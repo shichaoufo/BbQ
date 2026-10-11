@@ -3921,11 +3921,18 @@ FluPage {
         visible: dynamic_page.detailImagePreviewVisible
         z: 103
 
+        // 预览层的鼠标交互：左键单击关闭、右键弹菜单。
+        // 图片本身那一块由 ImageViewer 自己的左键 MouseArea 接管（拖动平移），
+        // 那块区域里的「单击关闭」由 ImageViewer 的 clicked() 补上（见下）；
+        // 右键 ImageViewer 不接收，会落回这里。
         MouseArea {
             anchors.fill: parent
             acceptedButtons: Qt.LeftButton | Qt.RightButton
             onClicked: function(mouse) {
-                dynamic_page.closeDetailImagePreview()
+                if (mouse.button === Qt.RightButton)
+                    detailPreviewMenu.openAt(mouse.x, mouse.y)
+                else
+                    dynamic_page.closeDetailImagePreview()
                 mouse.accepted = true
             }
         }
@@ -3937,6 +3944,17 @@ FluPage {
             height: parent.height - 80
             source: dynamic_page.previewCurrentImageUrl()
             animated: dynamic_page.previewCurrentImageIsAnimated()
+            // 左键单击（未拖动）＝ 关闭预览；放大后的拖动平移不会走到这里
+            onClicked: dynamic_page.closeDetailImagePreview()
+        }
+
+        // 右键菜单：复制图片 / 下载图片 / 重置缩放
+        ImagePreviewMenu {
+            id: detailPreviewMenu
+            imageUrl: dynamic_page.previewCurrentImageUrl()
+            zoomed: detailImageViewer.zoomed
+            notifyBar: infoBar
+            onResetZoomRequested: detailImageViewer.reset()
         }
 
         Rectangle {
