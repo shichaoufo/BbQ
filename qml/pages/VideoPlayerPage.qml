@@ -767,6 +767,37 @@ Rectangle {
         return prefixHtml + '<span style="color:' + FluTheme.fontPrimaryColor + ';">' + bodyHtml + '</span>'
     }
 
+    // 分段版正文 —— 给 CommentRichText 用（原因同 CommentPanel.commentSegmentsOf：
+    // 动态表情必须切成独立段才能交给 AnimatedImage 播）。
+    // 参数与 formatCommentContent 一致，hasPlayer / durationMs 也照传，
+    // 所以时间戳在本页仍旧可点。
+    function commentSegmentsOf(content, emotes, isReply, jumpUrlInfos, candidateNames, atNameToMid) {
+        var prefixHtml = ""
+        var body = content || ""
+        if (isReply) {
+            var sp = pageRoot.splitReplyPrefix(body, candidateNames)
+            if (sp) {
+                prefixHtml = '<span style="color:' + FluTheme.fontSecondaryColor + ';">'
+                           + pageRoot.escapeHtml(sp.prefix) + '</span>'
+                body = sp.rest
+            }
+        }
+        var segs = GlobalState.formatCommentSegments(body, emotes, {}, atNameToMid, jumpUrlInfos, {
+            linkColor: "#00A1D6",
+            hasPlayer: true,
+            durationMs: pageRoot.videoDuration > 0 ? pageRoot.videoDuration * 1000 : 0,
+            showPrefixIcon: true
+        })
+        if (prefixHtml === "") return segs
+        var out = segs.slice()
+        if (out.length > 0 && out[0].t === "text") {
+            out[0] = { t: "text", html: prefixHtml + out[0].html, breakAfter: out[0].breakAfter }
+        } else {
+            out.unshift({ t: "text", html: prefixHtml, breakAfter: false })
+        }
+        return out
+    }
+
     // 取评论的 jump_url 完整信息表。ListModel 存嵌套 map 时角色会失效
     //（m.jumpUrlInfos[key] 取不到值），故 C++ 侧另导出 jumpUrlInfosJson 字符串，
     // 与既有 atNamesJson 同一套路；楼中楼经 JSON 往返后可能已是对象，两者兼容。
@@ -5143,16 +5174,13 @@ Rectangle {
                                                         }
                                                     }
 
-                                                    FluText {
-                                                        text: pageRoot.formatCommentContent(model.content, model.emotes, false, pageRoot.jumpInfosOf(model), null, pageRoot.atMidMapOf(model))
-                                                        font: FluTextStyle.Body
-                                                        color: FluTheme.fontPrimaryColor
-                                                        textFormat: Text.RichText
-                                                        wrapMode: Text.Wrap
+                                                    CommentRichText {
+                                                        segments: pageRoot.commentSegmentsOf(model.content, model.emotes, false, pageRoot.jumpInfosOf(model), null, pageRoot.atMidMapOf(model))
+                                                        bodyFont: FluTextStyle.Body
+                                                        bodyColor: FluTheme.fontPrimaryColor
                                                         Layout.fillWidth: true
                                                         Layout.preferredWidth: 0
                                                         Layout.topMargin: 14
-                                                        verticalAlignment: Text.AlignTop
                                                         onLinkActivated: function(link) {
                                                             // 时间戳：本页有播放器上下文，跳转进度
                                                             //（是否可点已在格式化阶段按"数字边界 + 不超时长"校验过）
@@ -5463,19 +5491,16 @@ Rectangle {
                                                         }
                                                     }
 
-                                                    FluText {
+                                                    CommentRichText {
                                                         // 候选用户名 = 根评论作者 + 已加载子评论作者（用于
                                                         // "回复 @xxx" 前缀的精确切分，见 splitReplyPrefix）
-                                                        text: pageRoot.formatCommentContent(modelData.content, modelData.emotes, true, pageRoot.jumpInfosOf(modelData),
-                                                                                           parent.parent.parent.replyCandidates, pageRoot.atMidMapOf(modelData))
-                                                        font: FluTextStyle.Body
-                                                        color: FluTheme.fontPrimaryColor
-                                                        textFormat: Text.RichText
-                                                        wrapMode: Text.Wrap
+                                                        segments: pageRoot.commentSegmentsOf(modelData.content, modelData.emotes, true, pageRoot.jumpInfosOf(modelData),
+                                                                                             parent.parent.parent.replyCandidates, pageRoot.atMidMapOf(modelData))
+                                                        bodyFont: FluTextStyle.Body
+                                                        bodyColor: FluTheme.fontPrimaryColor
                                                         Layout.fillWidth: true
                                                         Layout.preferredWidth: 0
                                                         Layout.topMargin: 8
-                                                        verticalAlignment: Text.AlignTop
                                                         onLinkActivated: function(link) {
                                                             // 时间戳：本页有播放器上下文，跳转进度
                                                             //（是否可点已在格式化阶段按"数字边界 + 不超时长"校验过）
