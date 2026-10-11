@@ -422,9 +422,22 @@ Item {
         return Qt.size(s, s)
     }
 
+    // 方形缩略图的裁剪锚点。
+    // B 站图床 "@<w>w_<h>h_<anchor>.jpg" 的 anchor 实测（fix3/cdn_crop_probe*.py 逐像素定位）：
+    //   1e_1c = 居中；1e_2c = 左上；1e_3c = 右下
+    // 锚点是**服务端**裁剪，客户端再设 verticalAlignment 也救不回来 —— 所以必须在这里选对。
+    //   竖图/方图（高 >= 宽）在方形格子里有多余的纵向空间 -> 取顶部(1e_2c)，
+    //     否则会像官方预设那样把头部、正文开头居中裁掉；
+    //   横图（高 < 宽）纵向没有余量，纵向锚点毫无意义，而 1e_2c 会连带变成「靠左裁」，
+    //     所以横图继续用居中(1e_1c)。
+    function commentCropAnchor(pic) {
+        if (pic && pic.width > 0 && pic.height > 0 && pic.height >= pic.width) return "1e_2c"
+        return "1e_1c"
+    }
+
     // 评论图片缩略图 URL。
     //   crop=false -> "@<w>w.jpg"             只按宽缩放、保持原始比例，交给客户端适配/裁剪
-    //   crop=true  -> "@<w>w_<h>h_1e_1c.jpg"  服务端直接居中裁成目标尺寸（省流量）
+    //   crop=true  -> "@<w>w_<h>h_<anchor>.jpg"  服务端直接裁成目标尺寸（省流量，锚点见 commentCropAnchor）
     // 请求宽度取显示宽度的 5 倍（沿用 wiliwili 的做法），避免缩略图分辨率过低被过度放大。
     // 动图（.gif/.webp）必须取原图：追加 @ 转换参数会被 CDN 按静态 jpg 返回，只剩第一帧。
     function commentThumbUrl(pic, width, height, crop) {
@@ -435,7 +448,7 @@ Item {
         var w = Math.max(1, Math.round(width * 5))
         if (!crop) return src + "@" + w + "w.jpg"
         var h = Math.max(1, Math.round(height * 5))
-        return src + "@" + w + "w_" + h + "h_1e_1c.jpg"
+        return src + "@" + w + "w_" + h + "h_" + panelRoot.commentCropAnchor(pic) + ".jpg"
     }
 
     function openCommentImagePreview(images, startIndex) {
