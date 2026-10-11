@@ -2994,6 +2994,28 @@ FluPage {
             radius: Theme.frameRadius
             color: FluTheme.backgroundColor
 
+            // ===== 兜底右键（必须是本容器的第一个子项）=====
+            // QML 同层"后声明者在上"。这条原本带 z:5 且声明在 RowLayout 之后，
+            // 会把整个详情内容盖住 —— 评论卡片上的右键菜单因此永远收不到事件
+            //（表现就是"右键任何地方都关掉动态详情"）。
+            // 放到最前（并去掉 z:5）它才是真正的"兜底"：详情里没人处理的右键才轮到它。
+            MouseArea {
+                anchors.fill: parent
+                enabled: detailVisible
+                acceptedButtons: Qt.RightButton
+                onClicked: function(mouse) {
+                    if (mouse.button !== Qt.RightButton) return
+                    // 评论右键菜单开着时：右键只收菜单，不关详情（右键菜单的通行约定）
+                    if (detailCommentPanel.commentMenuOpened) {
+                        detailCommentPanel.closeCommentMenu()
+                        mouse.accepted = true
+                        return
+                    }
+                    closeDynamicDetail()
+                    mouse.accepted = true
+                }
+            }
+
             RowLayout {
                 anchors.fill: parent
                 spacing: 0
@@ -3549,6 +3571,12 @@ FluPage {
                     showDislike: false
                     previewOverlayParent: dynamic_page
                     ownerMid: currentDynamic ? String(currentDynamic.mid) : ""
+                    // 评论永久链接基址：只有视频类动态（type=1，此时 oid 就是该视频的
+                    // aid）能确定；动态/图文评论的链接需要"动态 id ↔ t.bilibili.com/<id>"
+                    // 的对应关系，未核实，故留空 —— 留空时右键菜单不显示"复制评论链接"。
+                    commentPermalinkBase: detailCommentType() === 1 && detailCommentOid() !== ""
+                                          ? "https://www.bilibili.com/video/av" + detailCommentOid()
+                                          : ""
                     sortByHeat: detailCommentSortByHeat
                     commentTotal: detailCommentTotal
                     commentPage: detailCommentPage
@@ -3571,19 +3599,6 @@ FluPage {
                         if (!oid) return
                         CommentManager.sendComment(oid, text, type, rootId, parentId)
                     }
-                }
-            }
-        }
-
-        MouseArea {
-            anchors.fill: parent
-            z: 5
-            enabled: detailVisible
-            acceptedButtons: Qt.RightButton
-            onClicked: function(mouse) {
-                if (mouse.button === Qt.RightButton) {
-                    closeDynamicDetail()
-                    mouse.accepted = true
                 }
             }
         }
