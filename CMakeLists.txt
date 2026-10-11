@@ -199,6 +199,7 @@ set(QML_RESOURCE_FILES
     qml/components/AvatarWithPendant.qml
     qml/components/SegmentedDigits.qml
     qml/components/ImageViewer.qml
+    qml/components/CommentRichText.qml
     qml/styles/Theme.qml
     qml/assets/icons/play.png
     qml/assets/iconpark.ttf
@@ -311,6 +312,7 @@ qt_add_qml_module(${PROJECT_NAME}
         qml/components/AvatarWithPendant.qml
         qml/components/SegmentedDigits.qml
         qml/components/ImageViewer.qml
+        qml/components/CommentRichText.qml
         qml/styles/Theme.qml
     RESOURCES
         qml/assets/icons/play.png
