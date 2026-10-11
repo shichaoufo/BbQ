@@ -154,6 +154,41 @@ Item {
         return prefixHtml + '<span style="color:' + FluTheme.fontPrimaryColor + ';">' + bodyHtml + '</span>'
     }
 
+    // 分段版正文 —— 给 CommentRichText 用。
+    // 与 formatCommentContent 的唯一区别：把**动态表情**切成独立段，好让渲染层
+    // 用 AnimatedImage 播（Qt 富文本的 <img> 只会画第一帧）。静态表情、链接、
+    // @提及、话题、热词的行为完全一致。
+    // 正文里没有动态表情时，CommentRichText 会把各段拼回单块 HTML，
+    // 走与替换前逐字一致的老路径 —— 这是"动图"这个新特性不波及原有排版的保证。
+    function commentSegmentsOf(content, emotes, isReply, jumpUrlInfos, candidateNames, atNameToMid) {
+        var prefixHtml = ""
+        var body = content || ""
+        if (isReply) {
+            var sp = panelRoot.splitReplyPrefix(body, candidateNames)
+            if (sp) {
+                prefixHtml = '<span style="color:' + FluTheme.fontSecondaryColor + ';">'
+                           + panelRoot.escapeHtml(sp.prefix) + '</span>'
+                body = sp.rest
+            }
+        }
+        var segs = GlobalState.formatCommentSegments(body, emotes, {}, atNameToMid, jumpUrlInfos, {
+            linkColor: "#00A1D6",
+            hasPlayer: false,
+            durationMs: 0,
+            showPrefixIcon: true
+        })
+        if (prefixHtml === "") return segs
+        // "回复 @xxx：" 前缀拼进第一个文本段；正文若以动态表情开头，
+        // 就单独补一个只放前缀的文本段。
+        var out = segs.slice()
+        if (out.length > 0 && out[0].t === "text") {
+            out[0] = { t: "text", html: prefixHtml + out[0].html, breakAfter: out[0].breakAfter }
+        } else {
+            out.unshift({ t: "text", html: prefixHtml, breakAfter: false })
+        }
+        return out
+    }
+
     // 取评论的 jump_url 完整信息表。ListModel 存嵌套 map 时角色会失效
     //（m.jumpUrlInfos[key] 取不到值），故 C++ 侧另导出 jumpUrlInfosJson 字符串，
     // 与既有 atNamesJson 同一套路；楼中楼经 JSON 往返后可能已是对象，两者兼容。
@@ -449,16 +484,13 @@ Item {
                                         }
                                     }
 
-                                    FluText {
-                                        text: panelRoot.formatCommentContent(model.content, model.emotes, false, panelRoot.jumpInfosOf(model), null, panelRoot.atMidMapOf(model))
-                                        font: FluTextStyle.Body
-                                        color: FluTheme.fontPrimaryColor
-                                        textFormat: Text.RichText
-                                        wrapMode: Text.Wrap
+                                    CommentRichText {
+                                        segments: panelRoot.commentSegmentsOf(model.content, model.emotes, false, panelRoot.jumpInfosOf(model), null, panelRoot.atMidMapOf(model))
+                                        bodyFont: FluTextStyle.Body
+                                        bodyColor: FluTheme.fontPrimaryColor
                                         Layout.fillWidth: true
                                         Layout.preferredWidth: 0
                                         Layout.topMargin: 14
-                                        verticalAlignment: Text.AlignTop
                                         onLinkActivated: function(link) {
                                             // 统一路由：video: / user: / search: / web: 等
                                             // App 必须显式传入：GlobalState 是 pragma Singleton，
@@ -776,19 +808,16 @@ Item {
                                                 }
                                             }
 
-                                            FluText {
+                                            CommentRichText {
                                                 // 候选用户名 = 根评论作者 + 已加载子评论作者（用于
                                                 // "回复 @xxx" 前缀的精确切分，见 splitReplyPrefix）
-                                                text: panelRoot.formatCommentContent(modelData.content, modelData.emotes, true, panelRoot.jumpInfosOf(modelData),
-                                                                                   parent.parent.parent.replyCandidates, panelRoot.atMidMapOf(modelData))
-                                                font: FluTextStyle.Body
-                                                color: FluTheme.fontPrimaryColor
-                                                textFormat: Text.RichText
-                                                wrapMode: Text.Wrap
+                                                segments: panelRoot.commentSegmentsOf(modelData.content, modelData.emotes, true, panelRoot.jumpInfosOf(modelData),
+                                                                                      parent.parent.parent.replyCandidates, panelRoot.atMidMapOf(modelData))
+                                                bodyFont: FluTextStyle.Body
+                                                bodyColor: FluTheme.fontPrimaryColor
                                                 Layout.fillWidth: true
                                                 Layout.preferredWidth: 0
                                                 Layout.topMargin: 8
-                                                verticalAlignment: Text.AlignTop
                                                 onLinkActivated: function(link) {
                                                     // 统一路由：video: / user: / search: / web: 等
                                                     // App 必须显式传入（原因同上）
