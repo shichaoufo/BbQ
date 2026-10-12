@@ -1507,10 +1507,45 @@ FluPage {
         return resultHtml
     }
 
+    // 把"列表里的 ListModel 元素"还原成详情页能安全使用的普通对象。
+    //
+    // 为什么需要：openDynamicDetail(itemData) 传进来的 itemData 是 feedModel 的
+    // 元素，而 ListModel 对数组/对象 role 的 round-trip 不可靠（见
+    // appendDynamicItem 处的长注释）—— 直接读 itemData.images 可能拿到一个
+    // **没有 length 的对象**，于是 detailImageGrid.imageCount 被赋成 undefined：
+    //   "Unable to assign [undefined] to int"
+    // 同一份数据在列表 delegate 里一直是走 imagesJson/forwardJson 解析的
+    // （见 itemImages / itemForward），详情页却直接读原 role，两边不一致。
+    //
+    // 这里统一从 *Json 角色重建数组/对象，保证详情页拿到的永远是真正的数组。
+    // 只做浅拷贝 + 覆盖这几个键，其余角色原样带过去。
+    // parseDynamicDetail 产出的对象没有 *Json 键，会被原样返回，行为不变。
+    function normalizeDynamicForDetail(d) {
+        if (!d) return d
+        var out = {}
+        var k
+        for (k in d) out[k] = d[k]
+        var jsonKeys = ["images", "videos", "lives", "forward",
+                        "emotes", "jumpUrls", "cardbg",
+                        "atList", "topicList", "urlList"]
+        for (var i = 0; i < jsonKeys.length; i++) {
+            var key = jsonKeys[i]
+            var jk = key + "Json"
+            if (d[jk] !== undefined) {
+                try {
+                    out[key] = JSON.parse(d[jk])
+                } catch (e) {
+                    console.warn("[DynamicPage] normalizeDynamicForDetail parse failed:", key, e)
+                }
+            }
+        }
+        return out
+    }
+
     function openDynamicDetail(dynamic) {
         // 取消可能 pending 的关闭清理（关闭后 250ms 内又重开），避免清掉新数据
         detailCleanupTimer.stop()
-        currentDynamic = dynamic
+        currentDynamic = normalizeDynamicForDetail(dynamic)
         detailCommentModel.clear()
         detailCommentTotal = 0
         detailCommentLoading = false
@@ -3359,10 +3394,20 @@ FluPage {
                                         ? currentDynamic.hasForward
                                         : !!currentDynamic.forward
                                 )
-                                property var forwardData: hasForwardData ? (currentDynamic.forward || {}) : {}
-                                property int forwardImageCount: hasForwardData && forwardData.images ? forwardData.images.length : 0
-                                property int forwardVideoCount: hasForwardData && forwardData.videos ? forwardData.videos.length : 0
-                                property int forwardLiveCount: hasForwardData && forwardData.lives ? forwardData.lives.length : 0
+                                property var forwardData: hasForwardData ? normalizeDynamicForDetail(currentDynamic.forward || {}) : {}
+                                // 同样用 || 0 兜底，理由同 detailImageGrid.imageCount
+                                property int forwardImageCount: {
+                                    var imgs = forwardData.images
+                                    return (imgs && imgs.length) || 0
+                                }
+                                property int forwardVideoCount: {
+                                    var vids = forwardData.videos
+                                    return (vids && vids.length) || 0
+                                }
+                                property int forwardLiveCount: {
+                                    var lvs = forwardData.lives
+                                    return (lvs && lvs.length) || 0
+                                }
 
                                 ColumnLayout {
                                     id: detailForwardColumn
@@ -3609,7 +3654,12 @@ FluPage {
                                 Layout.preferredWidth: detailImageGrid.imageCount === 1
                                                       ? dynamic_page.dynamicImageGridWidth(detailContentColumn.width, currentDynamic.images)
                                                       : detailContentColumn.width
-                                property int imageCount: currentDynamic && currentDynamic.images ? currentDynamic.images.length : 0
+                                // 用 || 0 兜底：即使 images 因故拿到没有 length 的
+                                // 对象，也只会当 0 处理，不会向 int 属性赋 undefined
+                                property int imageCount: {
+                                    var imgs = currentDynamic ? currentDynamic.images : null
+                                    return (imgs && imgs.length) || 0
+                                }
                                 columns: dynamic_page.dynamicGridColumns(detailImageGrid.imageCount)
                                 rowSpacing: dynamic_page.dynamicImageSpacing
                                 columnSpacing: dynamic_page.dynamicImageSpacing
@@ -3639,7 +3689,7 @@ FluPage {
                                         }
 
                                         property var pic: modelData || {}
-                                        property bool singleImage: currentDynamic && currentDynamic.images && currentDynamic.images.length === 1
+                                        property bool singleImage: detailImageGrid.imageCount === 1
                                         // 接口没给尺寸时，用解码出的真实宽高比回填（与评论区同口径）
                                         property real decodedRatio: 0
                                         property real picRatio: {
@@ -3740,7 +3790,10 @@ FluPage {
                                 Layout.fillWidth: false
                                 Layout.preferredWidth: detailContentColumn.width / 3
                                 spacing: Theme.spacingSmall
-                                visible: currentDynamic && currentDynamic.videos && currentDynamic.videos.length > 0
+                                visible: {
+                                    var vids = currentDynamic ? currentDynamic.videos : null
+                                    return !!vids && vids.length > 0
+                                }
 
                                 Repeater {
                                     model: currentDynamic ? (currentDynamic.videos || []) : []
@@ -3767,7 +3820,10 @@ FluPage {
                                 Layout.fillWidth: false
                                 Layout.preferredWidth: detailContentColumn.width / 3
                                 spacing: Theme.spacingSmall
-                                visible: currentDynamic && currentDynamic.lives && currentDynamic.lives.length > 0
+                                visible: {
+                                    var lvs = currentDynamic ? currentDynamic.lives : null
+                                    return !!lvs && lvs.length > 0
+                                }
 
                                 Repeater {
                                     model: currentDynamic ? (currentDynamic.lives || []) : []
