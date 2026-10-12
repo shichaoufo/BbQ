@@ -20,22 +20,32 @@ FluPage {
 
     Connections {
         target: Api
-        function onHistoryListReceived(data) {
-            history_page.appendHistoryData(data)
+        // type 是请求时传的分类标识，原样回传。三个 Tab 各有独立游标，
+        // 响应会乱序到达，必须靠它把数据送回对应的模型
+        function onHistoryListReceived(data, type) {
+            history_page.appendHistoryData(data, history_page.categoryOfType(type))
         }
-        // 断网等网络错误时 Api 只发 errorOccurred 不发数据信号，
-        // 不复位 loading 会让 loadMore 的 loading 守卫永久卡死（只能重启）
+        // 断网等网络错误时 Api 只发 errorOccurred 不发数据信号。
+        // 不复位 loading 会让该 Tab 的 loading 守卫永久卡死（只能重启）
         function onErrorOccurred(error) {
             console.warn("[HistoryPage] API error:", error)
-            if (!history_page.loading) return
-            history_page.loading = false
-            history_page.hasMore = false
+            var cat = history_page.currentCategory()
+            var row = history_page.tabRow(cat)
+            if (row && row.loading) history_page.setTab(cat, "loading", false)
         }
     }
 
     property bool videoVisible: false
     property bool liveVisible: false
     property bool userProfileVisible: false
+
+    // Pivot 索引持久化守卫（与 HomePage 同一模式）：
+    // 页面销毁时把"用户最后选中的 Tab"写回 GlobalState；
+    // _pageReady 防止组件初始化过程中的回写覆盖掉已保存的值。
+    // onCompleted / onDestruction 本体在文件下方（与既有的登录检查、
+    // 播放器清理合并在一起），这里只留状态属性
+    property bool _pageReady: false
+    property int _lastPivotIndex: 0
 
     onVisibleChanged: {
         if (visible) {
@@ -57,6 +67,8 @@ FluPage {
     }
 
     Component.onCompleted: {
+        _pageReady = true
+        _lastPivotIndex = GlobalState.historyPivotIndex
         if (!Login.isLoggedIn) {
             history_page.showLoginWarning()
         } else {
@@ -64,28 +76,83 @@ FluPage {
         }
     }
 
-    property bool loading: false
-    property bool hasMore: true
     property int pageSize: Theme.pageSize
 
-    property int cardWidth: Theme.cardWidth
-    property int margins: Theme.pageMargins
+    // 卡片网格间距参数。列数/格子宽高改由各 Tab 的 GridView 按**自身宽度**计算
+    // （见 historyGridComponent）：三个 Tab 各自算更稳妥，也避免与 pivot 布局耦合。
     property int vSpacing: Theme.pageVSpacing
     property int minHSpacing: Theme.pageHSpacing
-    property int columns: Math.max(1, Math.floor((gridView.width + minHSpacing) / (cardWidth + minHSpacing)))
-    property real cellWidth: columns > 1 ? gridView.width / columns : gridView.width
-    property real displayCardWidth: Math.max(1, cellWidth - minHSpacing)
     property bool _sizeValid: history_page.width > 0 && history_page.height > 0
 
+    // ===== 历史记录按业务类型分三类展示 =====
+    // 做法对齐 PiliPlus（lib/pages/history/controller.dart）：**每个 Tab 一个独立
+    // 游标、各发各的请求**，接口参数用 type 分类（PiliPlus 的 UserHttp.historyList
+    // 传的就是 type，默认 "all"）。而不是"拉全量再在客户端分发"——后者在某一类
+    // 记录特别多时，另一个 Tab 要翻很多页才填得满。
+    //
+    // 分类标识不写死：服务端在 data.tab 里下发 [{type, name}]，按名字匹配出
+    // "视频"/"直播"对应的 type（B站实际是 archive/live）。匹配不到时用兜底值。
+    // 番剧(pgc)归入"视频"Tab —— 它走的也是应用内播放器，与投稿视频同类。
+    property string _videoTabType: "archive"
+    property string _liveTabType: "live"
+
+    // 三个 Tab 的游标与翻页状态。用 ListModel 而不是 JS 对象：绑定系统
+    // 监听不到 JS 对象内部字段的变化，loading/hasMore 改了界面不会刷新。
+    // setProperty 会正常触发 role 变更通知。
     property bool _loginWarnShown: false
-    property int _cursorMax: 0
-    property int _cursorViewAt: 0
-    property string _cursorBusiness: ""
+
+    function tabIndex(category) {
+        for (var i = 0; i < tabStateModel.count; i++) {
+            if (tabStateModel.get(i).category === category) return i
+        }
+        return -1
+    }
+
+    function tabRow(category) {
+        var i = tabIndex(category)
+        return i >= 0 ? tabStateModel.get(i) : null
+    }
+
+    function setTab(category, role, value) {
+        var i = tabIndex(category)
+        if (i >= 0) tabStateModel.setProperty(i, role, value)
+    }
+
+    // 界面 Tab（all/video/live）→ 接口 type 参数
+    function tabTypeOf(category) {
+        if (category === "video") return _videoTabType
+        if (category === "live") return _liveTabType
+        return "all"
+    }
+
+    // 接口回传的 type → 界面 Tab 分类。响应会乱序到达，靠它把数据送回正确的模型
+    function categoryOfType(type) {
+        if (type === _videoTabType) return "video"
+        if (type === _liveTabType) return "live"
+        return "all"
+    }
+
+    function modelOf(category) {
+        if (category === "video") return historyVideoModel
+        if (category === "live") return historyLiveModel
+        return historyAllModel
+    }
+
+    function currentCategory() {
+        if (!historyPivot) return "all"
+        var i = historyPivot.currentIndex
+        return i === 1 ? "video" : (i === 2 ? "live" : "all")
+    }
+
+    // 已加载过的 Tab（懒加载：只加载当前 Tab，切过去时再拉，避免一次三个请求）
+    property var _loadedTabs: ({})
 
     function tryLoadInitial() {
         if (!Login.isLoggedIn) return
-        if (history_page._sizeValid && historyModel.count === 0 && !history_page.loading && history_page.hasMore) {
-            history_page.loadMore()
+        var cat = history_page.currentCategory()
+        if (history_page._sizeValid && !history_page._loadedTabs[cat]) {
+            history_page._loadedTabs[cat] = true
+            history_page.loadMore(cat)
         }
     }
 
@@ -99,17 +166,17 @@ FluPage {
     onWidthChanged: tryLoadInitial()
     onHeightChanged: tryLoadInitial()
 
-    function loadMore() {
-        if (loading || !hasMore) return
+    function loadMore(category) {
+        var row = history_page.tabRow(category)
+        if (!row || row.loading || !row.hasMore) return
         if (!history_page._sizeValid) return
         if (!Login.isLoggedIn) {
             showLoginWarning()
-            loading = false
-            hasMore = false
+            history_page.setTab(category, "hasMore", false)
             return
         }
-        loading = true
-        Api.getHistoryList(_cursorMax, _cursorViewAt, _cursorBusiness, history_page.pageSize)
+        history_page.setTab(category, "loading", true)
+        Api.getHistoryList(row.max, row.viewAt, history_page.tabTypeOf(category), history_page.pageSize)
     }
 
     function refresh() {
@@ -117,32 +184,47 @@ FluPage {
             showLoginWarning()
             return
         }
-        historyModel.clear()
-        _cursorMax = 0
-        _cursorViewAt = 0
-        _cursorBusiness = ""
-        hasMore = true
-        loadMore()
+        // 三个 Tab 全部重置：游标归零、清空模型、恢复 hasMore。
+        // 分类标识也重置，等下次响应里的 data.tab 重新解析
+        _videoTabType = "archive"
+        _liveTabType = "live"
+        _loadedTabs = ({})
+        for (var i = 0; i < tabStateModel.count; i++) {
+            tabStateModel.setProperty(i, "max", 0)
+            tabStateModel.setProperty(i, "viewAt", 0)
+            tabStateModel.setProperty(i, "hasMore", true)
+        }
+        historyAllModel.clear()
+        historyVideoModel.clear()
+        historyLiveModel.clear()
+        // 三个 Tab 都重新拉，避免切过去看到的是旧数据
+        history_page.loadMore("all")
+        history_page.loadMore("video")
+        history_page.loadMore("live")
     }
 
-    function appendHistoryData(data) {
+    function appendHistoryData(data, category) {
+        var model = history_page.modelOf(category)
         try {
             var dataStr = typeof data === "string" ? data : data.toString()
             var resp = JSON.parse(dataStr)
             if (resp.code !== 0 || !resp.data) {
-                console.warn("[HistoryPage] history API error, code:", resp.code, "msg:", resp.message)
+                console.warn("[HistoryPage] history API error, cat:", category,
+                             "code:", resp.code, "msg:", resp.message)
                 var msg = resp.message || ""
                 if (resp.code === -101 || msg.indexOf("未登录") >= 0 || msg.indexOf("账号未登录") >= 0) {
                     showLoginWarning()
                 }
-                loading = false
-                hasMore = false
+                history_page.setTab(category, "hasMore", false)
                 return
             }
 
+            // 只在「全部」响应里解析分类标识 —— data.tab 每个 Tab 的响应都会带回，
+            // 但内容相同，解析一次就够
+            if (category === "all") history_page.parseHistoryTabs(resp)
+
             var list = resp.data.list || []
             var cursor = resp.data.cursor || {}
-            var added = 0
             for (var i = 0; i < list.length; i++) {
                 var item = list[i]
                 if (!item) continue
@@ -245,7 +327,7 @@ FluPage {
                     progressText = history_page.formatDuration(progress) + " / " + history_page.formatDuration(duration)
                 }
 
-                historyModel.append({
+                model.append({
                     type: type,
                     bvid: bvid,
                     roomId: roomId,
@@ -263,19 +345,29 @@ FluPage {
                     finished: finished,
                     isLive: type === "live" && (liveStatus === 1)
                 })
-                added++
             }
 
-            _cursorMax = cursor.max || 0
-            _cursorViewAt = cursor.view_at || 0
-            _cursorBusiness = cursor.business || ""
+            // 游标取服务端 cursor；为空时退回"末条记录的 oid/view_at"
+            // （PiliPlus 同思路：max=last.history.oid, viewAt=last.viewAt）
+            var nextMax = cursor.max || 0
+            var nextViewAt = cursor.view_at || 0
+            if (nextMax === 0 && list.length > 0) {
+                var lastItem = list[list.length - 1]
+                var lastHistory = (lastItem && lastItem.history) || {}
+                nextMax = parseInt(lastHistory.oid, 10) || 0
+                nextViewAt = parseInt(lastItem.view_at, 10) || 0
+            }
+            history_page.setTab(category, "max", nextMax)
+            history_page.setTab(category, "viewAt", nextViewAt)
 
-            hasMore = added > 0
+            // 这一页没拿到数据就是到尾了。注意不能用"列表长度 < pageSize"判断：
+            // 服务端在分类末尾可能返回不满一页
+            history_page.setTab(category, "hasMore", list.length > 0)
         } catch (e) {
-            console.warn("[HistoryPage] parse history data failed:", e)
-            hasMore = false
+            console.warn("[HistoryPage] parse history data failed, cat:", category, e)
+            history_page.setTab(category, "hasMore", false)
         }
-        finishLoad()
+        history_page.setTab(category, "loading", false)
     }
 
     function formatDuration(seconds) {
@@ -314,34 +406,165 @@ FluPage {
         return pad(date.getMonth() + 1) + "-" + pad(date.getDate()) + " " + hm
     }
 
-    function finishLoad() {
-        loading = false
-        fillTimer.start()
-    }
-
-    function checkLoadMore() {
-        if (history_page.loading || !history_page.hasMore) return
-        if (gridView.height <= 0) return
-        if (gridView.contentY + gridView.height >= gridView.contentHeight - Theme.cardWidth * 2) {
-            history_page.loadMore()
+    // 解析服务端下发的历史分类（data.tab: [{type, name}]）。
+    // PiliPlus 直接按它动态生成 Tab；这里界面固定「全部/视频/直播」三个，
+    // 所以只从中取出"视频"和"直播"对应的 type 值，避免把 B站的分类标识写死。
+    function parseHistoryTabs(resp) {
+        var tab = resp.data && resp.data.tab
+        if (!tab || !tab.length) return
+        for (var i = 0; i < tab.length; i++) {
+            var entry = tab[i]
+            if (!entry) continue
+            var name = String(entry.name || "")
+            var t = String(entry.type || "")
+            if (!t) continue
+            if (name.indexOf("视频") >= 0) _videoTabType = t
+            else if (name.indexOf("直播") >= 0) _liveTabType = t
         }
     }
 
-    Timer {
-        id: fillTimer
-        interval: 50
-        onTriggered: {
-            if (history_page.loading || !history_page.hasMore) return
-            if (!history_page._sizeValid || gridView.height <= 0) return
-            var maxFillItems = history_page.pageSize * 10
-            if (historyModel.count < maxFillItems && gridView.contentHeight <= gridView.height + 10) {
-                history_page.loadMore()
+    // 某个 Tab 滚到底部时续拉。grid 由调用方（GridView 自身）传入，
+    // 页面不需要反查当前可见的是哪个 Grid —— 各网格的"自动填满视口"
+    // 也由网格自带的定时器负责（见 historyGridComponent）。
+    function checkLoadMore(category, grid) {
+        var row = history_page.tabRow(category)
+        if (!row || row.loading || !row.hasMore) return
+        if (!grid || grid.height <= 0) return
+        if (grid.contentY + grid.height >= grid.contentHeight - Theme.cardWidth * 2) {
+            history_page.loadMore(category)
+        }
+    }
+
+    // 三个 Tab 的数据模型。全部/视频/直播各一份，互不影响
+    ListModel {
+        id: historyAllModel
+    }
+    ListModel {
+        id: historyVideoModel
+    }
+    ListModel {
+        id: historyLiveModel
+    }
+
+    // 三个 Tab 共用的卡片网格。抽成 Component 避免三份重复代码。
+    // 网格尺寸（列数/格子宽高）在组件内部按**自身宽度**计算 —— 三个 Tab 的
+    // 可见宽度一致，但各自算更稳妥，也不受 pivot 切换时机影响。
+    Component {
+        id: historyGridComponent
+
+        GridView {
+            id: grid
+            // all / video / live。由 Loader 在 onLoaded 里注入。
+            // 默认空串 → modelOf 返回 null → 注入前不绑定任何模型，
+            // 避免「视频」Tab 在 category 就位前闪一下「全部」的数据
+            property string category: ""
+
+            anchors.fill: parent
+            clip: true
+            boundsBehavior: Flickable.StopAtBounds
+            ScrollBar.vertical: FluScrollBar {}
+
+            readonly property int _columns: Math.max(1, Math.floor((width + history_page.minHSpacing) / (Theme.cardWidth + history_page.minHSpacing)))
+            readonly property real _cellWidth: _columns > 1 ? width / _columns : width
+            readonly property real _displayCardWidth: Math.max(1, _cellWidth - history_page.minHSpacing)
+            readonly property real _cellHeight: Math.max(1, _displayCardWidth * Theme.cardAspectRatio + Theme.cardInfoHeight + history_page.vSpacing)
+
+            model: history_page.modelOf(category)
+
+            cellWidth: Math.max(1, _cellWidth)
+            cellHeight: Math.max(1, _cellHeight)
+            cacheBuffer: Math.max(0, height * 2)
+            flow: GridView.LeftToRight
+            layoutDirection: Qt.LeftToRight
+            verticalLayoutDirection: GridView.TopToBottom
+
+            delegate: Item {
+                width: Math.max(1, grid._cellWidth)
+                height: Math.max(1, grid._cellHeight)
+
+                HistoryCard {
+                    anchors.left: parent.left
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: Math.max(1, grid._displayCardWidth - Theme.scrollBarReserve)
+                    type: model.type
+                    bvid: model.bvid
+                    roomId: model.roomId
+                    epId: model.epId
+                    seasonId: model.seasonId
+                    isBangumi: model.isBangumi
+                    title: model.title
+                    // 番剧：使用 seasonTitle（番剧总标题）作为大标题
+                    seasonTitle: model.seasonTitle || ""
+                    // 番剧：使用 epTitle（集数标题，如"第4集 凡人风起天南4"）作为第二行
+                    epTitle: model.epTitle || ""
+                    cover: model.cover
+                    author: model.author
+                    viewTime: model.viewTime
+                    progress: model.progress
+                    finished: model.finished
+                    isLive: model.isLive
+
+                    onClicked: {
+                        if (model.type === "bangumi" || model.isBangumi) {
+                            // 番剧始终走 openBangumiPlayer，确保选集、seasonType 等信息正确加载
+                            // openBangumiPlayer 内部会判断是否有真实 bvid：
+                            //   - 有真实 bvid：走番剧 API 获取完整信息后切换到普通视频路径
+                            //   - 无真实 bvid：走番剧专用接口
+                            history_page.openBangumiPlayer(model.bvid, model.epId, model.seasonId, model.title)
+                        } else if (model.type === "video") {
+                            App.openVideo(model.bvid, model.title)
+                        } else if (model.isLive) {
+                            history_page.openLivePlayer(model.roomId, model.title, model.author)
+                        } else {
+                            infoBar.showWarning("当前直播已结束")
+                        }
+                    }
+                }
+            }
+
+            onContentYChanged: history_page.checkLoadMore(category, grid)
+            onMovementEnded: history_page.checkLoadMore(category, grid)
+
+            // ===== 自动填满当前视口 =====
+            // 每个网格自带一个定时器，不靠页面反查"当前可见的是哪个网格"。
+            // 触发源：内容高度变化（数据到达/尺寸变化）+ 自身变为可见（切 Tab）。
+            // 非重复运行：内容不再变化就不会再触发，空闲时零开销。
+            Timer {
+                id: gridFillTimer
+                interval: 50
+                repeat: false
+                onTriggered: {
+                    if (!grid.visible || !grid.category) return
+                    var row = history_page.tabRow(grid.category)
+                    if (!row || row.loading || !row.hasMore) return
+                    if (grid.model && grid.model.count >= history_page.pageSize * 10) return
+                    if (grid.height > 0 && grid.contentHeight <= grid.height + 10) {
+                        history_page.loadMore(grid.category)
+                    }
+                }
+            }
+
+            onContentHeightChanged: gridFillTimer.restart()
+            onVisibleChanged: if (visible) gridFillTimer.restart()
+
+            // 空状态提示。三个 Tab 各自独立判断，直播记录为空很常见
+            FluText {
+                anchors.centerIn: parent
+                visible: grid.model && grid.model.count === 0
+                text: "暂无记录"
+                font: FluTextStyle.Body
+                color: FluTheme.fontSecondaryColor
             }
         }
     }
 
+    // 三个 Tab 的游标与翻页状态。用 ListModel 而不是 JS 对象：绑定系统
+    // 监听不到 JS 对象内部字段的变化，loading/hasMore 改了界面不会刷新。
     ListModel {
-        id: historyModel
+        id: tabStateModel
+        ListElement { category: "all";   max: 0; viewAt: 0; loading: false; hasMore: true }
+        ListElement { category: "video"; max: 0; viewAt: 0; loading: false; hasMore: true }
+        ListElement { category: "live";  max: 0; viewAt: 0; loading: false; hasMore: true }
     }
 
     FluFrame {
@@ -354,98 +577,79 @@ FluPage {
         anchors.topMargin: Theme.homeFrameTopMargin
         padding: Theme.homeFramePadding
 
-        Rectangle {
-            id: rootRect
-            color: "transparent"
+        // 排版与首页「推荐/热门」一致：FluFrame + FluPivot
+        FluPivot {
+            id: historyPivot
             anchors.fill: parent
-            property int margins: Theme.pageMargins
+            anchors.leftMargin: Theme.pivotLeftMargin
+            font.pixelSize: FluTextStyle.Title.pixelSize * 2 / 3
+            currentIndex: GlobalState.historyPivotIndex
 
-            GridView {
-                id: gridView
-                anchors.fill: parent
-                anchors.leftMargin: rootRect.margins
-                anchors.rightMargin: rootRect.margins + 20
-                anchors.topMargin: rootRect.margins
-                anchors.bottomMargin: rootRect.margins
-                clip: true
-                boundsBehavior: Flickable.StopAtBounds
-                ScrollBar.vertical: FluScrollBar {}
-
-                model: historyModel
-                cellWidth: Math.max(1, history_page.cellWidth)
-                cellHeight: Math.max(1, history_page.displayCardWidth * Theme.cardAspectRatio + Theme.cardInfoHeight + history_page.vSpacing)
-                cacheBuffer: Math.max(0, gridView.height * 2)
-                flow: GridView.LeftToRight
-                layoutDirection: Qt.LeftToRight
-                verticalLayoutDirection: GridView.TopToBottom
-
-                delegate: Item {
-                    width: Math.max(1, history_page.cellWidth)
-                    height: Math.max(1, gridView.cellHeight)
-
-                    HistoryCard {
-                        anchors.left: parent.left
-                        anchors.verticalCenter: parent.verticalCenter
-                        width: Math.max(1, history_page.displayCardWidth - Theme.scrollBarReserve)
-                        type: model.type
-                        bvid: model.bvid
-                        roomId: model.roomId
-                        epId: model.epId
-                        seasonId: model.seasonId
-                        isBangumi: model.isBangumi
-                        title: model.title
-                        // 番剧：使用 seasonTitle（番剧总标题）作为大标题
-                        seasonTitle: model.seasonTitle || ""
-                        // 番剧：使用 epTitle（集数标题，如"第4集 凡人风起天南4"）作为第二行
-                        epTitle: model.epTitle || ""
-                        cover: model.cover
-                        author: model.author
-                        viewTime: model.viewTime
-                        progress: model.progress
-                        finished: model.finished
-                        isLive: model.isLive
-
-                        onClicked: {
-                            if (model.type === "bangumi" || model.isBangumi) {
-                                // 番剧始终走 openBangumiPlayer，确保选集、seasonType 等信息正确加载
-                                // openBangumiPlayer 内部会判断是否有真实 bvid：
-                                //   - 有真实 bvid：走番剧 API 获取完整信息后切换到普通视频路径
-                                //   - 无真实 bvid：走番剧专用接口
-                                history_page.openBangumiPlayer(model.bvid, model.epId, model.seasonId, model.title)
-                            } else if (model.type === "video") {
-                                App.openVideo(model.bvid, model.title)
-                            } else if (model.isLive) {
-                                history_page.openLivePlayer(model.roomId, model.title, model.author)
-                            } else {
-                                infoBar.showWarning("当前直播已结束")
-                            }
-                        }
-                    }
+            onCurrentIndexChanged: {
+                if (history_page.visible && history_page._pageReady) {
+                    history_page._lastPivotIndex = currentIndex
+                    GlobalState.historyPivotIndex = currentIndex
                 }
-
-                onContentYChanged: {
-                    history_page.checkLoadMore()
-                }
-
-                onMovementEnded: {
-                    history_page.checkLoadMore()
+                // 懒加载：第一次切到某个 Tab 时才拉它的数据，
+                // 避免进页面就同时发三个请求
+                var cat = history_page.currentCategory()
+                if (!history_page._loadedTabs[cat]) {
+                    history_page._loadedTabs[cat] = true
+                    history_page.loadMore(cat)
                 }
             }
 
-            // 右下角悬浮刷新按钮
-            FluIconButton {
-                id: refreshBtn
-                width: 50
-                height: 50
-                anchors.right: parent.right
-                anchors.bottom: parent.bottom
-                anchors.rightMargin: 20
-                anchors.bottomMargin: 20
-                iconSource: FluentIcons.Refresh
-                iconSize: 20
-                onClicked: {
-                    history_page.refresh()
+            // 每个 Tab 一个 Loader，加载后把自己的分类注入网格组件。
+            // 用 Loader 而不是直接写三份 GridView：组件只维护一处，
+            // 而 category 在 onLoaded 里赋值可保证注入前模型绑定为 null，
+            // 不会出现「视频」Tab 闪一下「全部」数据的情况
+            FluPivotItem {
+                title: "全部"
+                contentItem: Component {
+                    Loader {
+                        anchors.fill: parent
+                        sourceComponent: historyGridComponent
+                        onLoaded: if (item) item.category = "all"
+                    }
                 }
+            }
+
+            FluPivotItem {
+                title: "视频"
+                contentItem: Component {
+                    Loader {
+                        anchors.fill: parent
+                        sourceComponent: historyGridComponent
+                        onLoaded: if (item) item.category = "video"
+                    }
+                }
+            }
+
+            FluPivotItem {
+                title: "直播"
+                contentItem: Component {
+                    Loader {
+                        anchors.fill: parent
+                        sourceComponent: historyGridComponent
+                        onLoaded: if (item) item.category = "live"
+                    }
+                }
+            }
+        }
+
+        // 右下角悬浮刷新按钮
+        FluIconButton {
+            id: refreshBtn
+            width: 50
+            height: 50
+            anchors.right: parent.right
+            anchors.bottom: parent.bottom
+            anchors.rightMargin: 20
+            anchors.bottomMargin: 20
+            iconSource: FluentIcons.Refresh
+            iconSize: 20
+            onClicked: {
+                history_page.refresh()
             }
         }
     }
@@ -1098,6 +1302,8 @@ FluPage {
     }
 
     Component.onDestruction: {
+        // 记住用户最后选中的 Tab，下次进历史页恢复
+        GlobalState.historyPivotIndex = _lastPivotIndex
         // 离开历史页面时强制销毁播放器，释放 D3D11 资源
         livePlayerDestroyTimer.stop()
         if (livePlayerLoader.item) {

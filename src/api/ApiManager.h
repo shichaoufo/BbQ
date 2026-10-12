@@ -30,7 +30,11 @@ public:
     void getRelatedVideos(const QString &aid);
 
     // 获取用户历史记录（需要登录）
-    Q_INVOKABLE void getHistoryList(int max = 0, int viewAt = 0, const QString &business = "", int ps = 20);
+    // type 为分类标识：空/"all"=全部，其余取值由服务端在响应 data.tab 里下发
+    // （如 "archive"=投稿视频、"live"=直播、"pgc"=番剧）。历史上这里传的是
+    // business 参数，接口实际只认 type，导致 business 恒不生效、只能拉到全量。
+    // 信号会原样回传 type，供 QML 把响应分发回对应 Tab 的模型。
+    Q_INVOKABLE void getHistoryList(int max = 0, int viewAt = 0, const QString &type = "all", int ps = 20);
 
     // 获取动态视频（需要登录）
     Q_INVOKABLE void getDynamicVideos(const QString &offset = "", int ps = 20, uint64_t hostMid = 0);
@@ -74,7 +78,9 @@ signals:
     void videoDanmakuSendResult(const QByteArray &data);     // 视频弹幕发送响应
     void userUploadedVideosReceived(const QByteArray &data);
     void relatedVideosReceived(const QByteArray &data);
-    void historyListReceived(const QByteArray &data);
+    // data 为原始 JSON；type 原样回传请求时的分类标识，QML 据此把
+    // 响应分发回对应 Tab 的 ListModel（三个 Tab 各有独立游标，响应会乱序到达）
+    void historyListReceived(const QByteArray &data, const QString &type);
     void hotsAllReceived(const QByteArray &data);
     void hotsRankReceived(const QByteArray &data);
     void hotsWeeklyListReceived(const QByteArray &data);

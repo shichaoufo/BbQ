@@ -40,6 +40,9 @@ QtObject {
     // HomePage 当前 Pivot 索引
     property int homePivotIndex: 0
 
+    // HistoryPage 当前 Pivot 索引（全部/视频/直播）
+    property int historyPivotIndex: 0
+
     // 直播页全局状态
     property ListModel liveRecommendModel: ListModel {}
     property real liveRecommendScrollY: 0

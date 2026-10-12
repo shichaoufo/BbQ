@@ -1131,11 +1131,13 @@ void ApiManager::getRelatedVideos(const QString &aid)
     getRequest(url);
 }
 
-void ApiManager::getHistoryList(int max, int viewAt, const QString &business, int ps)
+void ApiManager::getHistoryList(int max, int viewAt, const QString &type, int ps)
 {
     QString url = "https://api.bilibili.com/x/web-interface/history/cursor";
-    QString params = QString("max=%1&view_at=%2&business=%3&ps=%4")
-                         .arg(max).arg(viewAt).arg(business).arg(ps);
+    // 参数名是 type 而不是 business：接口只认 type（business 会被忽略，
+    // 传了也永远拉到全量）。取值 "all" 或服务端 data.tab 下发的分类标识。
+    QString params = QString("max=%1&view_at=%2&type=%3&ps=%4")
+                         .arg(max).arg(viewAt).arg(type).arg(ps);
 
     QUrl qurl(url + "?" + params);
     QNetworkRequest request(qurl);
@@ -1143,21 +1145,21 @@ void ApiManager::getHistoryList(int max, int viewAt, const QString &business, in
     request.setRawHeader(QByteArray("Referer"), QByteArray("https://www.bilibili.com/"));
     request.setRawHeader(QByteArray("Origin"), QByteArray("https://www.bilibili.com"));
     request.setRawHeader(QByteArray("Accept"), QByteArray("application/json, text/plain, */*"));
-    
+
     QString cookies = LoginManager::instance()->getCookies();
     if (!cookies.isEmpty()) {
         request.setRawHeader("Cookie", cookies.toUtf8());
     }
 
     QNetworkReply *reply = m_networkManager->get(request);
-    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, type]() {
         if (reply->error() != QNetworkReply::NoError) {
             emit errorOccurred(reply->errorString());
             reply->deleteLater();
             return;
         }
         QByteArray data = reply->readAll();
-        emit historyListReceived(data);
+        emit historyListReceived(data, type);
         reply->deleteLater();
     });
 }
