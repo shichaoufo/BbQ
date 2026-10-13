@@ -77,6 +77,12 @@ FluPage {
     property var detailPreviewImages: []
     property int detailPreviewIndex: 0
 
+    // 详情页图片列表的修订号。
+    // live_url 是 opus 接口异步补回来的，往 currentDynamic.images 的元素里
+    // 加字段不会触发绑定通知（普通 JS 对象无变更信号），Repeater 不会重建。
+    // 让相关 model / 取值函数都读一下这个计数器，就能在补数据时强制重算。
+    property int _detailImagesRev: 0
+
     // 动态正文图片：单图高宽比超过此值即视为「长图」（容器高度封顶、取顶部一截 + 角标）。
     // 与评论区 commentImageMaxRatio 同口径，也与 PiliPlus imgMaxRatio 一致。
     readonly property real dynamicImageMaxRatio: 2.6
@@ -1694,6 +1700,17 @@ FluPage {
         return GlobalState.isAnimatedImageUrl(previewImageSrc(detailPreviewImages[detailPreviewIndex]))
     }
 
+    // 当前预览图的实况视频地址（live_url）。空串表示不是实况照片。
+    // 读一下 _detailImagesRev：live_url 可能在预览已打开后才补回来，
+    // 不依赖它这个绑定不会重算，预览里就不会切到视频
+    function previewCurrentLiveUrl() {
+        var rev = _detailImagesRev
+        var pic = detailPreviewImages[detailPreviewIndex]
+        if (pic && typeof pic === "object" && pic.liveUrl)
+            return String(pic.liveUrl)
+        return ""
+    }
+
     function previewNextImage() {
         var count = detailPreviewImages.length
         if (count <= 1) return
@@ -1718,6 +1735,83 @@ FluPage {
         if (dynamic) {
             currentDynamic = dynamic
             loadDetailComments()
+            // 实况照片的 live_url 只有 opus 接口下发，补拉一次。
+            // desktop 接口（本函数用的那个）会把 live_url 剥掉，只能另找接口要
+            dynamic_page.fetchLiveUrls(dynamic.id_str)
+        }
+    }
+
+    // 拉取实况照片的动态视频地址（live_url）。
+    // 失败/无实况图时静默返回，不影响主流程
+    function fetchLiveUrls(idStr) {
+        if (!idStr) return
+        Api.getOpusDetail(idStr)
+    }
+
+    // 把 opus 接口下发的 pics[].live_url 按下标合并进 currentDynamic.images[]。
+    //
+    // 两个接口的 pics 顺序与数量一致（已用同一动态实测验证），所以能按下标对位。
+    // 合并后必须 _detailImagesRev++：currentDynamic 是普通 JS 对象，往它的
+    // images 元素里加字段不会触发任何绑定通知，Repeater 不会重建，
+    // Live 徽标和预览里的视频都出不来。
+    function mergeLiveUrls(data) {
+        try {
+            var doc = JSON.parse(typeof data === "string" ? data : data.toString())
+            if (doc.code !== 0 || !doc.data) return
+            var mods = doc.data.item && doc.data.item.modules
+            if (!mods) return
+            var pics = null
+            for (var i = 0; i < mods.length; i++) {
+                var top = mods[i] && mods[i].module_top
+                var album = top && top.display && top.display.album
+                if (album && album.pics && album.pics.length) {
+                    pics = album.pics
+                    break
+                }
+            }
+            if (!pics) return
+            if (!currentDynamic || !currentDynamic.images) return
+            var changed = false
+            for (var j = 0; j < pics.length && j < currentDynamic.images.length; j++) {
+                var lu = pics[j] && pics[j].live_url
+                if (lu && currentDynamic.images[j]) {
+                    currentDynamic.images[j].liveUrl = lu
+                    changed = true
+                }
+            }
+            if (changed) {
+                _detailImagesRev++
+                dynamic_page.writeBackLiveUrls()
+            }
+        } catch (e) {
+            console.warn("[DynamicPage] mergeLiveUrls failed:", e)
+        }
+    }
+
+    // 把 live_url 回写进 feedModel 对应项，让「全部动态」列表网格也能显示 Live 角标。
+    //
+    // 列表接口（desktop/v1/feed/all）和详情接口一样都不下发 live_url，唯一拿到它
+    // 的地方就是详情页那次 opus 调用。给每条列表项各发一次 opus 请求太浪费
+    // （绝大多数动态根本没有实况照片），所以采用**渐进式回填**：用户第一次点进
+    // 某条动态的详情，这条动态的图片就带上 live_url 了，之后在列表里能看到角标。
+    //
+    // 写 imagesJson 而不是直接改 images：列表 delegate 读的是
+    // JSON.parse(itemData.imagesJson)，且 ListModel 只有 setProperty 才会发
+    // role 变更通知、触发 delegate 重建
+    function writeBackLiveUrls() {
+        if (!currentDynamic || !currentDynamic.id_str) return
+        var json = ""
+        try {
+            json = JSON.stringify(currentDynamic.images || [])
+        } catch (e) {
+            return
+        }
+        for (var i = 0; i < feedModel.count; i++) {
+            var it = feedModel.get(i)
+            if (it && String(it.id_str) === String(currentDynamic.id_str)) {
+                feedModel.setProperty(i, "imagesJson", json)
+                break
+            }
         }
     }
 
@@ -2484,6 +2578,10 @@ FluPage {
                                                     property bool singleImage: itemImageCount === 1
                                                     // 接口没给尺寸时，用解码出的真实宽高比回填（与评论区同口径）
                                                     property real decodedRatio: 0
+                                                    // 角标基准字号。按容器宽度等比取，并夹在 [11, 20]：
+                                                    // 多图格只有约 90px 宽，固定 12px 就小得几乎看不见；
+                                                    // 但单图动辄三四百像素，同样字号又显得过小。固定值无法兼顾两者
+                                                    readonly property real badgeUnit: Math.max(11, Math.min(20, feedImageContainer.width * 0.055))
                                                     property real picRatio: {
                                                         if (pic.width > 0 && pic.height > 0) return pic.height / pic.width
                                                         if (decodedRatio > 0) return decodedRatio
@@ -2545,22 +2643,45 @@ FluPage {
                                                         }
                                                     }
 
-                                                    // 长图角标：提示只显示了顶部一截，点开可看完整
+                                                    // 长图角标：提示只显示了顶部一截，点开可看完整。
+                                                    // 与 Live 角标互斥（同一位置，对齐 PiliPlus 的
+                                                    // if (isLivePhoto) Live else if (isLongPic) 长图）
                                                     Rectangle {
                                                         anchors.right: parent.right
                                                         anchors.bottom: parent.bottom
-                                                        anchors.margins: 6
-                                                        width: feedLongTag.implicitWidth + 10
-                                                        height: feedLongTag.implicitHeight + 4
+                                                        anchors.margins: feedImageContainer.badgeUnit * 0.4
+                                                        width: feedLongTag.implicitWidth + feedImageContainer.badgeUnit
+                                                        height: feedLongTag.implicitHeight + feedImageContainer.badgeUnit * 0.6
                                                         radius: 4
                                                         color: Qt.rgba(0, 0, 0, 0.55)
-                                                        visible: feedImageContainer.isLongPic
+                                                        visible: feedImageContainer.isLongPic && !feedImageContainer.pic.liveUrl
 
                                                         FluText {
                                                             id: feedLongTag
                                                             anchors.centerIn: parent
                                                             text: "长图"
-                                                            font: FluTextStyle.Caption
+                                                            font.pixelSize: feedImageContainer.badgeUnit
+                                                            color: "white"
+                                                        }
+                                                    }
+
+                                                    // 实况照片角标：静态图 + 动态视频，点开预览可播放。
+                                                    // 与 PiliPlus 的 PBadge(text: 'Live') 同位置同语义
+                                                    Rectangle {
+                                                        anchors.right: parent.right
+                                                        anchors.bottom: parent.bottom
+                                                        anchors.margins: feedImageContainer.badgeUnit * 0.4
+                                                        width: feedLiveTag.implicitWidth + feedImageContainer.badgeUnit
+                                                        height: feedLiveTag.implicitHeight + feedImageContainer.badgeUnit * 0.6
+                                                        radius: 4
+                                                        color: Qt.rgba(0, 0, 0, 0.55)
+                                                        visible: !!feedImageContainer.pic.liveUrl
+
+                                                        FluText {
+                                                            id: feedLiveTag
+                                                            anchors.centerIn: parent
+                                                            text: "Live"
+                                                            font.pixelSize: feedImageContainer.badgeUnit
                                                             color: "white"
                                                         }
                                                     }
@@ -3655,7 +3776,12 @@ FluPage {
                                 visible: detailImageGrid.imageCount > 0
 
                                 Repeater {
-                                    model: currentDynamic ? (currentDynamic.images || []) : []
+                                    // 读一下 _detailImagesRev：live_url 是异步补回来的，
+                                    // 不依赖它 Repeater 不会重建，Live 徽标出不来
+                                    model: {
+                                        dynamic_page._detailImagesRev
+                                        return currentDynamic ? (currentDynamic.images || []) : []
+                                    }
 
                                     Rectangle {
                                         id: detailImageContainer
@@ -3681,6 +3807,8 @@ FluPage {
                                         property bool singleImage: detailImageGrid.imageCount === 1
                                         // 接口没给尺寸时，用解码出的真实宽高比回填（与评论区同口径）
                                         property real decodedRatio: 0
+                                        // 角标基准字号，随容器宽度等比缩放（理由同 feedImageContainer.badgeUnit）
+                                        readonly property real badgeUnit: Math.max(11, Math.min(20, detailImageContainer.width * 0.055))
                                         property real picRatio: {
                                             if (pic.width > 0 && pic.height > 0) return pic.height / pic.width
                                             if (decodedRatio > 0) return decodedRatio
@@ -3742,22 +3870,45 @@ FluPage {
                                             }
                                         }
 
-                                        // 长图角标：提示只显示了顶部一截，点开可看完整
+                                        // 长图角标：提示只显示了顶部一截，点开可看完整。
+                                        // 与 Live 角标互斥（同一位置，对齐 PiliPlus 的
+                                        // if (isLivePhoto) Live else if (isLongPic) 长图）
                                         Rectangle {
                                             anchors.right: parent.right
                                             anchors.bottom: parent.bottom
-                                            anchors.margins: 6
-                                            width: detailLongTag.implicitWidth + 10
-                                            height: detailLongTag.implicitHeight + 4
+                                            anchors.margins: detailImageContainer.badgeUnit * 0.4
+                                            width: detailLongTag.implicitWidth + detailImageContainer.badgeUnit
+                                            height: detailLongTag.implicitHeight + detailImageContainer.badgeUnit * 0.6
                                             radius: 4
                                             color: Qt.rgba(0, 0, 0, 0.55)
-                                            visible: detailImageContainer.isLongPic
+                                            visible: detailImageContainer.isLongPic && !detailImageContainer.pic.liveUrl
 
                                             FluText {
                                                 id: detailLongTag
                                                 anchors.centerIn: parent
                                                 text: "长图"
-                                                font: FluTextStyle.Caption
+                                                font.pixelSize: detailImageContainer.badgeUnit
+                                                color: "white"
+                                            }
+                                        }
+
+                                        // 实况照片角标：静态图 + 动态视频，点开预览可播放。
+                                        // 与 PiliPlus 的 PBadge(text: 'Live') 同位置同语义
+                                        Rectangle {
+                                            anchors.right: parent.right
+                                            anchors.bottom: parent.bottom
+                                            anchors.margins: detailImageContainer.badgeUnit * 0.4
+                                            width: detailLiveTag.implicitWidth + detailImageContainer.badgeUnit
+                                            height: detailLiveTag.implicitHeight + detailImageContainer.badgeUnit * 0.6
+                                            radius: 4
+                                            color: Qt.rgba(0, 0, 0, 0.55)
+                                            visible: !!detailImageContainer.pic.liveUrl
+
+                                            FluText {
+                                                id: detailLiveTag
+                                                anchors.centerIn: parent
+                                                text: "Live"
+                                                font.pixelSize: detailImageContainer.badgeUnit
                                                 color: "white"
                                             }
                                         }
@@ -3997,6 +4148,8 @@ FluPage {
             height: parent.height - 80
             source: dynamic_page.previewCurrentImageUrl()
             animated: dynamic_page.previewCurrentImageIsAnimated()
+            // 实况照片：非空时改用 MediaPlayer 播放 live_url 的 mp4
+            liveUrl: dynamic_page.previewCurrentLiveUrl()
             // 左键单击（未拖动）＝ 关闭预览；放大后的拖动平移不会走到这里
             onClicked: dynamic_page.closeDetailImagePreview()
         }
@@ -4126,6 +4279,11 @@ FluPage {
         function onDynamicDetailReceived(data) {
             if (!dynamic_page.visible) return
             dynamic_page.parseDynamicDetail(data)
+        }
+        // opus 接口响应：只用来补实况照片的 live_url。
+        // 不做 visible 守卫 —— 详情页可能已因切页而隐藏，但数据合并无副作用
+        function onOpusDetailReceived(data) {
+            dynamic_page.mergeLiveUrls(data)
         }
         // 断网等网络错误时 Api 只发 errorOccurred 不发数据信号，loading 卡死
         // 会让刷新按钮的 !loading 守卫永久失效（只能重启）

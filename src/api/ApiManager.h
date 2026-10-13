@@ -52,6 +52,22 @@ public:
     // 获取动态详情（需要登录）
     Q_INVOKABLE void getDynamicDetail(const QString &id);
 
+    // 获取动态图文详情（opus 专用接口）。
+    //
+    // **这是唯一会在 pics 里下发 live_url 的端点。** 实况照片的数据形态是
+    // 「静态图 .jpg + 独立 .mp4 视频」，视频地址放在 live_url 字段；而
+    // desktop 系列接口（getDynamicArticleList / getDynamicDetail 用的
+    // desktop/v1/feed/all、desktop/v1/detail）会被服务端剥掉该字段，
+    // 拿回来的 items 只有 src/width/height。
+    //
+    // 注意它返回的结构与 desktop 系列**完全不同**（modules[] 数组 +
+    // MODULE_TYPE_TOP.display.album.pics），不能替代 getDynamicDetail，
+    // 只能作为补充：调用方把 pics[].live_url 按下标合并进已解析好的图片列表
+    // （两边 pics 的顺序与数量一致，已实测验证）。
+    //
+    // 该接口不需要 WBI 签名，普通 GET 即可返回 code:0。
+    Q_INVOKABLE void getOpusDetail(const QString &id);
+
 signals:
     void recommendVideosReceived(const QByteArray &data);
     void wbiRecommendVideosReceived(const QByteArray &data);
@@ -60,6 +76,7 @@ signals:
     void followingsReceived(const QByteArray &data);
     void dynamicArticleListReceived(const QByteArray &data);
     void dynamicDetailReceived(const QByteArray &data);
+    void opusDetailReceived(const QByteArray &data);
     void searchResultsReceived(const QByteArray &data);
     void searchBangumiReceived(const QByteArray &data, bool isMovie);
     void searchLiveReceived(const QByteArray &data);

@@ -1,5 +1,6 @@
 import QtQuick 2.15
 import QtQuick.Controls 2.15
+import QtMultimedia
 
 Item {
     id: root
@@ -7,6 +8,11 @@ Item {
 
     property url source
     property bool animated: false
+    // 实况照片的动态视频地址（B站 live_url，mp4）。非空时改用 MediaPlayer
+    // 播放视频、不再显示静态图 —— 实况照片的数据形态就是「静态图 .jpg +
+    // 独立 .mp4」，静态图只用作列表/网格里的占位和 Hero 过渡标识。
+    // 与 PiliPlus 的 SourceModel(sourceType: .livePhoto, liveUrl:) 同语义
+    property url liveUrl: ""
     property real minScale: 1.0
     property real maxScale: 10.0
     property real wheelStep: 0.15
@@ -36,15 +42,65 @@ Item {
     }
 
     onSourceChanged: reset()
+    onLiveUrlChanged: reset()
+
+    // 实况视频播放器。与图片二选一：liveUrl 非空时启用，否则彻底卸载
+    // （Loader.active=false 会销毁实例，MediaPlayer 随之释放，不会在后台继续拉流）
+    Loader {
+        id: videoLoader
+        anchors.fill: parent
+        active: root.liveUrl !== ""
+        sourceComponent: videoComponent
+    }
+
+    Component {
+        id: videoComponent
+        Item {
+            anchors.fill: parent
+
+            MediaPlayer {
+                id: player
+                source: root.liveUrl
+                videoOutput: videoOutput
+                autoPlay: true
+                // 实况视频通常只有 2-3 秒，循环播放才像"实况"
+                loops: MediaPlayer.Infinite
+                // loops 正常情况下不会走到这里；万一某平台/某格式不吃 loops，
+                // 播完了手动续上。刻意不用 playbackState===StoppedState 兜底 ——
+                // 加载失败同样会进 StoppedState，那样会和 onErrorOccurred
+                // 形成"失败→起播→失败"的空转
+                onMediaStatusChanged: {
+                    if (mediaStatus === MediaPlayer.EndOfMedia)
+                        play()
+                }
+                onErrorOccurred: console.warn("[ImageViewer] live video error:", errorString)
+            }
+
+            VideoOutput {
+                id: videoOutput
+                anchors.fill: parent
+                fillMode: VideoOutput.PreserveAspectFit
+
+                // 缩放/平移与静态图片同口径：绕中心缩放，拖动平移
+                scale: root._scale
+                transform: Translate {
+                    x: root._offsetX
+                    y: root._offsetY
+                }
+            }
+        }
+    }
 
     // 动图/静态图二选一按需创建（与 DynamicPage 内嵌图片的 Loader 模式一致）：
     // 不能让静态 Image 与 AnimatedImage 同时挂同一 URL——静态 Image 会先解码
     // GIF/WebP 首帧并与动画实例并存，预览模式下动图因此显示为静止首帧。
+    // liveUrl 非空时整个卸载，把舞台让给视频播放器
     Loader {
         id: imageLoader
         anchors.centerIn: parent
         width: root.width
         height: root.height
+        active: root.liveUrl === ""
         sourceComponent: root.animated ? animatedImageComponent : staticImageComponent
     }
 

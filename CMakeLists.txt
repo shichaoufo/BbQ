@@ -452,6 +452,20 @@ if(WIN32)
                     COMMENT "Deploying Qt imageformat plugins..."
                 )
             endif()
+
+            # 部署 Qt 多媒体后端（实况照片播放必需）。
+            # VideoOutput 需要多媒体插件才能找到解码/渲染后端；开发机上 Qt 会
+            # 回退到安装目录找到，直接跑构建目录的 exe 时只会看到黑屏。
+            # 与 imageformats 同一套推导逻辑，Windows 上是 wmf/ffmpeg 后端
+            set(_qt_multimedia_dir "${_qt_lib_dir}/../plugins/multimedia")
+            if(EXISTS ${_qt_multimedia_dir})
+                add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+                    COMMAND ${CMAKE_COMMAND} -E copy_directory
+                        ${_qt_multimedia_dir}
+                        $<TARGET_FILE_DIR:${PROJECT_NAME}>/multimedia
+                    COMMENT "Deploying Qt multimedia plugins..."
+                )
+            endif()
         endif()
     else()
         message(WARNING "libmpv not found, video player will be disabled")

@@ -1371,6 +1371,43 @@ void ApiManager::getDynamicDetail(const QString &id)
     });
 }
 
+void ApiManager::getOpusDetail(const QString &id)
+{
+    // 不需要 WBI 签名（实测普通 GET 即返回 code:0）。
+    // 唯一会下发 live_url（实况照片的动态视频 mp4）的端点，
+    // 详见 ApiManager.h 中该函数的注释。
+    QString url = "https://api.bilibili.com/x/polymer/web-dynamic/v1/opus/detail";
+
+    QUrlQuery query;
+    query.addQueryItem("id", id);
+
+    QUrl qurl(url + "?" + query.query(QUrl::FullyEncoded));
+    QNetworkRequest request(qurl);
+    request.setRawHeader(QByteArray("User-Agent"), QByteArray("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"));
+    request.setRawHeader(QByteArray("Referer"), QByteArray("https://www.bilibili.com/"));
+    request.setRawHeader(QByteArray("Accept"), QByteArray("application/json, text/plain, */*"));
+
+    QString cookies = LoginManager::instance()->getCookies();
+    if (!cookies.isEmpty()) {
+        request.setRawHeader("Cookie", cookies.toUtf8());
+    }
+
+    QNetworkReply *reply = m_networkManager->get(request);
+    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        if (reply->error() != QNetworkReply::NoError) {
+            // 实况视频地址只是增强信息，拿不到不影响主流程，
+            // 所以这里不向 QML 抛 errorOccurred（那会让页面以为整次请求失败了）
+            qDebug() << "[ApiManager] getOpusDetail network error:" << reply->errorString();
+            reply->deleteLater();
+            return;
+        }
+        QByteArray data = reply->readAll();
+        qDebug() << "[ApiManager] getOpusDetail response:" << data.left(500);
+        emit opusDetailReceived(data);
+        reply->deleteLater();
+    });
+}
+
 void ApiManager::getLiveList()
 {
     // 使用 feedV2 接口获取推荐直播和关注主播
