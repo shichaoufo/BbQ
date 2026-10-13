@@ -1615,7 +1615,19 @@ FluPage {
         if (!rawHref || String(rawHref).length === 0) return
         var href = String(rawHref).trim()
         try {
-            // --- 1) bili://user/MID → 打开UP主动态页 ---
+            // --- 1) bili://user/MID → 弹出该用户的主页 ---
+            //
+            // 与另外两处入口保持完全一致：
+            //   · 搜索页搜出用户后点击（SearchPage: App.openUserProfile(m, unm, upic, vType)）
+            //   · 评论区点击用户头像（CommentPanel: App.openUserProfile(mid, name, face)）
+            // 都是走 App 的全局信号，由当前可见页面弹出 UserProfilePage overlay。
+            //
+            // 早先这里的做法是「切到动态页左侧 UP 主列表并加载 ta 的动态」，
+            // 语义不对：用户点 @人名 预期是看这个人的主页，不是把动态流过滤成 TA。
+            // 且那条路径还有 dynamic_page.upListModel 的属性查找 bug（已废弃）。
+            //
+            // 只传 mid：UserProfilePage.ensureLoaded() 会自行 loadUserInfo()
+            // 拉到 name/face/签名/等级等，传空串不会影响展示。
             if (href.indexOf("bili://user/") === 0) {
                 var mid = href.substring("bili://user/".length)
                 if (mid.indexOf("?") >= 0) mid = mid.substring(0, mid.indexOf("?"))
@@ -1625,30 +1637,7 @@ FluPage {
                     infoBar.showWarning("无效的用户ID：" + rawHref)
                     return
                 }
-                // 1. 确保在"动态"导航页
-                // main.qml 中 pageStack.currentIndex：0=视频 1=直播 2=动态 3=搜索 4=历史
-                // 这里通过 window 顶层的 pageStack 切过去；找不到也没关系，至少加载UP主数据
-                try {
-                    var topWin = dynamic_page.Window ? dynamic_page.Window.window : null
-                    if (topWin && topWin.pageStack) topWin.pageStack.currentIndex = 2
-                    else if (window && window.pageStack) window.pageStack.currentIndex = 2
-                } catch(ee) {}
-                // 2. 找到匹配的UP主列表项（匹配成功会高亮选中），加载 ta 的视频+动态
-                var matchIdx = -1
-                for (var ui = 0; ui < dynamic_page.upListModel.count; ui++) {
-                    var uitem = dynamic_page.upListModel.get(ui)
-                    if (uitem && String(uitem.mid) === mid) { matchIdx = ui; break }
-                }
-                if (matchIdx >= 0) {
-                    _pendingSelectUp = { mid: parseInt(mid, 10), index: matchIdx }
-                    selectUpTimer.restart()
-                } else {
-                    // UP主不在关注列表里，也直接加载（视频/动态接口支持任意mid）
-                    currentUpMid = parseInt(mid, 10)
-                    loadVideos(currentUpMid)
-                    loadFeed(currentUpMid)
-                }
-                infoBar.showInfo("跳转到UP主：mid=" + mid)
+                App.openUserProfile(mid, "", "", -1)
                 return
             }
             // --- 2) bili://video/AV|BVID|CVxxx → 打开视频播放页 ---
