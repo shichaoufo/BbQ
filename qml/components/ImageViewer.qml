@@ -44,12 +44,18 @@ Item {
     onSourceChanged: reset()
     onLiveUrlChanged: reset()
 
+    // liveUrl 是 url 类型：Qt6 里 JS 侧 typeof 是 object，与 "" 严格比较
+    // 恒不相等（空串时 liveUrl === "" 也是 false），必须 toString() 后再比。
+    // 曾经直接写 liveUrl === "" / !== ""，导致图片 Loader 永不激活、
+    // 视频 Loader 常驻，普通图片预览整个消失（实况照片反而正常）
+    readonly property bool hasLiveVideo: root.liveUrl.toString() !== ""
+
     // 实况视频播放器。与图片二选一：liveUrl 非空时启用，否则彻底卸载
     // （Loader.active=false 会销毁实例，MediaPlayer 随之释放，不会在后台继续拉流）
     Loader {
         id: videoLoader
         anchors.fill: parent
-        active: root.liveUrl !== ""
+        active: root.hasLiveVideo
         sourceComponent: videoComponent
     }
 
@@ -100,7 +106,7 @@ Item {
         anchors.centerIn: parent
         width: root.width
         height: root.height
-        active: root.liveUrl === ""
+        active: !root.hasLiveVideo
         sourceComponent: root.animated ? animatedImageComponent : staticImageComponent
     }
 
