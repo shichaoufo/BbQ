@@ -11,6 +11,7 @@
 // 所在目录（src/），故是 core/ 而非 ../core/。
 #include "core/AppDirs.h"
 #include <QPixmapCache>
+#include <QImageReader>
 #include <QTimer>
 #include <QDebug>
 #ifndef Q_OS_WIN
@@ -787,6 +788,22 @@ int main(int argc, char *argv[])
     app.setOrganizationName("BbQ");
     app.setApplicationName("BbQ");
     app.setApplicationVersion("1.0.0");
+
+    // 放宽图片解码的内存分配上限（Qt 默认 256 MB）。
+    //
+    // 为什么需要：QImageIOHandler::allocateImage() 按「宽 × 高 × 至少 32bpp」估算
+    // **解码后的位图**大小，只看像素数、与文件大小无关，超限就直接拒绝加载。而
+    // B 站原图 CDN 返回的是原始分辨率（GlobalState.fixImageUrl 不给宽高时只拼
+    // "@.jpg"，仅强制转码、不改分辨率），画师投稿常见上亿像素：实测 13000x8584
+    // = 1.116 亿像素 → ARGB32 需约 426 MiB，超过 256 MB 上限，于是预览里表现为
+    // 「无法取图」。
+    //
+    // 取值 1024：可容纳约 2.68 亿像素（如 16384x16384），覆盖所有现实投稿。这是
+    // **上限而非预分配** —— 不打开巨图就不会多占内存。0 表示完全不检查（不建议）。
+    //
+    // 注意：环境变量 QT_IMAGEIO_MAXALLOC 的优先级高于本调用（见 Qt 源码
+    // QImageReader::allocationLimit()），若外部设置过它，此行会被覆盖。
+    QImageReader::setAllocationLimit(1024);
 
     // 初始化日志文件并安装消息处理器，警告/严重错误同时写入 BbQ.log
     initLogFile();
