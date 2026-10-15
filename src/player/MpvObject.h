@@ -70,10 +70,21 @@ public:
     // 获取实际播放的视频参数（宽、高、codec、fps、bitrate 等），用于验证当前流的真实画质
     Q_INVOKABLE QVariantMap getVideoInfo();
 
+    // ===== 字幕（外挂字幕轨）=====
+    // B站字幕不在视频流里，是独立的 bcc JSON 文件（player/wbi/v2 响应
+    // data.subtitle.subtitles[].subtitle_url）。本方法负责下载、转成 SRT、
+    // 落临时文件，再用 mpv 的 sub-add 加载 —— 由 libmpv 原生解析渲染，
+    // 与 PiliPlus 用 media_kit 的 SubtitleViewConfiguration 同一思路
+    // （两者底层都是 libmpv；PiliPlus 同样要做 json2Vtt 转换）。
+    //
+    // 异步执行：下载完成后才真正加载轨。title 仅用于 mpv 内部标识轨道
+    Q_INVOKABLE void addSubtitleTrack(const QString &url, const QString &title = QString());
+    // 字幕显示开关。关闭时轨道仍保留（只是不渲染），重新开启不用重新下载
+    Q_INVOKABLE void setSubtitleVisible(bool visible);
+
     Renderer *createRenderer() const override;
 
     mpv_handle *mpv() const { return m_mpv; }
-
 signals:
     void sourceChanged();
     void audioSourceChanged();
@@ -107,6 +118,8 @@ private slots:
 
 private:
     void initMpv();
+    // 秒 → SRT 时间码 "HH:MM:SS,mmm"（bcc JSON 转 SRT 用）
+    QString subtitleSrtTimestamp(double seconds) const;
     // mpv 渲染资源（render context + core）的释放**全部集中在 ~MpvObject**
     // 内、GUI 线程、严格按"先 free context 后 terminate core"顺序执行。
     // 依据与顺序保证说明见 MpvObject.cpp 中 ~MpvObject 的长注释。

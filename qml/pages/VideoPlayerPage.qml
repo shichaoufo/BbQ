@@ -294,6 +294,12 @@ Rectangle {
     property int pageCurrentIndex: -1  // 当前分P索引
     // 分段章节（view_points）：[{title, from, to}]，from/to 单位秒；无章节为空数组
     property var viewPoints: []
+    // 可用字幕轨：[{lang, title, url, isAi}]，来自 playurl 响应的 data.language。
+    // 空数组表示该视频没有字幕，顶部控制栏的字幕按钮随之隐藏。
+    // B站字幕是外挂文件（subtitle_lang），由 mpv 的 sub-add 加载、libmpv 渲染
+    property var subtitleTracks: []
+    // 当前选中的字幕轨索引；-1 = 关闭字幕
+    property int currentSubtitleIndex: -1
     // 空降助手标注片段：[{start, end, category, uuid}]，start/end 单位秒。
     // bsb.conf 缺失时 SponsorBlockManager.available=false，此数组恒为空
     property var sponsorSegments: []
@@ -1067,6 +1073,11 @@ Rectangle {
     function closePopups() {
         if (volumePopup.opened) volumePopup.close()
         if (danmakuPopup.opened) danmakuPopup.close()
+        // 章节/字幕菜单二选一：同时开会互相重叠。
+        // 本函数由各菜单的 onAboutToShow 调用，此刻自身 opened 仍为 false，
+        // 所以 close() 只会影响另一个菜单，不会把自己关掉
+        if (chapterMenu.opened) chapterMenu.close()
+        if (subtitleMenu.opened) subtitleMenu.close()
     }
 
     // 自动隐藏豁免：鼠标悬停在控制栏区域内，或任一弹出面板/菜单
@@ -1075,9 +1086,11 @@ Rectangle {
     function controlOverlayActive() {
         return controlBarHover.hovered
             // 顶部渐变阴影/章节键悬停（仅控制栏可见期间豁免：阴影已隐藏时
-            // 该区域按普通播放区处理，鼠标静止后照常隐藏指针）
+            // 该区域按普通播放区处理，鼠标静止后照常隐藏指针）。
+            // 字幕键也在同一块阴影里，一并被覆盖
             || (pageRoot.controlsVisible && topShadowHover.hovered)
             || chapterMenu.opened          // 章节选择菜单打开时不隐藏
+            || subtitleMenu.opened         // 字幕选择菜单打开时不隐藏
             || volumePopup.opened || danmakuPopup.opened
             || speedMenu.opened || codecMenu.opened || qualityMenu.opened
             || danmakuInput.activeFocus     // 弹幕输入中不隐藏（失焦即恢复倒计时）
@@ -1573,6 +1586,11 @@ Rectangle {
         pageRoot.playbackRetryCount = 0
         pageRoot._retryingPlayback = false
         pageRoot._savedPositionBeforeRetry = 0
+        // 字幕状态复位：换视频必须清空字幕轨，否则切到"无字幕"的新视频时，
+        // 新视频发出的空列表会被 onSubtitleListReady 的"空列表不覆盖非空"
+        // 守卫拦下，导致**残留上一个视频的字幕按钮**（点进去是别人的字幕）
+        pageRoot.subtitleTracks = []
+        pageRoot.currentSubtitleIndex = -1
         // 重置番剧相关属性（保留番剧状态用于后续加载）
         pageRoot.isBangumi = savedIsBangumi
         pageRoot.seasonId = savedSeasonId
@@ -2269,6 +2287,21 @@ Rectangle {
 
     Connections {
         target: PlayUrlManager
+        // 字幕轨列表来自 /x/player/wbi/v2（与章节 view_points 同接口），
+        // 不在 playurl 响应里。空列表 = 该视频无字幕，顶部字幕按钮随之隐藏
+        function onSubtitleListReady(list) {
+            var incoming = list || []
+            console.log("[VideoPlayerPage] onSubtitleListReady, count:", incoming.length)
+            // 两条路径都会发本信号：wbi/v2（主路径）和 legacy /x/player/v2
+            // （进度降级时才走）。wbi/v2 对已登录用户也可能返回空 subtitles
+            // （该端点疑似会网关掉字幕字段），所以**空列表不覆盖已拿到的非空
+            // 列表**，否则按钮会在前一次拿到字幕后又被清掉
+            if (incoming.length === 0 && pageRoot.subtitleTracks.length > 0) return
+            pageRoot.subtitleTracks = incoming
+            // 换视频/换分P 都重新拉，字幕选择不跨视频保留
+            //（不同视频的字幕轨不同，保留索引会指向错误的轨）
+            pageRoot.currentSubtitleIndex = -1
+        }
         function onVideoDetailReady(detail) {
             
             // 番剧专用获取视频详情元数据（UP主、播放量、点赞数等）
@@ -3786,7 +3819,10 @@ Rectangle {
                             easing.type: Easing.OutCubic
                         }
                     }
-                    visible: pageRoot.viewPoints.length > 0
+                    // 顶部栏常驻：不再要求有章节。字幕按钮也挂在这里，
+                    // 而字幕与章节无关（有字幕无章节 / 有章节无字幕都常见）。
+                    // 两个按钮各自按自己的条件 visible，阴影本身只是背景
+                    visible: pageRoot.viewPoints.length > 0 || pageRoot.subtitleTracks.length > 0
 
                     // 顶部渐变阴影+章节键悬停检测（被动监听，不与章节键
                     // 抢事件）：悬停期间控制栏与鼠标指针不进入自动隐藏
@@ -3801,6 +3837,9 @@ Rectangle {
                         anchors.top: parent.top
                         anchors.topMargin: 2
                         enabled: pageRoot.controlsVisible
+                        // 无章节时整个隐藏（不是 disable）：FluMenuBar 占宽度，
+                        // 只是 disable 会把位置留给一个点不动的空按钮
+                        visible: pageRoot.viewPoints.length > 0
                         delegate: FluMenuBarItem {
     id: mbItem
     textColor: "#FFFFFF"
@@ -3835,6 +3874,79 @@ Rectangle {
                                     }
                                     onTriggered: {
                                         mpvPlayer.seek(modelData.from * 1000)
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // 字幕选择菜单（样式与章节菜单一致）。
+                    // 位置在**右上角**，与 B站官方播放器一致：左上角留给章节/
+                    // 返回等导航性质的操作，右上角放字幕这类"当前播放内容"的开关
+                    FluMenuBar {
+                        id: subtitleMenuBar
+                        anchors.right: parent.right
+                        anchors.rightMargin: Theme.spacingMedium
+                        anchors.top: parent.top
+                        anchors.topMargin: 2
+                        enabled: pageRoot.controlsVisible
+                        visible: pageRoot.subtitleTracks.length > 0
+                        delegate: FluMenuBarItem {
+                            id: subMbItem
+                            textColor: "#FFFFFF"
+                            // 覆写背景：与章节键同一套理由（FluTheme.itemHoverColor
+                            // 在黑色控制栏上不可见），改为 15%/25% 白
+                            background: Rectangle {
+                                implicitWidth: 30
+                                implicitHeight: 30
+                                radius: 3
+                                color: subMbItem.pressed ? "#40FFFFFF"
+                                                         : (subMbItem.highlighted ? "#26FFFFFF" : "transparent")
+                            }
+                        }
+                        FluMenu {
+                            id: subtitleMenu
+                            // 标题显示当前选中项，未选中时给一个中性词。
+                            // 与章节菜单一样靠字符数截断，不用 elide（FluMenu title
+                            // 是纯文本属性）
+                            title: {
+                                if (pageRoot.currentSubtitleIndex < 0) return "字幕"
+                                var t = pageRoot.subtitleTracks[pageRoot.currentSubtitleIndex]
+                                var name = t ? (t.title || t.lang || "") : ""
+                                if (name.length > 16) name = name.substring(0, 15) + "…"
+                                return name || "字幕"
+                            }
+                            onAboutToShow: closePopups()
+                            width: 240
+
+                            // 关闭字幕：保留已加载的轨道（不重新下载），
+                            // 只是让 mpv 不渲染
+                            FluMenuItem {
+                                text: "关闭字幕"
+                                onTriggered: {
+                                    pageRoot.currentSubtitleIndex = -1
+                                    mpvPlayer.setSubtitleVisible(false)
+                                }
+                            }
+                            Repeater {
+                                model: pageRoot.subtitleTracks
+                                FluMenuItem {
+                                    text: {
+                                        var n = modelData.title || modelData.lang || ""
+                                        if (n.length > 20) n = n.substring(0, 19) + "…"
+                                        return n
+                                    }
+                                    onTriggered: {
+                                        pageRoot.currentSubtitleIndex = index
+                                        // 诊断日志：字幕串视频时靠它核对 URL 归属
+                                        //（服务端对异常请求会返回毫不相干的占位字幕）
+                                        console.log("[VideoPlayerPage] subtitle picked:",
+                                                    "index=" + index,
+                                                    "title=" + (modelData.title || ""),
+                                                    "url=" + String(modelData.url).substring(0, 80))
+                                        // sub-add 带 select 标志，加载即切到该轨并显示；
+                                        // title 仅用于 mpv 内部标识轨道
+                                        mpvPlayer.addSubtitleTrack(modelData.url, modelData.title || modelData.lang || "")
                                     }
                                 }
                             }

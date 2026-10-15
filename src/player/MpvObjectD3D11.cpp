@@ -1,5 +1,6 @@
 #include "MpvObjectD3D11.h"
 #include "FramePacer.h"
+#include "../core/AppDirs.h"
 
 #include "LoginManager.h"
 #include <QDebug>
@@ -10,6 +11,14 @@
 #include <QSGTexture>
 #include <QTime>
 #include <QElapsedTimer>
+// 字幕下载与解析：一次性 QNAM + bcc JSON
+#include <QNetworkAccessManager>
+#include <QNetworkReply>
+#include <QNetworkRequest>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonArray>
+#include <QFile>
 
 #include <private/qrhi_p.h>
 #include <private/qrhid3d11_p.h>
@@ -839,6 +848,141 @@ void MpvObjectD3D11::seek(int position)
     if (!m_mpv || !m_seekable) return;
     QByteArray posStr = QByteArray::number(position / 1000.0, 'f', 3);
     const char *cmd[] = {"seek", posStr.constData(), "absolute+exact", nullptr};
+    mpv_command_async(m_mpv, 0, cmd);
+}
+
+void MpvObjectD3D11::addSubtitleTrack(const QString &url, const QString &title)
+{
+    if (!m_mpv || url.isEmpty()) return;
+
+    // B站字幕文件是自有 bcc JSON 格式（{"body":[{from,to,content}...]}），
+    // mpv 只认 SRT/ASS/VTT，不能直接 sub-add 原始 URL。所以：
+    //   下载 → 转 SRT → 落临时文件 → sub-add 那个文件
+    // PiliPlus 同样要做这一步转换（utils/subtitle_utils.dart 的 json2Vtt）。
+    // 完整理由见 MpvObject.cpp 中同名方法。
+    //
+    // URL 规范化：服务端给的是协议相对地址（//i0.hdslb.com/...），
+    // 直接喂给 QNetworkRequest 会解析失败
+    QString fullUrl = url;
+    if (fullUrl.startsWith(QStringLiteral("//")))
+        fullUrl = QStringLiteral("https:") + fullUrl;
+
+    // 用一次性 QNAM：字幕请求与播放请求互不相干，也不必复用连接
+    QNetworkAccessManager *manager = new QNetworkAccessManager(this);
+    // 注意：QUrl 必须单独一行定义。若写成 QNetworkRequest request(QUrl(fullUrl))，
+    // 内层括号会被解析成「参数 fullUrl、类型 QUrl」的函数形参，整行沦为函数声明
+    // （most vexing parse），编译报 request 是非类类型
+    QUrl subUrl(fullUrl);
+    QNetworkRequest request(subUrl);
+    request.setRawHeader(QByteArray("User-Agent"), QByteArray("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"));
+    request.setRawHeader(QByteArray("Referer"), QByteArray("https://www.bilibili.com/"));
+    QString cookies = LoginManager::instance()->getCookies();
+    if (!cookies.isEmpty()) {
+        request.setRawHeader("Cookie", cookies.toUtf8());
+    }
+
+    QNetworkReply *reply = manager->get(request);
+    connect(reply, &QNetworkReply::finished, this, [this, reply, manager, fullUrl, title]() {
+        manager->deleteLater();
+        QByteArray raw = reply->readAll();
+        reply->deleteLater();
+
+        if (raw.isEmpty()) {
+            qWarning() << "[MpvObjectD3D11] subtitle download failed, empty body";
+            return;
+        }
+
+        // ---- bcc JSON → SRT ----
+        // body 项形如 {"from":1.5,"to":3.2,"location":2,"content":"文本"}
+        // from/to 单位秒，可能是小数；SRT 时间码精度到毫秒
+        QJsonDocument doc = QJsonDocument::fromJson(raw);
+        QJsonArray body;
+        if (doc.isObject())
+            body = doc.object().value(QStringLiteral("body")).toArray();
+        if (body.isEmpty()) {
+            qWarning() << "[MpvObjectD3D11] subtitle has no body array, size:" << raw.size();
+            return;
+        }
+
+        QString srt;
+        srt.reserve(body.size() * 96);
+        for (int i = 0; i < body.size(); ++i) {
+            const QJsonObject o = body.at(i).toObject();
+            const QString content = o.value(QStringLiteral("content")).toString();
+            if (content.isEmpty())
+                continue;
+            const double from = o.value(QStringLiteral("from")).toDouble();
+            const double to = o.value(QStringLiteral("to")).toDouble();
+            srt += QString::number(i + 1);
+            srt += QChar('\n');
+            srt += subtitleSrtTimestamp(from);
+            srt += QStringLiteral(" --> ");
+            srt += subtitleSrtTimestamp(to > from ? to : from + 2.0);
+            srt += QChar('\n');
+            srt += content;
+            srt += QStringLiteral("\n\n");
+        }
+        if (srt.isEmpty()) {
+            qWarning() << "[MpvObjectD3D11] subtitle converted to empty SRT";
+            return;
+        }
+
+        // ---- 落临时文件 ----
+        // 放在 AppDirs 下的 subtitles/：Windows 上配置与程序同目录，
+        // 字幕缓存跟着走，卸载即清；Linux 在 ~/.config/BbQ/
+        const QString dirPath = AppDirs::writableDir(QStringLiteral("subtitles"));
+        // 文件名带 url 哈希：同一字幕轨重复选择时复用同一文件，不无限堆积
+        const QString fileName = QStringLiteral("sub_%1.srt")
+                .arg(QString::number(qHash(fullUrl), 16));
+        const QString filePath = dirPath + fileName;
+        QFile f(filePath);
+        if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+            qWarning() << "[MpvObjectD3D11] cannot write subtitle file:" << filePath << f.errorString();
+            return;
+        }
+        f.write(srt.toUtf8());
+        f.close();
+
+        // ---- sub-add ----
+        const QByteArray pathBytes = filePath.toUtf8();
+        QByteArray titleBytes = title.toUtf8();
+        if (titleBytes.isEmpty()) {
+            const char *cmd[] = {"sub-add", pathBytes.constData(), "select", nullptr};
+            mpv_command_async(m_mpv, 0, cmd);
+        } else {
+            const char *cmd[] = {"sub-add", pathBytes.constData(), "select", titleBytes.constData(), nullptr};
+            mpv_command_async(m_mpv, 0, cmd);
+        }
+        // select 已让 mpv 显示该轨，再显式开一次：sub-visibility 是全局开关，
+        // 不随换轨重置，用户此前关过的话这里补上
+        const char *visCmd[] = {"set", "sub-visibility", "yes", nullptr};
+        mpv_command_async(m_mpv, 0, visCmd);
+        qWarning() << "[MpvObjectD3D11] subtitle track loaded:" << filePath
+                   << "lines:" << body.size();
+    });
+}
+
+// 秒 → SRT 时间码 "HH:MM:SS,mmm"
+QString MpvObjectD3D11::subtitleSrtTimestamp(double seconds) const
+{
+    if (seconds < 0) seconds = 0;
+    const qint64 totalMs = static_cast<qint64>(seconds * 1000.0 + 0.5);
+    const qint64 ms = totalMs % 1000;
+    const qint64 totalSec = totalMs / 1000;
+    const qint64 s = totalSec % 60;
+    const qint64 m = (totalSec / 60) % 60;
+    const qint64 h = totalSec / 3600;
+    return QStringLiteral("%1:%2:%3,%4")
+            .arg(h, 2, 10, QLatin1Char('0'))
+            .arg(m, 2, 10, QLatin1Char('0'))
+            .arg(s, 2, 10, QLatin1Char('0'))
+            .arg(ms, 3, 10, QLatin1Char('0'));
+}
+
+void MpvObjectD3D11::setSubtitleVisible(bool visible)
+{
+    if (!m_mpv) return;
+    const char *cmd[] = {"set", "sub-visibility", visible ? "yes" : "no", nullptr};
     mpv_command_async(m_mpv, 0, cmd);
 }
 

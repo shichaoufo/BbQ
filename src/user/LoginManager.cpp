@@ -405,6 +405,25 @@ void LoginManager::loadLoginData()
     }
 }
 
+// SESSDATA 必须以 URL 编码形式回传。
+//
+// B站 Set-Cookie 里的 SESSDATA 是 URL 编码的（逗号写作 %2C），而本类在解析登录
+// 响应时用 QUrl::fromPercentEncoding 把它解码后再存（历史遗留，大概是为了日志
+// 好看），回传时就成了裸逗号 —— 而"逗号未编码的 SESSDATA"正是 B站风控识别
+// "脚本构造 cookie"的特征，直接 412。
+//
+// 2026-10-15 实测（同一台机器、同一个会话，只改这一处字符编码）：
+//   SESSDATA 含裸逗号      → /x/player/wbi/v2 返回 412（风控页）
+//   SESSDATA 逗号写成 %2C  → 200，且返回该视频**真实的**字幕轨
+// 浏览器和 PiliPlus 都是按 Set-Cookie 原样（%2C）回传，所以它们从来不受影响。
+// 已经是 %2C 形式的值里没有裸逗号，本函数天然幂等。
+static QString sessDataForCookie(const QString &raw)
+{
+    QString v = raw;
+    v.replace(',', "%2C");
+    return v;
+}
+
 QString LoginManager::getCookies() const
 {
     // 只有在登录状态时才返回完整的 Cookie 字符串
@@ -427,7 +446,7 @@ QString LoginManager::getCookies() const
     // 返回完整的 Cookie 字符串（参考blbl项目的完整认证信息）
     QString cookie;
     if (!m_currentUser.sessData.isEmpty()) {
-        cookie += QString("SESSDATA=%1; ").arg(m_currentUser.sessData);
+        cookie += QString("SESSDATA=%1; ").arg(sessDataForCookie(m_currentUser.sessData));
     }
     if (!m_currentUser.biliJct.isEmpty()) {
         cookie += QString("bili_jct=%1; ").arg(m_currentUser.biliJct);
@@ -1127,7 +1146,7 @@ void LoginManager::fetchUserInfo()
     // 直接构建 Cookie 字符串（此时 isLoggedIn() 可能返回 false，因为用户信息还没设置）
     QString cookie;
     if (!m_currentUser.sessData.isEmpty()) {
-        cookie += QString("SESSDATA=%1; ").arg(m_currentUser.sessData);
+        cookie += QString("SESSDATA=%1; ").arg(sessDataForCookie(m_currentUser.sessData));
     }
     if (!m_currentUser.biliJct.isEmpty()) {
         cookie += QString("bili_jct=%1; ").arg(m_currentUser.biliJct);

@@ -76,6 +76,19 @@ public:
     Q_INVOKABLE void updatePosition();
     Q_INVOKABLE QVariantMap getVideoInfo();
 
+    // ===== 字幕（外挂字幕轨）=====
+    // 与 MpvObject 同签名同语义。B站字幕是独立的 bcc JSON 文件
+    // （player/wbi/v2 响应 data.subtitle.subtitles[].subtitle_url），
+    // mpv 不认这个格式，所以本方法负责下载 → 转 SRT → 落临时文件 →
+    // sub-add，由 libmpv 原生渲染。详见 MpvObject.cpp 中同名方法的长注释。
+    //
+    // **两个实现类必须同步维护这两个方法**：Windows 用本类（D3D11），
+    // Linux/macOS 用 MpvObject，QML 侧不做平台分支直接调用。
+    // 曾因只改 MpvObject 导致 Windows 上点击字幕轨报
+    // "Property 'addSubtitleTrack' ... is not a function"
+    Q_INVOKABLE void addSubtitleTrack(const QString &url, const QString &title = QString());
+    Q_INVOKABLE void setSubtitleVisible(bool visible);
+
 signals:
     void sourceChanged();
     void audioSourceChanged();
@@ -111,6 +124,8 @@ private:
     void loadFile(const QString &file);
     void startRenderTimer();
     void stopRenderTimer();
+    // 秒 → SRT 时间码 "HH:MM:SS,mmm"（bcc JSON 转 SRT 用）
+    QString subtitleSrtTimestamp(double seconds) const;
     // 根据 m_liveMode 应用 cache 配置：直播=小cache低延迟，视频=大cache抗抖动
     void applyCacheOptions();
 

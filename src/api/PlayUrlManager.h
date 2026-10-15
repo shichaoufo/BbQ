@@ -268,6 +268,16 @@ signals:
     // 详细视频信息已获取
     void videoDetailReady(const QVariantMap &detail);
 
+    // 可用字幕轨列表，每项 {lang, title, url, isAi}。
+    // **已与 view 接口的权威列表 join 过**：只包含 id 能在 view
+    // subtitle.list 里找到、且 player 接口提供了 URL 的轨道。
+    // 空列表表示该视频没有（可用的）字幕，QML 据此隐藏字幕按钮。
+    //
+    // 为什么单独一个信号而不并进 playerDetailReady：后者在
+    // last_play_time==0 的降级链里会**延迟甚至不发射**（先重试 legacy /
+    // history/cursor），字幕却不需要那些重试，并进去会被进度降级逻辑拖住
+    void subtitleListReady(const QVariantList &subtitles);
+
     // 视频当前在线观看人数已获取（已格式化的展示文本）。
     // 接口返回的 total 是带单位的字符串（千级 "999+"、万级 "2.4万+"、
     // 亿级 "1.2亿"），故此处文本已含单位，如 "2.4万+人正在看"
@@ -348,6 +358,10 @@ public:
     void getPlayerDetailImpl(const QString &aid, const QString &cid, const QString &bvid, bool asGuest,
                              bool useLegacyEndpoint = false,
                              const QVariantList &fallbackViewPoints = QVariantList());
+
+    // 只用 legacy /x/player/v2 补取字幕列表（wbi/v2 端点对已登录用户
+    // 也可能返回空 subtitles）。不影响主链路，失败只是不发信号
+    void requestSubtitleListViaLegacy(const QString &aid, const QString &cid, const QString &bvid);
 
     // 获取番剧详情（通过 season_id 或 ep_id）
     Q_INVOKABLE void getSeasonDetail(const QString &id, const QString &type = "season");
@@ -438,6 +452,16 @@ private:
     // 解析 pages 数据（分P信息）
     void parsePages(const QJsonObject &dataObj, VideoDetail &detail);
     void parseViewPoints(const QJsonObject &dataObj, VideoDetail &detail);
+
+    // 从 view 接口响应缓存当前视频的字幕权威列表（data.subtitle.list[]）。
+    // 供字幕轨过滤使用：player 接口在风控/无字幕视频上会返回毫不相干的
+    // 占位字幕，靠这份列表识别并丢弃。view 未返回 subtitle 字段时
+    // m_videoSubtitleChecked=false，不过滤
+    void parseVideoSubtitleIds(const QJsonObject &dataObj);
+
+    // 字幕轨为空但有权威列表时的重试调度（见 m_subtitleRetryBvid 注释）。
+    // 按视频独立计数，指数退避，最多 m_subtitleMaxRetry 次
+    void scheduleSubtitleRetry(const QString &aid, const QString &cid, const QString &bvid);
     
     // 解析番剧详情数据
     void parseSeasonDetail(const QJsonObject &dataObj, VideoDetail &detail, const QString &requestedEpId = QString());
@@ -458,6 +482,43 @@ private:
     // 标记的连接，被静默按游客处理）。这些请求改用一次性 QNAM（每次请求新建，
     // 用完销毁），见 getPlayerDetailImpl / fetchHistoryCursorPage。
     // m_networkManager 仅供 playurl 等共享路径使用，维持 480P 隔离
+    // 当前视频的字幕权威列表（来自 view 接口 data.subtitle.list[]），
+    // 每项 {id, lang, title, isAi}，**不含 URL**。
+    //
+    // 为什么需要（2026-10-14 实测结论）：
+    //   - view 接口（签名/非签名、游客/登录）的 subtitle.list 稳定反映
+    //     "这个视频有没有字幕"，但 **subtitle_url 恒为空串**
+    //   - player 接口（/x/player/v2、/x/player/wbi/v2）的 subtitle.subtitles
+    //     带 URL，但在视频无字幕时会返回**毫不相干的 AI 占位字幕**
+    //     （实测：给"一加6评测"返回"大佬K·世田谷灭门案"的AI字幕，
+    //     lan=ai-zh、ai_status=2、URL 在 bfs/ai_subtitle/prod/ 下）
+    //   - 所以：view 出列表（权威），player 只按 id 匹配补 URL；
+    //     player 返回的 id 不在 view 列表里 → 一律丢弃
+    //   - view list 为空 = 该视频无字幕，player 返回的任何字幕都是脏数据
+    //
+    // m_videoSubtitleChecked 记录 view 是否已确认过该视频（请求失败/未调用
+    // 时为 false，不过滤——避免误杀）。m_videoSubtitleBvid 防止切视频后
+    // 旧列表误用（请求异步到达，顺序不保证）
+    QVariantList m_videoSubtitleList;
+    bool m_videoSubtitleChecked = false;
+    QString m_videoSubtitleBvid;
+
+    // 字幕 URL 的补齐重试状态。
+    //
+    // 为什么需要：player 接口在风控灰度下**不报错也不返回空**，而是只返回
+    // 毫不相干的 AI 占位轨、不返回真正的 CC 轨——于是"view 说有字幕、
+    // player 却没给 URL"，过滤后列表为空，用户看到字幕按钮消失。实测同一
+    // 视频反复打开时好时坏（第一次正确、第二次只有占位轨）。请求本身是
+    // 幂等的，所以按视频重试直到拿到正确轨（上限 m_subtitleMaxRetry 次）
+    QString m_subtitleRetryAid;
+    QString m_subtitleRetryCid;
+    QString m_subtitleRetryBvid;
+    int m_subtitleRetryAttempt = 0;
+    // 上次调度时间戳：同一次打开会从主链路与 fallback 各触发一次，用它去重
+    qint64 m_subtitleRetryLastMs = 0;
+    // 本视频是否已成功拿到字幕轨。拿到后即使后续降级响应返回空也不再重试
+    bool m_subtitleResolved = false;
+    static constexpr int m_subtitleMaxRetry = 5;
     QList<QualityInfo> m_qualityList;
     QMap<QString, QString> m_playUrls;
     QMap<QString, QString> m_userUploadCursorMap;  // mid -> lastAid，APP 投稿游标分页

@@ -14,6 +14,7 @@
 #include <QSet>
 #include <QRandomGenerator>
 #include <QDebug>
+#include <QTimer>
 #include <QRegularExpression>
 #include <algorithm>
 
@@ -292,7 +293,9 @@ void PlayUrlManager::getPlayUrl(const QString &aid, const QString &cid, int qual
     request.setRawHeader(QByteArray("Origin"), ORIGIN.toUtf8());
     request.setRawHeader(QByteArray("Accept"), QByteArray("application/json, text/plain, */*"));
     request.setRawHeader(QByteArray("Accept-Language"), QByteArray("zh-CN,zh;q=0.9,en;q=0.8"));
-    request.setRawHeader(QByteArray("Connection"), QByteArray("keep-alive"));
+    // 2026-10-15：删掉原先写死的 Connection: keep-alive —— 启用 HTTP/2 后该头
+    // 属非法头（RFC 9113 禁止 h2 携带 connection 类头）。连接复用由共享池自身
+    // 行为决定：h1.1 默认就是 keep-alive，h2 靠多路复用，无需这个提示。
     request.setRawHeader(QByteArray("Cache-Control"), QByteArray("no-cache"));
 
     // 添加 Cookie 头 - 这是获取高清晰度视频流和绕过风控的关键
@@ -1448,6 +1451,9 @@ void PlayUrlManager::getVideoUrlByAid(const QString &aid, const QString &overrid
         // 解析分段章节（view_points）
         parseViewPoints(dataObj, detail);
 
+        // 缓存字幕 id 白名单（供 player 接口返回的字幕轨过滤占位数据）
+        parseVideoSubtitleIds(dataObj);
+
         // 解析 pages 数据（分P信息）
         bool hasPagesField = dataObj.contains("pages");
         int pagesSize = hasPagesField ? dataObj["pages"].toArray().size() : 0;
@@ -1588,6 +1594,9 @@ void PlayUrlManager::getVideoUrlByBvid(const QString &bvid, const QString &overr
 
         // 解析分段章节（view_points）
         parseViewPoints(dataObj, detail);
+
+        // 缓存字幕 id 白名单（供 player 接口返回的字幕轨过滤占位数据）
+        parseVideoSubtitleIds(dataObj);
 
         // 解析 pages 数据（分P信息）
         bool hasPagesField = dataObj.contains("pages");
@@ -1850,11 +1859,27 @@ void PlayUrlManager::getArchiveRelation(const QString &aid, const QString &bvid)
 }
 
 // 获取视频分P详情（历史播放进度 + 分段章节）
-// /x/player/wbi/v2 接口返回 last_play_time/last_play_cid（恢复播放位置）
-// 和 view_points（UP主分段章节），章节游客身份也返回
+// 用 /x/player/wbi/v2 返回 last_play_time/last_play_cid（恢复播放位置）、
+// view_points（UP主分段章节）与 subtitle（字幕轨）
 void PlayUrlManager::getPlayerDetail(const QString &aid, const QString &cid, const QString &bvid)
 {
-    getPlayerDetailImpl(aid, cid, bvid, false);
+    // 主链路用 /x/player/wbi/v2（PiliPlus 的字幕接口也是它）：一次请求拿全
+    // progress + view_points + subtitle，而且**不会返回占位轨**。
+    //
+    // 【2026-10-15 定位】此前它对本机稳定 412，根因不在网络栈、不在 UA/头部/TLS，
+    // 而是**我们自己**把 SESSDATA 里的 %2C 解码成裸逗号再回传，被 B站风控当成
+    // "脚本构造的 cookie"。修好编码（LoginManager::sessDataForCookie）后实测：
+    //   同一会话、只改这一处编码 —— 裸逗号 412 / %2C 200 且拿到真实字幕轨
+    // 详见 LoginManager.cpp 里该函数的注释。
+    //
+    // 兜底：万一 wbi/v2 又被拦（走 handleBanned），立刻转 legacy
+    // /x/player/v2 + 并发对冲。legacy 的 subtitle 字段会被服务端**概率性投毒**
+    // ——返回一条**别的视频**的 AI 字幕（URL 形如
+    //   //aisubtitle.hdslb.com/bfs/ai_subtitle/prod/<别人的aid><别人的cid><hash>
+    // 例如实测拿到指向 BV1N9xKeHEQ3（iPhone 评测）的 675 条字幕，而本视频真实轨
+    // 是 323 条人工 CC）。它的 id 不在 view 权威列表里，会被按 id 的过滤丢弃，
+    // 表现为"这个视频没有字幕"，所以才需要多路并发碰运气。
+    getPlayerDetailImpl(aid, cid, bvid, false, /*useLegacyEndpoint=*/false);
 }
 
 void PlayUrlManager::getPlayerDetailImpl(const QString &aid, const QString &cid, const QString &bvid, bool asGuest,
@@ -1869,39 +1894,57 @@ void PlayUrlManager::getPlayerDetailImpl(const QString &aid, const QString &cid,
 
     QString url;
     if (useLegacyEndpoint) {
-        // 老 /x/player/v2：无需 WBI 签名，作为 wbi/v2 被 412 风控时的备选
+        // 老 /x/player/v2：无需 WBI 签名，即**当前主链路**。
+        // 实测返回与 wbi/v2 等价的数据（subtitle / last_play_time / view_points
+        // 齐备，见 2026-10-14 对照）
         url = QString("https://api.bilibili.com/x/player/v2?%1").arg(params);
     } else {
+        // /x/player/wbi/v2：2026-10-14 确认它对**所有客户端**稳定 412 ——
+        // 用 curl 配完整 Cookie + 独立实现算出的正确 w_rid，同样拿到 412
+        // 风控页。所以 412 与 UA、请求头、TLS 指纹都无关（此前"Qt TLS 指纹被
+        // 拦"的判断是错的：当时只拿 legacy 端点做对照，而 legacy 本来就不受
+        // 风控）。它是端点级拦截，B站要求该接口带浏览器侧反爬参数。
+        // 此分支已不参与主链路，仅保留备查
         QString signedParams = WbiSigner::instance()->signParams(params);
         url = QString("https://api.bilibili.com/x/player/wbi/v2?%1").arg(signedParams);
     }
 
     QUrl reqUrl(url);
     QNetworkRequest request(reqUrl);
+    // HTTP/2 由 main.cpp 的全局 ALPN 白名单统一放开（默认即可，无需逐请求设
+    // Http2AllowedAttribute）；此处不再强制关闭。
+    //
+    // 2026-10-15 更正：以前这里写死 false、理由是"B站对 h2 返 -412"，实测证明
+    // 那是错的——真实根因是 SESSDATA 的 %2C 被解码成裸逗号（见
+    // LoginManager::sessDataForCookie）。用修好编码的 cookie 复测，h2 与
+    // http/1.1 均正常返回 200 + 真实字幕轨。
+    // 连接用完立即过期，杜绝任何形式的连接复用。
+    //
+    // 本项目在 720P 降级（只拿到 720P 清晰度）问题上验证过：B站会**按连接
+    // 维度做风控标记**，同一条连接上后续请求会被静默降级；当时的解法就是不
+    // 复用连接。这里沿用该约定，配合 Connection: close 保证每次请求都走
+    // 全新的 TCP 连接
+    request.setAttribute(QNetworkRequest::ConnectionCacheExpiryTimeoutSecondsAttribute, 0);
 
-    if (useLegacyEndpoint) {
-        // 老端点用浏览器风格头（与 history/cursor 一致）：该组合是真实浏览器
-        // 访问 bilibili 的常规特征，与被风控盯上的 wiliwili+wbi/v2 组合区分开
-        request.setRawHeader("User-Agent", USER_AGENT.toUtf8());
-        request.setRawHeader("Referer", REFERER.toUtf8());
-        request.setRawHeader("Origin", ORIGIN.toUtf8());
-        request.setRawHeader("Accept", "application/json, text/plain, */*");
-    } else {
-        // 使用 wiliwili 风格的 headers 绕过 B 站 412 风控
-        request.setRawHeader(QByteArray("User-Agent"), QByteArray("wiliwili"));
-        request.setRawHeader(QByteArray("Referer"), QByteArray("https://www.bilibili.com/client"));
-        request.setRawHeader(QByteArray("Origin"), QByteArray("https://www.bilibili.com"));
-        request.setRawHeader(QByteArray("Accept"), QByteArray("application/json, text/plain, */*"));
-        request.setRawHeader(QByteArray("Accept-Language"), QByteArray("zh-CN,zh;q=0.9,en;q=0.8"));
-        request.setRawHeader(QByteArray("Connection"), QByteArray("keep-alive"));
-        request.setRawHeader(QByteArray("Cache-Control"), QByteArray("no-cache"));
-    }
+    // 两个端点统一用浏览器风格头：这是实测能稳定返回 subtitle 字段的组合。
+    //
+    // 历史上 wbi/v2 分支还试过 "wiliwili" UA、Dart/3.6 UA、去掉 Origin 等变体，
+    // 那是在"412 由客户端特征引起"的错误假设下打的补丁。现已确认 412 与这些
+    // 全都无关（连 curl 都被拦），保留这些变体只会制造"伪装不一致"这种多余
+    // 特征，故统一为真实浏览器特征
+    request.setRawHeader("User-Agent", USER_AGENT.toUtf8());
+    request.setRawHeader("Referer", REFERER.toUtf8());
+    request.setRawHeader("Origin", ORIGIN.toUtf8());
+    request.setRawHeader("Accept", "application/json, text/plain, */*");
+    // 不再显式发 Connection: close —— 一次性 QNAM 本身就保证连接不跨请求复用，
+    // 而这个头在 HTTP/2 下是非法头（可能被服务端拒掉），2026-10-15 开 h2 时去掉。
 
     // 防 412 风控：确保真实设备指纹（buvid3 缺失是 412 的常见原因），与 getUserSpaceDynamics 同一套模式
     LoginManager *loginMgr = LoginManager::instance();
     loginMgr->ensureServerBuvid3();
     QString buvid3 = loginMgr->getOrCreateBuvid3();
 
+    // buvid 请求头两个端点都加（与 Cookie 里的 buvid3 冗余，但真实浏览器也会带）
     if (!buvid3.isEmpty()) {
         request.setRawHeader(QByteArray("buvid"), buvid3.toUtf8());
     }
@@ -1946,28 +1989,34 @@ void PlayUrlManager::getPlayerDetailImpl(const QString &aid, const QString &cid,
         // 会一起清理；lambda 内后续对 reply 的读取不受影响）
         manager->deleteLater();
         // 412 风控分层降级：
-        //   wbi/v2+Cookie 412 → 游客重试（章节游客也返回）
-        //   游客也 412        → 老 /x/player/v2 + Cookie（浏览器风格头）
+        //   wbi/v2+Cookie 412 → 老 /x/player/v2 + Cookie，同时起 3 路字幕并发对冲
         //   老 v2 也 412      → history/cursor 翻页找进度（最终兜底）
+        //
+        // 不再走"游客重试 wbi/v2"那一跳：实测游客请求 wbi/v2 虽然返回 200，
+        // 但 subtitle 恒为空列表（无 CC 权限），纯属浪费一次往返
         auto handleBanned = [this, aid, cid, bvid, asGuest, useLegacyEndpoint, fallbackViewPoints]() {
             if (!asGuest && !useLegacyEndpoint) {
-                qWarning() << "[PlayUrlManager] player/wbi/v2 banned (412), retrying as guest";
-                getPlayerDetailImpl(aid, cid, bvid, true);
+                qWarning() << "[PlayUrlManager] player detail banned (412), falling back to legacy /x/player/v2 (+3 hedges)";
+                // legacy 的 subtitle 会被概率性投毒（见 getPlayerDetail 注释），
+                // 3 路并发 + 主链路 1 路，单轮命中率约 97%
+                for (int i = 0; i < 3; ++i)
+                    requestSubtitleListViaLegacy(aid, cid, bvid);
+                getPlayerDetailImpl(aid, cid, bvid, false, /*useLegacyEndpoint=*/true, fallbackViewPoints);
             } else if (!asGuest && useLegacyEndpoint) {
                 qWarning() << "[PlayUrlManager] legacy /x/player/v2 banned (412), falling back to history/cursor";
                 getHistoryProgress(aid, cid, fallbackViewPoints);
             } else {
-                qWarning() << "[PlayUrlManager] player/wbi/v2 banned (412) even as guest, trying legacy /x/player/v2";
+                qWarning() << "[PlayUrlManager] player detail banned (412) even as guest, trying legacy /x/player/v2";
                 getPlayerDetailImpl(aid, cid, bvid, false, true, fallbackViewPoints);
             }
         };
         int httpStatus = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
         if (reply->error() != QNetworkReply::NoError) {
-            qWarning() << "[PlayUrlManager] player/wbi/v2 network error:" << reply->error()
+            qWarning() << "[PlayUrlManager] player detail network error:" << reply->error()
                        << "httpStatus:" << httpStatus << reply->errorString();
             QByteArray errBody = reply->readAll();
             if (!errBody.isEmpty()) {
-                qDebug() << "[PlayUrlManager] player/wbi/v2 error body:" << errBody.left(512);
+                qDebug() << "[PlayUrlManager] player detail error body:" << errBody.left(512);
             }
             // B 站风控两种形态都接进降级链：HTTP 412，或 HTTP 200 + body 含 -412
             if (httpStatus == 412 || errBody.contains("-412")) {
@@ -1990,7 +2039,7 @@ void PlayUrlManager::getPlayerDetailImpl(const QString &aid, const QString &cid,
 
         QJsonDocument doc = QJsonDocument::fromJson(data);
         if (!doc.isObject()) {
-            qWarning() << "[PlayUrlManager] player/wbi/v2 invalid JSON, size:" << data.size();
+            qWarning() << "[PlayUrlManager] player detail invalid JSON, size:" << data.size();
             // 失败也 emit 空进度 + 透传章节：保证 QML 侧总能收到 playerDetailReady
             QVariantMap failDetail;
             failDetail["aid"] = aid;
@@ -2006,7 +2055,7 @@ void PlayUrlManager::getPlayerDetailImpl(const QString &aid, const QString &cid,
         QJsonObject root = doc.object();
         if (root["code"].toInt() != 0) {
             int apiCode = root["code"].toInt();
-            qWarning() << "[PlayUrlManager] player/wbi/v2 API error:" << apiCode
+            qWarning() << "[PlayUrlManager] player detail API error:" << apiCode
                      << root["message"].toString();
             // HTTP 200 + JSON code:-412 也是风控（B 站常见形态），同样走降级链
             if (apiCode == -412) {
@@ -2072,6 +2121,117 @@ void PlayUrlManager::getPlayerDetailImpl(const QString &aid, const QString &cid,
         if (!viewPointsList.isEmpty())
             qWarning() << "[PlayUrlManager] chapters from player detail:" << viewPointsList.size();
 
+        // 解析字幕轨列表（data.subtitle.subtitles[]）。
+        // 注意：这里的字幕**不是权威列表**——它只在提供 subtitle_url 上有用，
+        // 而且视频无字幕/被风控时会返回毫不相干的 AI 占位字幕。权威判定在
+        // view 接口的 subtitle.list（见 parseVideoSubtitleIds），本处只按 id
+        // 匹配补 URL。字段名：lan / lan_doc / subtitle_url / type（type==1 为 AI）
+        // 放在进度降级判断之前发射，避免被 last_play_time==0 的重试拖住
+        QVariantList subtitleList;
+        if (dataObj.contains("subtitle")) {
+            // 过滤基准的就绪状态。若 checked=false 说明 view 响应还没到（或没
+            // 返回 subtitle 字段），此时不过滤——这行日志用于定位"顺序问题"
+            qWarning() << "[PlayUrlManager] subtitle filter state, checked:" << m_videoSubtitleChecked
+                       << "listSize:" << m_videoSubtitleList.size()
+                       << "bvid:" << m_videoSubtitleBvid << "curBvid:" << bvid;
+            const QJsonObject subtitleObj = dataObj.value("subtitle").toObject();
+            const QJsonArray subArr = subtitleObj.value("subtitles").toArray();
+            for (const QJsonValue &v : subArr) {
+                const QJsonObject o = v.toObject();
+                const QString subUrl = o.value("subtitle_url").toString();
+                if (subUrl.isEmpty())
+                    continue;
+                QString subId = o.value("id_str").toString();
+                if (subId.isEmpty())
+                    subId = QString::number(o.value("id").toDouble(), 'f', 0);
+                bool isAi = o.value("type").toInt() == 1;
+                QString lanDoc = o.value("lan_doc").toString();
+                if (lanDoc.isEmpty())
+                    lanDoc = o.value("lan").toString();
+
+                // view 权威列表过滤：player 接口返回的每条字幕，其 id 必须能在
+                // view 接口的 subtitle.list 里找到，否则丢弃。
+                // 两种情况都是脏数据：
+                //   1) 视频无字幕（view list 为空）——player 会返回毫不相干的
+                //      AI 占位字幕（实测给"一加6评测"返回"大佬K灭门案"字幕）
+                //   2) 视频有 CC——player 被风控时只返回 AI 占位轨（id 不匹配）
+                // view 未确认过该视频（m_videoSubtitleChecked=false，如请求
+                // 失败或番剧路径）时不过滤，避免误杀
+                if (m_videoSubtitleChecked
+                    && (m_videoSubtitleBvid.isEmpty() || m_videoSubtitleBvid == bvid)) {
+                    QVariantMap viewItem;
+                    bool found = false;
+                    for (const QVariant &lv : m_videoSubtitleList) {
+                        const QVariantMap m = lv.toMap();
+                        if (m.value("id").toString() == subId) {
+                            viewItem = m;
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (!found) {
+                        qWarning() << "[PlayUrlManager] subtitle dropped (not in view list):"
+                                   << "id=" << subId
+                                   << "lan=" << o.value("lan").toString()
+                                   << "type=" << o.value("type").toInt()
+                                   << "ai_status=" << o.value("ai_status").toInt()
+                                   << "url=" << subUrl.left(60);
+                        continue;
+                    }
+                    // 标题/类型以 view 为准（player 的 lan_doc 在降级响应里不可信）
+                    const QString viewTitle = viewItem.value("title").toString();
+                    if (!viewTitle.isEmpty())
+                        lanDoc = viewTitle;
+                    isAi = viewItem.value("isAi").toBool();
+                }
+                // AI 字幕补后缀，让用户能看出哪些是机器生成的
+                if (isAi && !lanDoc.endsWith(QString::fromUtf8("（AI）")))
+                    lanDoc += QString::fromUtf8("（AI）");
+                QVariantMap sm;
+                sm["lang"] = o.value("lan").toString();
+                sm["title"] = lanDoc;
+                sm["url"] = subUrl;
+                sm["isAi"] = isAi;
+                subtitleList.append(sm);
+                // 诊断日志：字幕串视频的故障极难定位（服务端会对异常请求返回
+                // 毫不相干的占位字幕），打出 id/type/URL 便于与 view 接口的
+                // subtitle.list[].id 比对。URL 截断到 80 字符（含 auth_key）
+                qWarning() << "[PlayUrlManager] subtitle item:"
+                           << "id=" << subId
+                           << "lan=" << o.value("lan").toString()
+                           << "type=" << o.value("type").toInt()
+                           << "ai_status=" << o.value("ai_status").toInt()
+                           << "url=" << subUrl.left(80);
+            }
+            qWarning() << "[PlayUrlManager] subtitles from player detail:" << subtitleList.size();
+        }
+        // view 说有字幕、这里却一条都没（join 后为空）→ 说明 player 接口被
+        // 降级了（只给 AI 占位轨或空），调度重试
+        if (subtitleList.isEmpty()) {
+            scheduleSubtitleRetry(aid, cid, bvid);
+        } else {
+            m_subtitleRetryAttempt = 0;   // 拿到内容就清计数
+            m_subtitleResolved = true;
+        }
+        emit subtitleListReady(subtitleList);
+
+        // 拿不到字幕时的补救：仅在**非 legacy 主链路**（即 wbi/v2 分支，已停用）
+        // 才需要换端点重试。legacy 就是主链路时，这里重发同一端点纯属浪费——
+        // 空列表的情况交给 scheduleSubtitleRetry 按间隔重试
+        //
+        // 补救条件刻意收得很窄，避免给无字幕视频白加一次请求：
+        //   服务端说"有字幕但需要登录"（need_login_subtitle=true）
+        //   + 我们确实已登录 + 却仍拿到空列表
+        // 三者同时成立才说明是被网关了，而不是真没有字幕。
+        // 游客身份下 need_login_subtitle=true 是正常的（就是不给看），不补救
+        if (subtitleList.isEmpty()
+            && !useLegacyEndpoint
+            && dataObj.value("need_login_subtitle").toBool()
+            && LoginManager::instance()->isLoggedIn()) {
+            qWarning() << "[PlayUrlManager] player detail returned no subtitle but need_login_subtitle=true, retrying via legacy /x/player/v2";
+            requestSubtitleListViaLegacy(aid, cid, bvid);
+        }
+
         qWarning() << "[PlayUrlManager] playerDetail:" << "lastPlayTime=" << lastPlayTime
                  << "lastPlayCid=" << lastPlayCid;
 
@@ -2106,12 +2266,224 @@ void PlayUrlManager::getPlayerDetailImpl(const QString &aid, const QString &cid,
     });
 }
 
+// 只用 legacy /x/player/v2 补取字幕列表（不动进度/章节）。
+//
+// 用途：主链路（同样是 legacy）拿到的字幕列表为空时，由 scheduleSubtitleRetry
+// 按间隔重试、以及 wbi/v2 分支的补救逻辑调用。单发这个请求比重入
+// getPlayerDetailImpl 更轻，也不会重复动进度/章节状态。
+//
+// 这个请求**不影响主链路**：失败/无字幕都只是不发信号或发空列表，
+// 由 QML 侧的"空列表不覆盖非空列表"守卫兜底
+void PlayUrlManager::requestSubtitleListViaLegacy(const QString &aid, const QString &cid, const QString &bvid)
+{
+    // 已经拿到字幕轨就不再发请求。放在最前面是为了省掉一次无意义的网络往返：
+    // 并发对冲时后到的几路、以及已解决后仍到期的重试定时器，都会走到这里
+    if (m_subtitleResolved)
+        return;
+
+    QString params = bvid.isEmpty()
+                         ? QString("aid=%1&cid=%2").arg(aid, cid)
+                         : QString("aid=%1&cid=%2&bvid=%3").arg(aid, cid, bvid);
+    QUrl reqUrl(QString("https://api.bilibili.com/x/player/v2?%1").arg(params));
+    QNetworkRequest request(reqUrl);
+    // HTTP/2 保持默认（由 main.cpp 的 ALPN 白名单决定），见 getPlayerDetailImpl
+    // 里的更正说明——h2 本身没问题，此前误判为 412 根源。
+    // 不复用连接（同 getPlayerDetailImpl：B站按连接维度做风控标记）
+    request.setAttribute(QNetworkRequest::ConnectionCacheExpiryTimeoutSecondsAttribute, 0);
+    // 浏览器风格头：这是实测能返回 subtitle 字段的组合
+    request.setRawHeader(QByteArray("User-Agent"), USER_AGENT.toUtf8());
+    request.setRawHeader(QByteArray("Referer"), REFERER.toUtf8());
+    request.setRawHeader(QByteArray("Origin"), ORIGIN.toUtf8());
+    request.setRawHeader(QByteArray("Accept"), QByteArray("application/json, text/plain, */*"));
+    // 同主链路：不发 Connection: close（一次性 QNAM 已保证不复用，且 h2 下非法）
+
+    // 防 412 风控：与主链路 getPlayerDetailImpl 保持**完全一致**的头部。
+    // 这里踩过一个极隐蔽的坑（用户日志，BV1DzpG6CEEH）：同一个 URL、同一个
+    // Cookie、同一个 UA，只差 Origin/buvid 头，服务端返回的字幕完全不同——
+    //   带 Origin+buvid → 当前视频的人工 CC 字幕（id 与 view 接口一致）
+    //   缺 Origin+buvid → 一个**毫不相干的 AI 占位字幕**
+    //     （lan=ai-zh, type=1, ai_status=2, URL 在 ai_subtitle/prod/ 下）
+    // 所以补救请求的头部不能省，省了会比不补救更糟——把正确字幕覆盖成脏数据
+    LoginManager *loginMgr = LoginManager::instance();
+    loginMgr->ensureServerBuvid3();
+    QString buvid3 = loginMgr->getOrCreateBuvid3();
+    if (!buvid3.isEmpty()) {
+        request.setRawHeader(QByteArray("buvid"), buvid3.toUtf8());
+    }
+
+    QString cookies = loginMgr->getCookies();
+    if (!cookies.isEmpty()) {
+        request.setRawHeader("Cookie", cookies.toUtf8());
+    }
+
+    QNetworkAccessManager *manager = new QNetworkAccessManager(this);
+    QNetworkReply *reply = manager->get(request);
+    connect(reply, &QNetworkReply::finished, this, [this, reply, manager, aid, cid, bvid]() {
+        manager->deleteLater();
+        QByteArray data = reply->readAll();
+        reply->deleteLater();
+
+        // 入口并行预取会同时发两个请求，先到的拿到字幕后就置 resolved，
+        // 后到的直接丢弃（省一次解析，也避免重复 emit）
+        if (m_subtitleResolved) {
+            qDebug() << "[PlayUrlManager] subtitle legacy response ignored (already resolved)";
+            return;
+        }
+        // 迟到的响应：期间已切到别的视频，丢弃防止污染新视频的字幕列表。
+        // 必须带 m_videoSubtitleChecked 条件——view 响应还没到时该字段恒为
+        // false，若只看 bvid 不匹配会把**当前视频**的响应误杀（bvid 还是
+        // 上一个视频的残留值）
+        if (m_videoSubtitleChecked && !m_videoSubtitleBvid.isEmpty()
+            && m_videoSubtitleBvid != bvid) {
+            qDebug() << "[PlayUrlManager] subtitle legacy response ignored (video changed to"
+                     << m_videoSubtitleBvid << ")";
+            return;
+        }
+
+        QVariantList subtitleList;
+        QJsonDocument doc = QJsonDocument::fromJson(data);
+        if (doc.isObject()) {
+            const QJsonObject dataObj = doc.object().value("data").toObject();
+            const QJsonObject subtitleObj = dataObj.value("subtitle").toObject();
+            const QJsonArray subArr = subtitleObj.value("subtitles").toArray();
+            for (const QJsonValue &v : subArr) {
+                const QJsonObject o = v.toObject();
+                const QString subUrl = o.value("subtitle_url").toString();
+                if (subUrl.isEmpty())
+                    continue;
+                // view 权威列表过滤，同主链路：风控时 legacy 端点也会返回
+                // 毫不相干的占位字幕，只放行 id 能在 view list 里找到的
+                QString subId = o.value("id_str").toString();
+                if (subId.isEmpty())
+                    subId = QString::number(o.value("id").toDouble(), 'f', 0);
+                bool isAi = o.value("type").toInt() == 1;
+                QString lanDoc = o.value("lan_doc").toString();
+                if (lanDoc.isEmpty())
+                    lanDoc = o.value("lan").toString();
+                if (m_videoSubtitleChecked
+                    && (m_videoSubtitleBvid.isEmpty() || m_videoSubtitleBvid == bvid)) {
+                    QVariantMap viewItem;
+                    bool found = false;
+                    for (const QVariant &lv : m_videoSubtitleList) {
+                        const QVariantMap m = lv.toMap();
+                        if (m.value("id").toString() == subId) {
+                            viewItem = m;
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (!found) {
+                        qWarning() << "[PlayUrlManager] subtitle dropped (legacy fallback, not in view list):"
+                                   << "id=" << subId
+                                   << "lan=" << o.value("lan").toString()
+                                   << "type=" << o.value("type").toInt()
+                                   << "ai_status=" << o.value("ai_status").toInt()
+                                   << "url=" << subUrl.left(60);
+                        continue;
+                    }
+                    const QString viewTitle = viewItem.value("title").toString();
+                    if (!viewTitle.isEmpty())
+                        lanDoc = viewTitle;
+                    isAi = viewItem.value("isAi").toBool();
+                }
+                if (isAi && !lanDoc.endsWith(QString::fromUtf8("（AI）")))
+                    lanDoc += QString::fromUtf8("（AI）");
+                QVariantMap sm;
+                sm["lang"] = o.value("lan").toString();
+                sm["title"] = lanDoc;
+                sm["url"] = subUrl;
+                sm["isAi"] = isAi;
+                subtitleList.append(sm);
+                // 诊断日志同主链路：用于核对 id/type 是否属于当前视频
+                qWarning() << "[PlayUrlManager] subtitle item (legacy fallback):"
+                           << "id=" << subId
+                           << "lan=" << o.value("lan").toString()
+                           << "type=" << o.value("type").toInt()
+                           << "ai_status=" << o.value("ai_status").toInt()
+                           << "url=" << subUrl.left(80);
+            }
+        }
+        qWarning() << "[PlayUrlManager] subtitles via legacy fallback:" << subtitleList.size();
+        if (!subtitleList.isEmpty()) {
+            m_subtitleRetryAttempt = 0;
+            m_subtitleResolved = true;
+            emit subtitleListReady(subtitleList);
+        } else {
+            // 补救也没拿到 → 继续重试（上限见 m_subtitleMaxRetry）
+            scheduleSubtitleRetry(aid, cid, bvid);
+        }
+    });
+}
+
+// 字幕轨为空但有权威列表时的重试调度。
+//
+// 为什么需要（用户日志，BV1DzpG6CEEH）：
+//   view 接口稳定说"该视频有 1 条字幕"，但 player 接口在风控灰度下
+//   **不报错也不返回空**，而是只返回毫不相干的 AI 占位轨（ai-zh/ai_status=2），
+//   不含真正的 CC 轨。于是 join 结果为空，用户看到"有字幕的视频反复打开
+//   重试才会有字幕选项出现"——本质是服务端随机降级，重试能命中。
+//
+// 设计：
+//   - 只在 view 已确认"该视频有字幕"时重试，避免给无字幕视频空转
+//   - 按 bvid 独立计数，换视频自动重置
+//   - 时间窗口去重：同一次打开会从主链路和 fallback 各触发一次，
+//     800ms 内的重复调度只算一次，避免 attempt 被快速耗尽
+//   - 指数退避（0.7s / 1.4s / 2.1s ...），最多 m_subtitleMaxRetry 次
+//   - 重试只走 requestSubtitleListViaLegacy 单请求，不重入 getPlayerDetailImpl
+//     的降级链（那条链会再次触发 fallback，导致请求风暴）
+void PlayUrlManager::scheduleSubtitleRetry(const QString &aid, const QString &cid, const QString &bvid)
+{
+    // 无权威列表（view 说没字幕 / 没确认过）时不重试
+    if (!m_videoSubtitleChecked || m_videoSubtitleList.isEmpty())
+        return;
+    // 已经拿到字幕轨了，后续降级响应返回空不必再试
+    if (m_subtitleResolved)
+        return;
+    // 已经不是当前视频了
+    if (!m_videoSubtitleBvid.isEmpty() && m_videoSubtitleBvid != bvid)
+        return;
+
+    if (m_subtitleRetryBvid != bvid) {
+        // 换了视频，重置计数与去重时间戳
+        m_subtitleRetryBvid = bvid;
+        m_subtitleRetryAttempt = 0;
+        m_subtitleRetryLastMs = 0;
+    }
+
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    if (m_subtitleRetryLastMs > 0 && now - m_subtitleRetryLastMs < 800)
+        return;   // 同一次打开的重复触发，丢弃
+
+    if (m_subtitleRetryAttempt >= m_subtitleMaxRetry) {
+        qWarning() << "[PlayUrlManager] subtitle retry exhausted, giving up. bvid:" << bvid
+                   << "attempts:" << m_subtitleRetryAttempt;
+        return;
+    }
+
+    ++m_subtitleRetryAttempt;
+    m_subtitleRetryLastMs = now;
+    // 首次 400ms 起、每次 +400ms。比 700ms 起步更快出结果，又不至于把
+    // 服务端打成高频（灰度降级本来就是概率性放行，间隔太小收益递减）
+    const int delay = 400 * m_subtitleRetryAttempt;
+    qWarning() << "[PlayUrlManager] subtitle URL missing (view says has subtitle), retry"
+               << m_subtitleRetryAttempt << "/" << m_subtitleMaxRetry
+               << "in" << delay << "ms. bvid:" << bvid;
+    QTimer::singleShot(delay, this, [this, aid, cid, bvid]() {
+        // 延迟期间可能已切视频，校验后放弃
+        if (!m_videoSubtitleBvid.isEmpty() && m_videoSubtitleBvid != bvid) {
+            qDebug() << "[PlayUrlManager] subtitle retry skipped, video changed to"
+                     << m_videoSubtitleBvid;
+            return;
+        }
+        requestSubtitleListViaLegacy(aid, cid, bvid);
+    });
+}
+
 // 降级方案：通过 /x/web-interface/history/cursor 获取视频观看进度
-// 当 /x/player/wbi/v2（含老 v2 备选）都被风控拦截时的最终兜底。
+// 当 /x/player/v2（player detail 主链路）被风控拦截、或返回 0 进度时的最终兜底。
 // history/cursor 每页只返回最近 ps=30 条，目标视频可能埋得更深，
 // 故按 cursor 翻页查找，最多 maxHistoryPages 页
 static const int maxHistoryPages = 5;
-
 void PlayUrlManager::getHistoryProgress(const QString &aid, const QString &cid,
                                         const QVariantList &viewPoints)
 {
@@ -2128,6 +2500,10 @@ void PlayUrlManager::fetchHistoryCursorPage(const QString &aid, const QString &c
 
     QUrl reqUrl(url + "?" + params);
     QNetworkRequest request(reqUrl);
+    // HTTP/2 保持默认（main.cpp 的 ALPN 白名单），见 getPlayerDetailImpl 里的
+    // 更正说明：h2 与 http/1.1 都能正常工作，不必强制关掉。
+    // 不复用连接（同 getPlayerDetailImpl：B站按连接维度做风控标记）
+    request.setAttribute(QNetworkRequest::ConnectionCacheExpiryTimeoutSecondsAttribute, 0);
     request.setRawHeader("User-Agent", USER_AGENT.toUtf8());
     request.setRawHeader("Referer", REFERER.toUtf8());
     request.setRawHeader("Origin", ORIGIN.toUtf8());
@@ -3518,11 +3894,62 @@ void PlayUrlManager::parseUgcSeason(const QJsonObject &dataObj, VideoDetail &det
 
 void PlayUrlManager::parseViewPoints(const QJsonObject &dataObj, VideoDetail &detail)
 {
-    // 分段章节数据只在 /x/player/wbi/v2 接口返回（getPlayerDetail 中解析），
+    // 分段章节数据由 /x/player/v2 返回（getPlayerDetail 中解析），
     // /x/web-interface/view 实测无 view_points 字段。此函数保留接口签名但
     // 置空列表，VideoDetail::viewPoints 统一由 playerDetailReady 信号侧填充
     Q_UNUSED(dataObj)
     detail.viewPoints.clear();
+}
+
+void PlayUrlManager::parseVideoSubtitleIds(const QJsonObject &dataObj)
+{
+    // 从 view 接口缓存当前视频的字幕权威列表。
+    //
+    // 为什么需要：/x/player/v2 与 /x/player/wbi/v2 的 subtitle.subtitles
+    // 在视频无字幕（或被风控）时会返回**毫不相干的 AI 占位字幕**——
+    // 实测给"一加6上手体验"返回了"大佬K·世田谷灭门案"的AI字幕
+    // （lan=ai-zh, type=1, ai_status=2）。用户看到的就是"字幕牛头不对马嘴"。
+    // view 接口的 subtitle.list 是唯一可靠基准：
+    //   有 CC 的视频 → list 里有对应 id（但 subtitle_url 恒为空）
+    //   无字幕的视频 → list 为空数组
+    // 所以 view 出列表，player 只按 id 匹配补 URL，其余一律丢弃。
+    //
+    // m_videoSubtitleChecked：view 确实返回了 subtitle 字段（无论 list 是否
+    // 为空）。为 false 时不过滤，避免 view 请求失败时误杀
+    m_videoSubtitleList.clear();
+    m_videoSubtitleBvid = dataObj.value("bvid").toString();
+    m_videoSubtitleChecked = dataObj.contains("subtitle");
+    // 新一次 view 响应（换视频/换分P）→ 重置字幕重试状态
+    m_subtitleResolved = false;
+    m_subtitleRetryAttempt = 0;
+    m_subtitleRetryLastMs = 0;
+    m_subtitleRetryBvid = m_videoSubtitleBvid;
+    if (!m_videoSubtitleChecked)
+        return;
+    const QJsonObject subtitleObj = dataObj.value("subtitle").toObject();
+    const QJsonArray list = subtitleObj.value("list").toArray();
+    for (const QJsonValue &v : list) {
+        const QJsonObject o = v.toObject();
+        QString id = o.value("id_str").toString();
+        if (id.isEmpty())
+            id = QString::number(o.value("id").toDouble(), 'f', 0);
+        if (id.isEmpty())
+            continue;
+        QVariantMap sm;
+        sm["id"] = id;
+        sm["lang"] = o.value("lan").toString();
+        QString lanDoc = o.value("lan_doc").toString();
+        if (lanDoc.isEmpty())
+            lanDoc = o.value("lan").toString();
+        const bool isAi = o.value("type").toInt() == 1;
+        if (isAi && !lanDoc.endsWith(QString::fromUtf8("（AI）")))
+            lanDoc += QString::fromUtf8("（AI）");
+        sm["title"] = lanDoc;
+        sm["isAi"] = isAi;
+        m_videoSubtitleList.append(sm);
+    }
+    qDebug() << "[PlayUrlManager] video subtitle list from view:" << m_videoSubtitleList.size()
+             << "checked:" << m_videoSubtitleChecked << "bvid:" << m_videoSubtitleBvid;
 }
 
 void PlayUrlManager::parsePages(const QJsonObject &dataObj, VideoDetail &detail)
@@ -3854,6 +4281,12 @@ void PlayUrlManager::getSeasonDetail(const QString &id, const QString &type)
         // 解析番剧详情
         VideoDetail detail;
         parseSeasonDetail(dataObj, detail, m_requestedEpId);
+
+        // 番剧的字幕 id 体系与普通视频不同（且不在本响应内），
+        // 清空列表并标记"未确认"，避免用上一个普通视频的列表误杀番剧字幕
+        m_videoSubtitleList.clear();
+        m_videoSubtitleChecked = false;
+        m_videoSubtitleBvid.clear();
         
         // 转换为 QVariantMap 并发射信号
         QVariantMap detailMap = videoDetailToMap(detail);
@@ -4140,7 +4573,9 @@ void PlayUrlManager::requestSeasonPlayUrlStrategyA(const QString &cid, int clien
              << "Referer:" << bangumiReferer;
     request.setRawHeader(QByteArray("Accept"), QByteArray("application/json, text/plain, */*"));
     request.setRawHeader(QByteArray("Accept-Language"), QByteArray("zh-CN,zh;q=0.9,en;q=0.8"));
-    request.setRawHeader(QByteArray("Connection"), QByteArray("keep-alive"));
+    // 2026-10-15：删掉原先写死的 Connection: keep-alive —— 启用 HTTP/2 后该头
+    // 属非法头（RFC 9113 禁止 h2 携带 connection 类头）。连接复用由共享池自身
+    // 行为决定：h1.1 默认就是 keep-alive，h2 靠多路复用，无需这个提示。
     request.setRawHeader(QByteArray("Cache-Control"), QByteArray("no-cache"));
 
     if (!cookies.isEmpty()) {
@@ -4234,7 +4669,9 @@ void PlayUrlManager::requestSeasonPlayUrlStrategyB(const QString &cid, int clien
              << "Referer: https://www.bilibili.com/client";
     request.setRawHeader(QByteArray("Accept"), QByteArray("application/json, text/plain, */*"));
     request.setRawHeader(QByteArray("Accept-Language"), QByteArray("zh-CN,zh;q=0.9,en;q=0.8"));
-    request.setRawHeader(QByteArray("Connection"), QByteArray("keep-alive"));
+    // 2026-10-15：删掉原先写死的 Connection: keep-alive —— 启用 HTTP/2 后该头
+    // 属非法头（RFC 9113 禁止 h2 携带 connection 类头）。连接复用由共享池自身
+    // 行为决定：h1.1 默认就是 keep-alive，h2 靠多路复用，无需这个提示。
     request.setRawHeader(QByteArray("Cache-Control"), QByteArray("no-cache"));
 
     if (!cookies.isEmpty()) {
@@ -4660,7 +5097,9 @@ void PlayUrlManager::requestSeasonPlayUrlStrategyD(const QString &cid, int clien
     request.setRawHeader(QByteArray("Origin"),  ORIGIN.toUtf8());
     request.setRawHeader(QByteArray("Accept"), QByteArray("application/json, text/plain, */*"));
     request.setRawHeader(QByteArray("Accept-Language"), QByteArray("zh-CN,zh;q=0.9,en;q=0.8"));
-    request.setRawHeader(QByteArray("Connection"), QByteArray("keep-alive"));
+    // 2026-10-15：删掉原先写死的 Connection: keep-alive —— 启用 HTTP/2 后该头
+    // 属非法头（RFC 9113 禁止 h2 携带 connection 类头）。连接复用由共享池自身
+    // 行为决定：h1.1 默认就是 keep-alive，h2 靠多路复用，无需这个提示。
     request.setRawHeader(QByteArray("Cache-Control"), QByteArray("no-cache"));
 
     // 注意：loginMgr 已在本函数顶部 L4226 声明（用于取 userMid），这里复用避免重复定义
@@ -5001,7 +5440,9 @@ void PlayUrlManager::requestSeasonPlayUrlStrategyC(const QString &cid, int clien
     request.setRawHeader(QByteArray("Origin"),  ORIGIN.toUtf8());
     request.setRawHeader(QByteArray("Accept"), QByteArray("application/json, text/plain, */*"));
     request.setRawHeader(QByteArray("Accept-Language"), QByteArray("zh-CN,zh;q=0.9,en;q=0.8"));
-    request.setRawHeader(QByteArray("Connection"), QByteArray("keep-alive"));
+    // 2026-10-15：删掉原先写死的 Connection: keep-alive —— 启用 HTTP/2 后该头
+    // 属非法头（RFC 9113 禁止 h2 携带 connection 类头）。连接复用由共享池自身
+    // 行为决定：h1.1 默认就是 keep-alive，h2 靠多路复用，无需这个提示。
     request.setRawHeader(QByteArray("Cache-Control"), QByteArray("no-cache"));
 
     LoginManager *loginMgr = LoginManager::instance();
