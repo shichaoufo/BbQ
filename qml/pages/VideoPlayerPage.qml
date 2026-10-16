@@ -1073,11 +1073,13 @@ Rectangle {
     function closePopups() {
         if (volumePopup.opened) volumePopup.close()
         if (danmakuPopup.opened) danmakuPopup.close()
-        // 章节/字幕菜单二选一：同时开会互相重叠。
+        // 顶部右侧三键组（字幕/编解码）与左上章节菜单二选一：同时开会互相重叠。
+        // 编解码 2026-10-16 从底部迁到顶部后与字幕相邻，必须纳入互斥
         // 本函数由各菜单的 onAboutToShow 调用，此刻自身 opened 仍为 false，
         // 所以 close() 只会影响另一个菜单，不会把自己关掉
         if (chapterMenu.opened) chapterMenu.close()
         if (subtitleMenu.opened) subtitleMenu.close()
+        if (codecMenu.opened) codecMenu.close()
     }
 
     // 自动隐藏豁免：鼠标悬停在控制栏区域内，或任一弹出面板/菜单
@@ -3461,7 +3463,11 @@ Rectangle {
                     id: videoInfoPanel
                     anchors.right: parent.right
                     anchors.top: parent.top
-                    anchors.margins: Theme.spacingMedium
+                    // topMargin 56 = 顶部控制栏 48 + 8 间距：2026-10-16 播放
+                    // 信息按钮迁到顶部右侧后，面板若还贴着顶边（原 12）会
+                    // 盖住右上角三个按钮（面板 z=100 在上层），且关不掉
+                    anchors.rightMargin: Theme.spacingMedium
+                    anchors.topMargin: 56
                     width: infoColumn.implicitWidth + 24
                     height: infoColumn.implicitHeight + 24
                     color: "#E6000000"
@@ -3819,10 +3825,10 @@ Rectangle {
                             easing.type: Easing.OutCubic
                         }
                     }
-                    // 顶部栏常驻：不再要求有章节。字幕按钮也挂在这里，
-                    // 而字幕与章节无关（有字幕无章节 / 有章节无字幕都常见）。
-                    // 两个按钮各自按自己的条件 visible，阴影本身只是背景
-                    visible: pageRoot.viewPoints.length > 0 || pageRoot.subtitleTracks.length > 0
+                    // 顶部栏常驻，阴影只是按钮的背景，始终显示：
+                    // 2026-10-16 起右侧挂三个按钮——字幕、编解码、播放信息，
+                    // 后两个从底部控制栏迁入，与有无章节/字幕无关，所以不再
+                    // 按 viewPoints/subtitleTracks 条件隐藏整条阴影
 
                     // 顶部渐变阴影+章节键悬停检测（被动监听，不与章节键
                     // 抢事件）：悬停期间控制栏与鼠标指针不进入自动隐藏
@@ -3880,13 +3886,19 @@ Rectangle {
                         }
                     }
 
-                    // 字幕选择菜单（样式与章节菜单一致）。
-                    // 位置在**右上角**，与 B站官方播放器一致：左上角留给章节/
-                    // 返回等导航性质的操作，右上角放字幕这类"当前播放内容"的开关
+                    // 顶部右侧三键组（2026-10-16 定稿）：
+                    //   字幕 → 编解码 → 播放信息（从左到右）
+                    // 字幕在最左、播放信息在最右，与 B站官方播放器一致：
+                    // 左上角留给章节/返回等导航性质的操作，右上角放
+                    // "当前播放内容"的开关。编解码与播放信息原先在底部
+                    // 控制栏右侧，与清晰度/倍速/音量挤在一行，迁到顶部后
+                    // 底部一行更宽松，顶部位置也本就充裕
                     FluMenuBar {
                         id: subtitleMenuBar
-                        anchors.right: parent.right
-                        anchors.rightMargin: Theme.spacingMedium
+                        // 锚到编解码按钮左侧（间距 8，与底部按钮间距一致），
+                        // 不再直接锚 parent.right——右边还有两个按钮
+                        anchors.right: codecMenu.left
+                        anchors.rightMargin: 8
                         anchors.top: parent.top
                         anchors.topMargin: 2
                         enabled: pageRoot.controlsVisible
@@ -3950,6 +3962,90 @@ Rectangle {
                                     }
                                 }
                             }
+                        }
+                    }
+
+                    // 编解码选择（2026-10-16 从底部控制栏右侧迁入）。
+                    // 锚在播放信息左侧，构成「字幕 → 编解码 → 播放信息」
+                    FluMenuBar {
+                        id: codecMenu
+                        anchors.right: videoInfoBtn.left
+                        anchors.rightMargin: 8
+                        anchors.top: parent.top
+                        anchors.topMargin: 2
+                        enabled: pageRoot.controlsVisible
+                        delegate: FluMenuBarItem {
+    id: mbItem
+    textColor: "#FFFFFF"
+    // 覆写背景：原版悬停色 FluTheme.itemHoverColor（6% 白）在黑色
+    // 控制栏上不可见，改为与 FluIconButton 一致的 15%/25% 白。
+    // 注意：原组件内部的 control id 外部不可见，须用自身 id 引用
+    background: Rectangle {
+        implicitWidth: 30
+        implicitHeight: 30
+        radius: 3
+        color: mbItem.pressed ? "#40FFFFFF"
+                              : (mbItem.highlighted ? "#26FFFFFF" : "transparent")
+    }
+}
+                        FluMenu {
+                            title: pageRoot.currentCodecName
+                            onAboutToShow: closePopups()
+                            Repeater {
+                                model: pageRoot.codecOptions
+                                FluMenuItem {
+                                    text: modelData.name
+                                    onTriggered: {
+                                        var c = modelData.value
+                                        if (c !== pageRoot.currentCodec) {
+                                            pageRoot.currentCodec = c
+                                            Settings.setInt("videoCodec", c)
+                                            if (pageRoot.aid !== "" && pageRoot.cid !== "") {
+                                                pageRoot._savedPosition = mpvPlayer.position
+                                                pageRoot._switchingStream = true
+                                                heartbeatTimer.stop()
+                                                // 【关键修复】番剧模式下走 PGC 专用接口；普通视频走 UGC 接口
+                                                if (pageRoot.isBangumi && pageRoot.epId) {
+                                                    // 用户显式切换编码 → 按传入 exact qn 发请求（forceMaxQuality=false），
+                                                    // 若 Only-FLV 下服务器拿不到 exact encode 会回退真实 quality，playUrlReady 会校正显示
+                                                    PlayUrlManager.getSeasonPlayUrl(
+                                                        pageRoot.cid, pageRoot.currentQualityId,
+                                                        pageRoot.epId, pageRoot.seasonType,
+                                                        pageRoot.bvid, pageRoot.aid,
+                                                        false /* forceMaxQuality */,
+                                                        pageRoot.seasonId || "")
+                                                } else {
+                                                    PlayUrlManager.getPlayUrl(pageRoot.aid, pageRoot.cid, pageRoot.currentQualityId)
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // 播放信息开关（2026-10-16 从底部控制栏右侧迁入，三键组最右）。
+                    // 面板本身是 videoContainer 的 videoInfoPanel（锚右上），
+                    // 已把 topMargin 调到控制栏下方，不会遮住这三个按钮
+                    FluIconButton {
+                        id: videoInfoBtn
+                        anchors.right: parent.right
+                        anchors.rightMargin: Theme.spacingMedium
+                        anchors.top: parent.top
+                        anchors.topMargin: 2
+                        enabled: pageRoot.controlsVisible
+                        iconSource: FluentIcons.Info
+                        iconSize: 16
+                        iconColor: "#FFFFFF"
+                        hoverColor: "#26FFFFFF"
+                        pressedColor: "#40FFFFFF"
+                        onClicked: {
+                            closePopups()
+                            if (mpvPlayer.hasVideo) {
+                                videoInfoTimer.restart()
+                            }
+                            pageRoot.showVideoInfo = !pageRoot.showVideoInfo
                         }
                     }
                 }
@@ -4239,7 +4335,9 @@ Rectangle {
 
                             Item { Layout.fillWidth: true }
 
-                            // 右侧：从右到左依次为全屏、信息、弹幕设置、音量、倍速、清晰度
+                            // 右侧：从右到左依次为全屏、小窗、弹幕设置、音量、倍速、清晰度。
+                            // 编解码与播放信息已于 2026-10-16 迁到顶部控制栏右侧
+                            // （顺序 字幕→编解码→播放信息），底部一行不再那么挤
                             RowLayout {
                                 layoutDirection: Qt.RightToLeft
                                 spacing: 8
@@ -4273,21 +4371,8 @@ Rectangle {
                                     }
                                 }
 
-                                FluIconButton {
-                                    id: videoInfoBtn
-                                    iconSource: FluentIcons.Info
-                                    iconSize: 16
-                                    iconColor: "#FFFFFF"
-                                    hoverColor: "#26FFFFFF"
-                                    pressedColor: "#40FFFFFF"
-                                    onClicked: {
-                                        closePopups()
-                                        if (mpvPlayer.hasVideo) {
-                                            videoInfoTimer.restart()
-                                        }
-                                        pageRoot.showVideoInfo = !pageRoot.showVideoInfo
-                                    }
-                                }
+                                // 播放信息按钮已迁到顶部控制栏右侧（2026-10-16）：
+                                // 与编解码、字幕并列，顺序 字幕→编解码→播放信息
 
                                 FluIconButton {
                                     id: danmakuBtn
@@ -4350,59 +4435,8 @@ Rectangle {
                                     }
                                 }
 
-                                FluMenuBar {
-                                    Layout.alignment: Qt.AlignVCenter
-                                    delegate: FluMenuBarItem {
-    id: mbItem
-    textColor: "#FFFFFF"
-    // 覆写背景：原版悬停色 FluTheme.itemHoverColor（6% 白）在黑色
-    // 控制栏上不可见，改为与 FluIconButton 一致的 15%/25% 白。
-    // 注意：原组件内部的 control id 外部不可见，须用自身 id 引用
-    background: Rectangle {
-        implicitWidth: 30
-        implicitHeight: 30
-        radius: 3
-        color: mbItem.pressed ? "#40FFFFFF"
-                              : (mbItem.highlighted ? "#26FFFFFF" : "transparent")
-    }
-}
-                                    FluMenu {
-                                        id: codecMenu
-                                        title: pageRoot.currentCodecName
-                                        onAboutToShow: closePopups()
-                                        Repeater {
-                                            model: pageRoot.codecOptions
-                                            FluMenuItem {
-                                                text: modelData.name
-                                                onTriggered: {
-                                                    var c = modelData.value
-                                                    if (c !== pageRoot.currentCodec) {
-                                                        pageRoot.currentCodec = c
-                                                        Settings.setInt("videoCodec", c)
-                                                        if (pageRoot.aid !== "" && pageRoot.cid !== "") {
-                                                            pageRoot._savedPosition = mpvPlayer.position
-                                                            pageRoot._switchingStream = true
-                                                            heartbeatTimer.stop()
-                                                            // 【关键修复】番剧模式下走 PGC 专用接口；普通视频走 UGC 接口
-                                                            if (pageRoot.isBangumi && pageRoot.epId) {
-                                                                // 用户显式切换编码 → 按传入 exact qn 发请求（forceMaxQuality=false），
-                                                                // 若 Only-FLV 下服务器拿不到 exact encode 会回退真实 quality，playUrlReady 会校正显示
-                                                                PlayUrlManager.getSeasonPlayUrl(
-                                                                    pageRoot.cid, pageRoot.currentQualityId,
-                                                                    pageRoot.epId, pageRoot.seasonType,
-                                                                    pageRoot.bvid, pageRoot.aid,
-                                                                    false /* forceMaxQuality */,
-                                                                    pageRoot.seasonId || "")
-                                                            } else {
-                                                                PlayUrlManager.getPlayUrl(pageRoot.aid, pageRoot.cid, pageRoot.currentQualityId)
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
+                                // 编解码菜单已迁到顶部控制栏右侧（2026-10-16）：
+                                // 与字幕、播放信息并列，顺序 字幕→编解码→播放信息
 
                                 FluMenuBar {
                                     Layout.alignment: Qt.AlignVCenter

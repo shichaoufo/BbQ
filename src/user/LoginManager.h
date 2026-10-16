@@ -15,6 +15,9 @@ class LoginManager : public QObject
     Q_PROPERTY(QString userName READ userName NOTIFY userInfoChanged)
     Q_PROPERTY(QString userFace READ userFace NOTIFY userInfoChanged)
     Q_PROPERTY(bool isLoggedIn READ isLoggedIn NOTIFY userInfoChanged)
+    // 当前账号自己的 mid（DedeUserID）。动态页「自己」入口需要它来拉
+    // 本人的动态/投稿（host_mid / space/arc/list?mid=），未登录为 0
+    Q_PROPERTY(int userMid READ mid NOTIFY userInfoChanged)
     Q_PROPERTY(QString qrCodeSource READ qrCodeSource NOTIFY qrCodeSourceChanged)
     Q_PROPERTY(QString loginStatusText READ loginStatusText NOTIFY loginStatusTextChanged)
 

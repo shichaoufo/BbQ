@@ -1949,6 +1949,61 @@ FluPage {
                     }
                 }
 
+                // 自己（当前账号本人）——PiliPlus 同款布局：紧跟「全部动态」，
+                // 关注列表之前。点选后走与关注对象完全相同的两条数据链路：
+                //   视频 Tab → /x/space/arc/list?mid=<自己的mid>（本人的投稿）
+                //   动态 Tab → /feed/all?host_mid=<自己的mid>（本人的动态）
+                // 未登录（或拿不到 mid）时整条隐藏——没有 mid 可点
+                Item {
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 56
+                    visible: Login.isLoggedIn && Login.userMid > 0
+
+                    Rectangle {
+                        anchors.fill: parent
+                        anchors.margins: 4
+                        radius: 8
+                        color: Number(currentUpMid) === Login.userMid ? FluTheme.itemCheckColor : "transparent"
+                        layer.enabled: Number(currentUpMid) === Login.userMid
+                        layer.effect: MultiEffect {
+                            shadowEnabled: true
+                            shadowColor: "#80000000"
+                            shadowOpacity: 0.25
+                            shadowBlur: 0.6
+                            shadowVerticalOffset: 2
+                            shadowScale: 1
+                        }
+                    }
+
+                    RowLayout {
+                        anchors.fill: parent
+                        anchors.leftMargin: Theme.pageMargins
+                        anchors.rightMargin: Theme.pageMargins
+                        spacing: 12
+
+                        CircleAvatar {
+                            Layout.preferredWidth: 36
+                            Layout.preferredHeight: 36
+                            source: Login.userFace
+                            placeholderText: Login.userName ? Login.userName.charAt(0) : "我"
+                        }
+
+                        FluText {
+                            Layout.fillWidth: true
+                            text: Login.userName || "我"
+                            font: Theme.fontNormal
+                            color: Number(currentUpMid) === Login.userMid ? FluTheme.fontPrimaryColor : FluTheme.fontSecondaryColor
+                            elide: Text.ElideRight
+                        }
+                    }
+
+                    MouseArea {
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        onClicked: selectUp(Login.userMid, Login.userName, Login.userFace)
+                    }
+                }
+
                 // UP 主列表
                 ListView {
                     id: upListView
