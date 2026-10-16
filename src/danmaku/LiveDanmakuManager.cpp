@@ -278,6 +278,8 @@ void LiveDanmakuManager::onConnected()
         if (m_webSocket) m_webSocket->abort();
         return;
     }
+    qWarning() << "[LiveDanmakuManager] connected to" << m_danmakuHost << ":" << m_danmakuPort
+               << "room" << m_roomId << ", sending auth";
     sendAuth(m_roomId);
 }
 
@@ -307,7 +309,9 @@ void LiveDanmakuManager::onDisconnected()
         int delay = qMin(5000 * (1 << qMin(m_reconnectAttempts - 1, 3)), 30000);
         m_reconnectTimer->start(delay);
         qWarning() << "[LiveDanmakuManager] unexpected disconnect, reconnect in" << delay / 1000
-                   << "s (attempt" << m_reconnectAttempts << ") room" << m_roomId;
+                   << "s (attempt" << m_reconnectAttempts << ") room" << m_roomId
+                   << "closeCode:" << (m_webSocket ? int(m_webSocket->closeCode()) : -1)
+                   << "closeReason:" << (m_webSocket ? m_webSocket->closeReason() : QString());
     }
 
     emit disconnected();
@@ -355,7 +359,9 @@ void LiveDanmakuManager::onBinaryMessageReceived(const QByteArray &message)
 void LiveDanmakuManager::onError(QAbstractSocket::SocketError error)
 {
     if (sender() != m_webSocket) return;
-    Q_UNUSED(error);
+    qWarning() << "[LiveDanmakuManager] socket error" << int(error)
+               << (m_webSocket ? m_webSocket->errorString() : QString())
+               << "state:" << (m_webSocket ? int(m_webSocket->state()) : -1);
     if (m_webSocket) {
         emit danmakuError(m_webSocket->errorString());
     }
@@ -390,6 +396,10 @@ void LiveDanmakuManager::sendAuth(int roomId)
     authObj["type"] = 2;
     authObj["key"] = m_danmakuToken;
     authObj["buvid"] = LoginManager::instance()->getOrCreateBuvid3();
+
+    // 诊断：认证被踢时靠这行确认实际发出的内容（token 只打长度，避免泄露）
+    qWarning() << "[LiveDanmakuManager] auth payload: uid" << uid << "roomid" << roomId
+               << "tokenLen" << m_danmakuToken.size() << "buvid" << authObj["buvid"].toString();
 
     QJsonDocument doc(authObj);
     QByteArray payload = doc.toJson(QJsonDocument::Compact);
@@ -450,6 +460,7 @@ void LiveDanmakuManager::parsePacket(const QByteArray &data)
                         }
 
                         emit connected();
+                        qWarning() << "[LiveDanmakuManager] auth OK, room" << m_roomId;
                     } else {
                         emit danmakuError(QString("认证失败: %1").arg(code));
                     }
@@ -653,6 +664,19 @@ void LiveDanmakuManager::parsePacket(const QByteArray &data)
                         else if (cmd == "LIVE") {
                         }
                         else if (cmd == "PREPARING") {
+                        }
+                        // 高能观众数：data.count。PiliPlus 顶部「高能观众(N)」
+                        // 显示的就是它，认证连接后由服务端不定期推送
+                        else if (cmd == "ONLINE_RANK_COUNT") {
+                            emit onlineRankCountChanged(
+                                obj["data"].toObject()["count"].toInt());
+                        }
+                        // 看过人数：data.text_large 形如 "1.2万人看过"
+                        else if (cmd == "WATCHED_CHANGE") {
+                            const QString textLarge =
+                                obj["data"].toObject()["text_large"].toString();
+                            if (!textLarge.isEmpty())
+                                emit watchedShowChanged(textLarge);
                         }
                     }
                 }

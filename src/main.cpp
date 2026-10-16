@@ -823,31 +823,13 @@ int main(int argc, char *argv[])
 #endif
 
     // 全局 SSL 配置：禁用对等证书验证，避免部分环境（包括 QML Image）HTTPS 图片加载失败
+    // 注意：不要在此处设置 setAllowedNextProtocols（ALPN）。Qt 默认不声明 ALPN，
+    // 服务端按 HTTP/1.1 处理；一旦声明支持 h2，B站 WAF 会按 h2 客户端指纹把
+    // Qt/OpenSSL 实现的连接整体 412（2026-10-16 实测：弹幕 XML、getDanmuInfo
+    // 等域名级全拦，与接口无关）。与 master 分支保持一致。
     QSslConfiguration sslConfig = QSslConfiguration::defaultConfiguration();
     sslConfig.setPeerVerifyMode(QSslSocket::VerifyNone);
-    // 允许 HTTP/2（ALPN 白名单带上 h2，协商失败自动回落 http/1.1）。
-    //
-    // 【2026-10-15 重要更正】此前这里把 ALPN 限死成 http/1.1，理由是"B站对
-    // HTTP/2 请求直接返 -412"。**那个结论是错的**，真实根因是另一个：
-    //   SESSDATA 里的 %2C 被我们解码成裸逗号再回传，被风控当成脚本构造的
-    //   cookie（详见 LoginManager::sessDataForCookie 的注释）。
-    // 而当年"Node http2 → 412"的观测，是 Node 的 h2 客户端自己发了不合规的
-    // h2 头，并不代表 h2 不行。
-    //
-    // 用修好编码之后的 cookie 复测（curl_cffi，非浏览器 TLS + h2）：
-    //   /x/web-interface/nav → 200 isLogin=True
-    //   /x/player/wbi/v2     → 200 + 该视频真实的字幕轨
-    // 浏览器 TLS + h2、以及 HTTP/1.1 同样全部 200。所以 h2 可以正常使用。
-    //
-    // 万一以后 B站又抽风，只需把白名单改回 { QByteArrayLiteral("http/1.1") }
-    // 即可整体回退到 HTTP/1.1。
-    //
-    // 注意：必须与上面的 PeerVerifyMode 在同一个默认配置里设置并一起写回，
-    // 分两次 setDefaultConfiguration 会互相覆盖（本块在文件末尾，后写回）。
-    // 且必须在任何 QNetworkAccessManager 发起请求之前调用。
-    sslConfig.setAllowedNextProtocols({QByteArrayLiteral("h2"), QByteArrayLiteral("http/1.1")});
     QSslConfiguration::setDefaultConfiguration(sslConfig);
-    qDebug("[BiliQt] HTTP/2 enabled (ALPN allows h2, auto-fallback http/1.1)");
 
     // 限制 Qt 全局 pixmap 缓存，避免图片占用过多内存。
     // 评论区图片、表情包较多，适当提高到 80MB 以提升加载速度。

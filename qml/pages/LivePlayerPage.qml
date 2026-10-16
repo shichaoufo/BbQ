@@ -26,6 +26,15 @@ Rectangle {
     property string mid: ""
     property int onlineCount: 0
     property int liveStatus: 0
+    // 开播时间戳（unix 秒）：getInfoByRoom 的 room_info.live_start_time。
+    // 顶部/底部控制栏的「开播X小时Y分钟」由它本地计算，无该字段（未开播或
+    // 接口未下发）时相关文案隐藏。0 = 无数据
+    property int liveStartTime: 0
+    // 高能观众数：弹幕 WS 的 ONLINE_RANK_COUNT 实时推送（PiliPlus 同源），
+    // 未收到推送时为 0，此时顶部不显示「高能观众」段
+    property int energyViewerCount: 0
+    // 开播时长文本（由 liveStartTime + liveDurationTimer 驱动，见 formatLiveDuration）
+    property string liveDurationText: ""
     property bool isFollowing: false
     property string currentQuality: "原画"
     property int currentQn: 10000
@@ -79,6 +88,13 @@ Rectangle {
         }
         return out
     }
+
+    // 看过人数原文（如 "251人看过" / "1.2万人看过"）：与官网播放器同源。
+    // 初始值来自 getInfoByRoom 的 data.watched_show.text_large，之后由弹幕 WS
+    // 的 WATCHED_CHANGE 实时刷新（B站服务端自己格式化的文案，直接展示，
+    // 不再用 formatOnline 二次加工）。空串 = 接口未下发，此时顶部回退用
+    // online 字段拼「XX人看过」
+    property string watchedShowText: ""
 
     // 弹幕管理器由外部注入（LivePage 层级共享实例），不随 LivePlayerPage 销毁/重建。
     // 避免 QWebSocket（SSL 握手线程）频繁创建/销毁导致卡死。
@@ -287,6 +303,21 @@ Rectangle {
         return String(n)
     }
 
+    // 开播时长：由 live_start_time 本地计算（该字段是开播时的 unix 秒戳，
+    // 播中不会变，所以文本靠定时器重算，不走接口轮询）。
+    // 格式对齐需求「开播hh小时mm分钟」：不足 1 小时只显示分钟，不足 1 分钟
+    // 显示「刚刚开播」；无时间戳返回空串（调用方据此隐藏）
+    function formatLiveDuration(startTs) {
+        if (!startTs || startTs <= 0) return ""
+        var secs = Math.floor(Date.now() / 1000) - startTs
+        if (secs < 0) secs = 0
+        var h = Math.floor(secs / 3600)
+        var m = Math.floor((secs % 3600) / 60)
+        if (h > 0) return "开播" + h + "小时" + m + "分钟"
+        if (m > 0) return "开播" + m + "分钟"
+        return "刚刚开播"
+    }
+
     // 解析直播流地址，返回所有候选线路/协议 URL，供失败时自动切换
     function parseStreamUrls(playUrlInfo) {
         try {
@@ -480,6 +511,12 @@ Rectangle {
         root.streamUrlCandidates = []
         root.currentCandidateIndex = 0
         root.streamUrl = ""
+        // 开播时长/高能观众/看过人数随房间重置：旧房间的开播时刻、WS 计数与
+        // 看过文案不清，会在新房间的 roomInfo/WS 推送到达前显示上一个房间的数据
+        root.liveStartTime = 0
+        root.liveDurationText = ""
+        root.energyViewerCount = 0
+        root.watchedShowText = ""
         root._waitingForVideo = false
         root._wasPlaying = false
         // setSource("") 内部会调 stop() + stopRenderTimer()，无需额外调 mpvPlayer.stop()
@@ -516,11 +553,19 @@ Rectangle {
             }
 
             if (host && port > 0 && root.danmakuManager) {
+                // 诊断：WS 连上就被踢时，靠这行确认应用选的 host/token
+                // （与 Node 实测对照：Node 用 host_list[0] 稳定 15s 不断）
+                console.warn("[LivePlayerPage] danmu connect:", host + ":" + port,
+                             "room:", root.roomId, "tokenLen:", token.length,
+                             "hostCount:", hostList.length)
                 if (root.danmakuManager.isConnected()) {
                     root.danmakuManager.disconnectRoom()
                 }
                 root.danmakuManager.setDanmakuInfo(host, port, token)
                 root.danmakuManager.connectRoom(parseInt(root.roomId, 10))
+            } else {
+                console.warn("[LivePlayerPage] danmu info incomplete, host:", host,
+                             "port:", port, "code:", resp.code)
             }
         } catch (e) {
             console.warn("[LivePlayerPage] parse danmuInfo failed:", e)
@@ -855,6 +900,13 @@ Rectangle {
                 if (info.title) root.streamTitle = info.title
                 if (info.cover) root.cover = info.cover
                 if (info.online !== undefined) root.onlineCount = info.online
+                // 看过人数原文（如 "251人看过"）：与官网播放器同源，优先用它展示；
+                // 之后由 WS WATCHED_CHANGE 实时刷新。接口未下发时留空，顶部回退 online
+                var watchedShow = resp.data.watched_show
+                if (watchedShow && watchedShow.text_large)
+                    root.watchedShowText = watchedShow.text_large
+                // 开播时刻（unix 秒）：未开播的房间为 0，此时底部不显示开播时长
+                if (info.live_start_time !== undefined) root.liveStartTime = info.live_start_time
                 if (info.live_status !== undefined) root.liveStatus = info.live_status
                 var anchor = resp.data.anchor_info || {}
                 if (anchor.base_info) {
@@ -1103,6 +1155,16 @@ Rectangle {
         }
         function onRoomInfo(online, roomName) {
             if (online > 0) root.onlineCount = online
+        }
+        // 高能观众数实时推送（WS ONLINE_RANK_COUNT）。PiliPlus 的「高能观众(N)」
+        // 即此值，认证连接后由服务端不定期推送，无需轮询
+        function onOnlineRankCountChanged(count) {
+            if (count > 0) root.energyViewerCount = count
+        }
+        // 看过人数实时推送（WS WATCHED_CHANGE，text_large 如 "1.2万人看过"）：
+        // 与官网播放器同源的同一种数据，顶部「XX人看过」展示的就是它
+        function onWatchedShowChanged(textLarge) {
+            root.watchedShowText = textLarge
         }
     }
 
@@ -1554,7 +1616,23 @@ Rectangle {
                 }
 
                 FluText {
-                    text: root.streamer ? (root.streamer + "  ·  " + root.formatOnline(root.onlineCount) + "人观看") : ""
+                    // 「UP主 · XX人看过 · 高能观众（YY）」：
+                    // - XX = 官网同源的看过人数：优先用 getInfoByRoom 下发的
+                    //   watched_show.text_large（B站自己格式化的 "251人看过"/
+                    //   "1.2万人看过"），并由 WS WATCHED_CHANGE 实时刷新；
+                    //   接口未下发该字段时回退用 room_info.online 拼「XX人看过」
+                    // - YY = 高能观众，WS ONLINE_RANK_COUNT 实时推送（PiliPlus 同源），
+                    //   未收到推送时不显示该段，避免出现"高能观众（0）"
+                    text: {
+                        if (root.streamer === "") return ""
+                        var watched = root.watchedShowText !== ""
+                                ? root.watchedShowText
+                                : (root.formatOnline(root.onlineCount) + "人看过")
+                        var s = root.streamer + "  ·  " + watched
+                        if (root.energyViewerCount > 0)
+                            s += "  ·  高能观众（" + root.formatOnline(root.energyViewerCount) + "）"
+                        return s
+                    }
                     font: FluTextStyle.Caption
                     color: "#CCCCCC"
                     visible: root.streamer !== ""
@@ -1692,6 +1770,16 @@ Rectangle {
                         closePopups()
                         root.loadStream()
                     }
+                }
+
+                // 开播时长（PiliPlus 同款）：由 live_start_time 本地计算，
+                // 30s 定时刷新文本；未开播/无时间戳时隐藏（text 为空）
+                FluText {
+                    text: root.liveDurationText
+                    font: FluTextStyle.Caption
+                    color: "#CCCCCC"
+                    Layout.alignment: Qt.AlignVCenter
+                    visible: text !== ""
                 }
 
                 Item { Layout.fillWidth: true }
@@ -1940,6 +2028,23 @@ Rectangle {
             }
         }
     }
+
+    // 开播时长刷新定时器：live_start_time 是固定开播时刻，文本需靠本地重算
+    // 才能走动。PiliPlus 用 5 分钟刷新（分钟显示会滞后最多 5 分钟），这里取
+    // 30 秒——只是字符串格式化，开销可忽略，分钟显示始终准确。
+    // running 绑定 liveStartTime：无开播时间（未开播/换房/关闭）时自动停，
+    // 页面销毁时随组件一起回收
+    Timer {
+        id: liveDurationTimer
+        interval: 30000
+        repeat: true
+        running: root.liveStartTime > 0
+        onTriggered: root.liveDurationText = root.formatLiveDuration(root.liveStartTime)
+    }
+
+    // 开播时间戳到达/变化（loadStream 重置为 0、roomInfo 响应写入）时立即重算文本，
+    // 不必等定时器下一个节拍
+    onLiveStartTimeChanged: root.liveDurationText = root.formatLiveDuration(root.liveStartTime)
 
     // 直播断流自动重连定时器：mpv 报 EOF（主播推流中断导致服务器侧终止流）后，
     // 延迟重新调 loadStream 拉取新流地址；间隔由 onLiveStreamEof 指数递增设置

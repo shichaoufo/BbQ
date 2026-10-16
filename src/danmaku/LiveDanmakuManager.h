@@ -44,6 +44,11 @@ signals:
     void disconnected();
     void danmakuError(const QString &errorString);
     void roomInfo(int online, const QString &roomName);
+    // 高能观众数实时变化（WS ONLINE_RANK_COUNT，data.count）。
+    // PiliPlus 的「高能观众(N)」显示的就是这个值，认证后由服务端推送
+    void onlineRankCountChanged(int count);
+    // 看过人数实时变化（WS WATCHED_CHANGE，data.text_large，如 "1.2万人看过"）
+    void watchedShowChanged(const QString &textLarge);
 
 private slots:
     void onConnected();
