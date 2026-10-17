@@ -2235,6 +2235,17 @@ void PlayUrlManager::getPlayerDetailImpl(const QString &aid, const QString &cid,
         qWarning() << "[PlayUrlManager] playerDetail:" << "lastPlayTime=" << lastPlayTime
                  << "lastPlayCid=" << lastPlayCid;
 
+        // 游客态短路（2026-10-17 优化）：last_play_time 只对带登录 Cookie 的
+        // 请求返回，未登录时它恒为 0。此时下面的 legacy 重试 + history/cursor
+        // 翻页都不可能拿到进度，整条补救链纯属空烧请求——first-watch 场景
+        // 一次省 6 个请求（1 legacy + 5 history 页）。直接透传当前 detail 收尾
+        if (lastPlayTime == 0 && !LoginManager::instance()->isLoggedIn()) {
+            qWarning() << "[PlayUrlManager] guest (not logged in), skip progress fallback chain";
+            emit playerDetailReady(detail);
+            reply->deleteLater();
+            return;
+        }
+
         // 拿到 0 进度的两种情形都补救（last_play_time 仅登录 Cookie 请求返回）：
         //   1. 游客重试成功：登录态历史进度被游客身份丢掉
         //   2. 带 Cookie 却被静默按游客处理：复用连接被标记的另一形态
@@ -2482,8 +2493,12 @@ void PlayUrlManager::scheduleSubtitleRetry(const QString &aid, const QString &ci
 // 降级方案：通过 /x/web-interface/history/cursor 获取视频观看进度
 // 当 /x/player/v2（player detail 主链路）被风控拦截、或返回 0 进度时的最终兜底。
 // history/cursor 每页只返回最近 ps=30 条，目标视频可能埋得更深，
-// 故按 cursor 翻页查找，最多 maxHistoryPages 页
-static const int maxHistoryPages = 5;
+// 故按 cursor 翻页查找，最多 maxHistoryPages 页。
+// 2026-10-17：5 → 2。history/cursor 按观看时间倒序，最近看过的必在前两页
+// （60 条，约覆盖两天的观看量）；3-5 页翻到的是几个月前的陈旧记录，漏判的
+// 代价只是从头播放（用户自己也无从记忆），而每个 first-watch 视频要为此多
+// 烧 3 个请求。游客态已在调用方短路，不会走到这里
+static const int maxHistoryPages = 2;
 void PlayUrlManager::getHistoryProgress(const QString &aid, const QString &cid,
                                         const QVariantList &viewPoints)
 {

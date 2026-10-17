@@ -67,7 +67,6 @@ typedef struct mpv_d3d11_fbo {
 
 static const QString MPV_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 static const QString MPV_REFERER = "https://www.bilibili.com";
-static const QString MPV_ORIGIN = "https://www.bilibili.com";
 
 MpvObjectD3D11::MpvObjectD3D11(QQuickItem *parent)
     : QQuickItem(parent)
@@ -432,15 +431,28 @@ void MpvObjectD3D11::applyHttpHeaders()
 {
     if (!m_mpv) return;
 
-    QString cookies = LoginManager::instance()->getCookies();
-
+    // 只发 Referer + User-Agent，**刻意不带 Cookie / Origin**（2026-10-17 改）。
+    //
+    // 背景：长视频（20min+）播放中后段有小概率"声音消失但画面正常"。日志确诊为
+    // 音频流（DASH 30280.m4s）被 CDN 中途断流，ffmpeg 重试 5 次后彻底失败、
+    // 流被截断；同一视频的视频流（另一 CDN 节点）全程零重试。与 PiliPlus
+    // （media_kit/libmpv）对比发现的关键差异：它给播放器只设 UA + Referer
+    // 两个头，而我们把整套登录 Cookie 也发给了 upos CDN。B站有"按连接维度
+    // 做风控标记"的行为（本项目在 720P 静默降级问题上验证过，记录见
+    // PlayUrlManager.cpp 的注释），带登录态的长连接被标记后中途掐断，与
+    // "音频断、视频不断"的症状吻合。
+    //
+    // 为什么不影响播放：
+    // - 视频/音频/直播/实况照片的 CDN 地址都带 upsig 签名，CDN 只认签名、
+    //   不校验登录态；清晰度与付费权限在 playurl 阶段就已决定
+    // - URL 自带 buvid 参数，风控标识不依赖 Cookie
+    // - 弹幕、字幕、各 API 全部走 Qt 网络栈（QNetworkAccessManager），
+    //   仍带完整 Cookie，不受此设置影响
+    //
+    // 若个别内容确认需要登录态才能拉流，在这里恢复 Cookie 头即可回滚。
     QStringList headers;
     headers.append(QString("Referer: %1").arg(MPV_REFERER));
-    headers.append(QString("Origin: %1").arg(MPV_ORIGIN));
     headers.append(QString("User-Agent: %1").arg(MPV_USER_AGENT));
-    if (!cookies.isEmpty()) {
-        headers.append(QString("Cookie: %1").arg(cookies));
-    }
 
     int num = headers.size();
     mpv_node *values = new mpv_node[num];
