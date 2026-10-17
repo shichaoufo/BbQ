@@ -298,8 +298,12 @@ signals:
     // 直播UP主名字已获取（用于更新界面显示）
     void liveUnameReady(const QString &uname);
 
-    // UP 主大会员状态已获取（vipType: 0=无, 1=月度/季度大会员, 2=年度大会员）
-    void upVipReady(int vipType);
+    // UP 主身份信息已获取（vipType: 0=无, 1=月度/季度大会员, 2=年度大会员；
+    // faceNft: 是否数字藏品(NFT)头像用户，头像钻石角标；
+    // verifyType: 认证类型 -1=无, 0=个人认证, 1=机构认证。
+    // 认证必须走 card 接口：view 接口的 owner 实测只有 mid/name/face，
+    // 不下发 official_verify）
+    void upVipReady(int vipType, bool faceNft, int verifyType);
 
     // UP 主头像框图片已获取
     void upPendantReady(const QString &pendantImage);

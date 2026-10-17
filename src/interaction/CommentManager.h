@@ -118,6 +118,10 @@ public:
         QString pendantImage;
         // 认证类型（-1=无, 0=个人认证, 1=机构认证）
         int verifyType = -1;
+        // 藏品：数字藏品（NFT）头像用户（member.face_nft_new==1）
+        bool hasCollect = false;
+        // 硬核会员（member.is_senior_member==1）：等级标用 LV6 带闪电（user-lv6p.svg）
+        bool isSeniorMember = false;
     };
 
     explicit CommentManager(QObject *parent = nullptr);

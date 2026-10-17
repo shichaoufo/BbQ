@@ -28,6 +28,7 @@ Rectangle {
     property int upVerify: -1
     property string upFans: ""
     property int upVipType: 0
+    property bool upHasCollect: false   // UP 主是否数字藏品(NFT)头像用户（钻石角标）
     property string viewCount: "0"
     property string danmakuCount: "0"
     property string pubDate: ""
@@ -1570,6 +1571,7 @@ Rectangle {
         pageRoot.upPendantImage = ""
         pageRoot.upVerify = -1
         pageRoot.upVipType = 0
+        pageRoot.upHasCollect = false
         pageRoot.description = ""
         pageRoot.videoUrlInfo = null
         pageRoot.videoDuration = 0
@@ -2273,7 +2275,9 @@ Rectangle {
         }
     }
 
-    function levelIconSource(level) {
+    function levelIconSource(level, senior) {
+        // 硬核会员：LV6 带闪电（user-lv6p.svg），优先于普通 LV6
+        if (senior === true) return "qrc:/BiliQt/icons/level/user-lv6p.svg"
         return "qrc:/BiliQt/icons/level/user-lv" + (level || 0) + ".svg"
     }
 
@@ -2313,7 +2317,11 @@ Rectangle {
                 pageRoot.upName = detail.ownerName || ""
                 pageRoot.upFace = detail.ownerFace || ""
                 pageRoot.upPendantImage = detail.ownerPendant || ""
-                pageRoot.upVerify = detail.ownerVerify !== undefined ? detail.ownerVerify : -1
+                // view 接口的 owner 通常不下发 official_verify（恒 -1），UP 主认证
+                // 主要由 card 接口的 upVipReady 补齐；仅在有效值时才赋值，防止把
+                // 先到达的 card 认证信息清掉（两个响应顺序不固定）
+                if (detail.ownerVerify !== undefined && detail.ownerVerify >= 0)
+                    pageRoot.upVerify = detail.ownerVerify
                 pageRoot.mid = detail.ownerMid || pageRoot.mid
                 pageRoot.viewCount = pageRoot.formatNumber(detail.view)
                 pageRoot.danmakuCount = pageRoot.formatNumber(detail.danmaku)
@@ -2481,7 +2489,11 @@ Rectangle {
             pageRoot.upName = detail.ownerName || ""
             pageRoot.upFace = detail.ownerFace || ""
             pageRoot.upPendantImage = detail.ownerPendant || ""
-            pageRoot.upVerify = detail.ownerVerify !== undefined ? detail.ownerVerify : -1
+            // view 接口的 owner 通常不下发 official_verify（恒 -1），UP 主认证
+            // 主要由 card 接口的 upVipReady 补齐；仅在有效值时才赋值，防止把
+            // 先到达的 card 认证信息清掉（两个响应顺序不固定）
+            if (detail.ownerVerify !== undefined && detail.ownerVerify >= 0)
+                pageRoot.upVerify = detail.ownerVerify
             pageRoot.viewCount = pageRoot.formatNumber(detail.view)
             pageRoot.danmakuCount = pageRoot.formatNumber(detail.danmaku)
             pageRoot.rawLikeCount = parseInt(detail.like, 10) || 0
@@ -2890,8 +2902,14 @@ Rectangle {
                 console.warn("[VideoPlayerPage] loadData failed after 3 retries")
             }
         }
-        function onUpVipReady(vipType) {
+        function onUpVipReady(vipType, faceNft, verifyType) {
             pageRoot.upVipType = vipType || 0
+            pageRoot.upHasCollect = faceNft === true
+            // UP 主认证来自 card 接口（view 接口的 owner 不下发 official_verify，
+            // 实测只有 mid/name/face）。>=0 才覆盖：详情响应与 card 响应到达
+            // 顺序不固定，避免把已拿到的认证值清回 -1
+            if (verifyType !== undefined && verifyType >= 0)
+                pageRoot.upVerify = verifyType
         }
         function onUpPendantReady(pendantImage) {
             pageRoot.upPendantImage = pendantImage || ""
@@ -4926,6 +4944,8 @@ Rectangle {
                                 face: pageRoot.upFace
                                 pendantImage: pageRoot.upPendantImage
                                 verifyType: pageRoot.upVerify
+                                isVip: pageRoot.upVipType > 0
+                                hasCollect: pageRoot.upHasCollect
                                 placeholderText: "UP"
                             }
 
@@ -4933,7 +4953,7 @@ Rectangle {
                             // 当前可见导航页处理：关闭视频 + 打开主页）
                             MouseArea {
                                 anchors.fill: parent
-                                cursorShape: Qt.PointingHandCursor
+                                cursorShape: Qt.ArrowCursor
                                 onClicked: pageRoot.openUpProfile()
                             }
                         }
@@ -4950,7 +4970,7 @@ Rectangle {
                                 // 用户名可点击：打开 UP 主用户主页
                                 MouseArea {
                                     anchors.fill: parent
-                                    cursorShape: Qt.PointingHandCursor
+                                    cursorShape: Qt.ArrowCursor
                                     onClicked: pageRoot.openUpProfile()
                                 }
                             }
@@ -5406,7 +5426,7 @@ Rectangle {
 
                                 MouseArea {
                                     anchors.fill: parent
-                                    cursorShape: Qt.PointingHandCursor
+                                    cursorShape: Qt.ArrowCursor
                                     onClicked: { pageRoot.toggleCommentSort() }
                                 }
                             }
@@ -5492,11 +5512,13 @@ Rectangle {
                                                         pendantImage: model.pendantImage || ""
                                                         avatarSize: 32
                                                         verifyType: model.verifyType !== undefined ? model.verifyType : -1
+                                                        isVip: model.isVip === true
+                                                        hasCollect: model.hasCollect === true
                                                     }
 
                                                     MouseArea {
                                                         anchors.fill: parent
-                                                        cursorShape: Qt.PointingHandCursor
+                                                        cursorShape: Qt.ArrowCursor
                                                         onClicked: pageRoot.openCommentUserPage(model.mid, model.uname, model.face)
                                                     }
                                                 }
@@ -5522,13 +5544,13 @@ Rectangle {
 
                                                             MouseArea {
                                                                 anchors.fill: parent
-                                                                cursorShape: Qt.PointingHandCursor
+                                                                cursorShape: Qt.ArrowCursor
                                                                 onClicked: pageRoot.openCommentUserPage(model.mid, model.uname, model.face)
                                                             }
                                                         }
 
                                                         Image {
-                                                            source: pageRoot.levelIconSource(model.level)
+                                                            source: pageRoot.levelIconSource(model.level, model.isSeniorMember === true)
                                                             width: 32
                                                             height: 16
                                                             sourceSize: Qt.size(width * Screen.devicePixelRatio, height * Screen.devicePixelRatio)
@@ -5709,7 +5731,7 @@ Rectangle {
                                                                     // z:-1 垫底：让 FluImage 加载失败时的 Reload 按钮可点击，
                                                                     // 否则点击被图片预览事件截走
                                                                     z: -1
-                                                                    cursorShape: Qt.PointingHandCursor
+                                                                    cursorShape: Qt.ArrowCursor
                                                                     onClicked: {
                                                                         pageRoot.openCommentImagePreview(commentItem.parentModel.pictures, index)
                                                                     }
@@ -5908,12 +5930,14 @@ Rectangle {
                                                         pendantImage: modelData.pendantImage || ""
                                                         avatarSize: 28
                                                         verifyType: modelData.verifyType !== undefined ? modelData.verifyType : -1
+                                                        isVip: modelData.isVip === true
+                                                        hasCollect: modelData.hasCollect === true
                                                         placeholderText: "?"
                                                     }
 
                                                     MouseArea {
                                                         anchors.fill: parent
-                                                        cursorShape: Qt.PointingHandCursor
+                                                        cursorShape: Qt.ArrowCursor
                                                         onClicked: pageRoot.openCommentUserPage(modelData.mid, modelData.uname, modelData.face)
                                                     }
                                                 }
@@ -5933,13 +5957,13 @@ Rectangle {
 
                                                             MouseArea {
                                                                 anchors.fill: parent
-                                                                cursorShape: Qt.PointingHandCursor
+                                                                cursorShape: Qt.ArrowCursor
                                                                 onClicked: pageRoot.openCommentUserPage(modelData.mid, modelData.uname, modelData.face)
                                                             }
                                                         }
 
                                                         Image {
-                                                            source: pageRoot.levelIconSource(modelData.level)
+                                                            source: pageRoot.levelIconSource(modelData.level, modelData.isSeniorMember === true)
                                                             width: 32
                                                             height: 16
                                                             sourceSize: Qt.size(width * Screen.devicePixelRatio, height * Screen.devicePixelRatio)
@@ -6111,7 +6135,7 @@ Rectangle {
                                                                     anchors.fill: parent
                                                                     // z:-1 垫底：让 FluImage 加载失败时的 Reload 按钮可点击
                                                                     z: -1
-                                                                    cursorShape: Qt.PointingHandCursor
+                                                                    cursorShape: Qt.ArrowCursor
                                                                     onClicked: {
                                                                         pageRoot.openCommentImagePreview(modelData.pictures, index)
                                                                     }
@@ -6618,6 +6642,8 @@ Rectangle {
                                 seasonId: model.seasonId || ""
                                 epId: model.epId || ""
                                 // 去掉旧的外层 MouseArea（点击事件已内置在 VideoCard 内，会根据 isBangumiCard 自动切换 App.openVideo / App.openBangumi）
+                                // 悬停保持普通箭头光标：用户要求播放页右侧推荐/投稿卡片不显示手指
+                                pointingCursor: false
                             }
                         }
                     }
@@ -6660,6 +6686,8 @@ Rectangle {
                                     duration: model.duration
                                     pubDate: model.pubDate
                                     badgeText: model.badgeText || ""
+                                    // 悬停保持普通箭头光标：用户要求播放页右侧推荐/投稿卡片不显示手指
+                                    pointingCursor: false
                                 }
                             }
                         }

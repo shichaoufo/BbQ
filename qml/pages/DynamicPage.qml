@@ -498,6 +498,8 @@ FluPage {
             face: "",
             pendantImage: "",   // UP主头像框（装扮）
             verifyType: -1,     // 认证类型（-1=无, 0=个人, 1=机构）
+            isVip: false,       // 大会员（user.vip.status==1）
+            hasCollect: false,  // 藏品：数字藏品(NFT)头像（user.face_nft==1）
             // 初始化完整 cardbg，show 强制 bool，避免 JSON.parse 回来后 show=undefined 导致 CommentCardBg 的 visible 赋值 bool 失败
             cardbg: { show: false, image: "", fanNumDesc: "", fanColor: "#FB7299" },
             time: "",
@@ -550,6 +552,14 @@ FluPage {
                 if (ov) {
                     result.verifyType = (ov.type !== undefined) ? Number(ov.type) : -1
                 }
+
+                // ===== 大会员状态（vip.status: 0=无, 1=有效）=====
+                if (user.vip) {
+                    result.isVip = (Number(user.vip.status) === 1)
+                }
+
+                // ===== 藏品：数字藏品（NFT）头像用户（face_nft: 0/1）=====
+                result.hasCollect = (Number(user.face_nft) === 1)
 
                 // ===== 个性装扮 - 卡片背景 cardbg =====
                 // 优先级 1：module_author.decorate_card（列表接口/详情接口 V2 新装扮字段，biliuwp-lite 用它 DecorateImage）
@@ -2297,7 +2307,9 @@ FluPage {
                                                 pendantImage: (itemData && itemData.pendantImage) ? itemData.pendantImage : ""
                                                 avatarSize: 40
                                                 pendantScale: 1.5
-                                                verifyType: itemData ? (itemData.verifyType || -1) : -1
+                                                verifyType: itemData ? (itemData.verifyType !== undefined ? itemData.verifyType : -1) : -1
+                                                isVip: itemData ? (itemData.isVip === true) : false
+                                                hasCollect: itemData ? (itemData.hasCollect === true) : false
                                                 Layout.alignment: Qt.AlignTop
                                                 placeholderText: itemData && itemData.author ? itemData.author.charAt(0) : ""
                                             }
@@ -2372,7 +2384,9 @@ FluPage {
                                                         pendantImage: (itemHasForward && itemForward.pendantImage) ? itemForward.pendantImage : ""
                                                         avatarSize: 28
                                                         pendantScale: 1.5
-                                                        verifyType: itemHasForward ? (itemForward.verifyType || -1) : -1
+                                                        verifyType: itemHasForward ? (itemForward.verifyType !== undefined ? itemForward.verifyType : -1) : -1
+                                                        isVip: itemHasForward ? (itemForward.isVip === true) : false
+                                                        hasCollect: itemHasForward ? (itemForward.hasCollect === true) : false
                                                         placeholderText: itemHasForward && itemForward.author ? itemForward.author.charAt(0) : ""
                                                     }
                                                     FluText {
@@ -3488,7 +3502,9 @@ FluPage {
                                         pendantImage: currentDynamic && currentDynamic.pendantImage ? currentDynamic.pendantImage : ""
                                         avatarSize: 40
                                         pendantScale: 1.5
-                                        verifyType: currentDynamic ? (currentDynamic.verifyType || -1) : -1
+                                        verifyType: currentDynamic ? (currentDynamic.verifyType !== undefined ? currentDynamic.verifyType : -1) : -1
+                                        isVip: currentDynamic ? (currentDynamic.isVip === true) : false
+                                        hasCollect: currentDynamic ? (currentDynamic.hasCollect === true) : false
                                         Layout.alignment: Qt.AlignTop
                                         placeholderText: currentDynamic && currentDynamic.author ? currentDynamic.author.charAt(0) : ""
                                     }
@@ -3590,7 +3606,9 @@ FluPage {
                                             pendantImage: detailForwardCard.hasForwardData && detailForwardCard.forwardData.pendantImage ? detailForwardCard.forwardData.pendantImage : ""
                                             avatarSize: 28
                                             pendantScale: 1.5
-                                            verifyType: detailForwardCard.hasForwardData ? (detailForwardCard.forwardData.verifyType || -1) : -1
+                                            verifyType: detailForwardCard.hasForwardData ? (detailForwardCard.forwardData.verifyType !== undefined ? detailForwardCard.forwardData.verifyType : -1) : -1
+                                            isVip: detailForwardCard.hasForwardData ? (detailForwardCard.forwardData.isVip === true) : false
+                                            hasCollect: detailForwardCard.hasForwardData ? (detailForwardCard.forwardData.hasCollect === true) : false
                                             placeholderText: detailForwardCard.forwardData.author ? detailForwardCard.forwardData.author.charAt(0) : ""
                                         }
                                         FluText {
@@ -3745,7 +3763,7 @@ FluPage {
                                                     anchors.fill: parent
                                                     // z:-1 垫底：让 FluImage 加载失败时的 Reload 按钮可点击
                                                     z: -1
-                                                    cursorShape: Qt.PointingHandCursor
+                                                    cursorShape: Qt.ArrowCursor
                                                     onClicked: {
                                                         openDetailImagePreview(detailForwardCard.forwardData.images, index)
                                                     }
@@ -3972,7 +3990,7 @@ FluPage {
                                             anchors.fill: parent
                                             // z:-1 垫底：让 FluImage 加载失败时的 Reload 按钮可点击
                                             z: -1
-                                            cursorShape: Qt.PointingHandCursor
+                                            cursorShape: Qt.ArrowCursor
                                             onClicked: {
                                                 openDetailImagePreview(currentDynamic.images, index)
                                             }

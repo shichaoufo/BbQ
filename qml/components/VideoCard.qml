@@ -30,6 +30,10 @@ Rectangle {
     property string seasonId: ""
     property string epId: ""
 
+    // 悬停时是否显示手指光标。默认 true（既有行为）；置 false 时悬停保持普通箭头。
+    // 视频播放页右侧「推荐/投稿」列表置 false —— 用户要求这些卡片不出现手指光标。
+    property bool pointingCursor: true
+
     color: "transparent"
 
     property bool hovered: false
@@ -297,7 +301,7 @@ Rectangle {
         // 否则点击被卡片打开事件截走（与 DynamicPage 转发卡片同模式）
         z: -1
         hoverEnabled: true
-        cursorShape: Qt.PointingHandCursor
+        cursorShape: root.pointingCursor ? Qt.PointingHandCursor : Qt.ArrowCursor
         onClicked: {
             if (root.isBangumiCard) {
                 // 番剧推荐卡片：走 openBangumi（通过 AppManager 转发）

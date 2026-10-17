@@ -4163,7 +4163,19 @@ void PlayUrlManager::fetchUpVipInfo(qlonglong mid)
         qDebug() << "[PlayUrlManager] fetchUpVipInfo mid:" << card["mid"].toVariant().toLongLong()
                  << "vipType:" << vipType << "vipStatus:" << vipStatus << "effectiveType:" << effectiveType
                  << "pendant:" << pendantImage;
-        emit upVipReady(effectiveType);
+        // 认证：card.official_verify.type（-1=无, 0=个人, 1=机构）。
+        // 必须从这里取：/x/web-interface/view 的 owner 实测只有 mid/name/face
+        // （BV1fLpk6rEhd 祁奕翔实测），仅靠 detail.ownerVerify 会恒为 -1，
+        // UP 主头像的认证标永远不显示。个别响应只有 Official.type，做兜底
+        QJsonObject officialVerify = card["official_verify"].toObject();
+        int verifyType = officialVerify["type"].toInt(-1);
+        if (verifyType < 0) {
+            verifyType = card["Official"].toObject()["type"].toInt(-1);
+        }
+        // face_nft：数字藏品（NFT）头像用户，对应头像右下角钻石角标
+        bool faceNft = (card["face_nft"].toInt() == 1);
+        qDebug() << "[PlayUrlManager] fetchUpVipInfo verifyType:" << verifyType << "faceNft:" << faceNft;
+        emit upVipReady(effectiveType, faceNft, verifyType);
         emit upPendantReady(pendantImage);
 
         reply->deleteLater();

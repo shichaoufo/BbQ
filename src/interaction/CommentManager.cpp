@@ -651,6 +651,14 @@ CommentManager::Comment CommentManager::parseCommentObject(const QJsonObject &ob
     QJsonObject officialVerify = member["official_verify"].toObject();
     comment.verifyType = officialVerify["type"].toInt(-1);
 
+    // 藏品：数字藏品（NFT）头像用户，头像右下角钻石角标。
+    // 评论区字段名是 face_nft_new（card/动态/space 接口叫 face_nft），两者取或
+    comment.hasCollect = (member["face_nft_new"].toInt() == 1) ||
+                         (member["face_nft"].toInt() == 1);
+
+    // 硬核会员：等级标显示 LV6 带闪电（user-lv6p.svg）
+    comment.isSeniorMember = (member["is_senior_member"].toInt() == 1);
+
     QJsonObject content = obj["content"].toObject();
     comment.content = content["message"].toString();
 
@@ -896,6 +904,12 @@ QVariantMap CommentManager::commentToMap(const Comment &comment) const
 
     // 认证类型
     map["verifyType"] = comment.verifyType;
+
+    // 藏品（数字藏品头像）
+    map["hasCollect"] = comment.hasCollect;
+
+    // 硬核会员（LV6 闪电等级标）
+    map["isSeniorMember"] = comment.isSeniorMember;
 
     return map;
 }

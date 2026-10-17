@@ -43,7 +43,9 @@ Item {
         App.openUserProfile(String(mid), String(name || ""), String(face || ""))
     }
 
-    function levelIconSource(level) {
+    function levelIconSource(level, senior) {
+        // 硬核会员：LV6 带闪电（user-lv6p.svg），优先于普通 LV6
+        if (senior === true) return "qrc:/BiliQt/icons/level/user-lv6p.svg"
         return "qrc:/BiliQt/icons/level/user-lv" + (level || 0) + ".svg"
     }
 
@@ -565,7 +567,7 @@ Item {
 
                 MouseArea {
                     anchors.fill: parent
-                    cursorShape: Qt.PointingHandCursor
+                    cursorShape: Qt.ArrowCursor
                     onClicked: { panelRoot.toggleCommentSort() }
                 }
             }
@@ -650,11 +652,13 @@ Item {
                                         pendantImage: model.pendantImage || ""
                                         avatarSize: 32
                                         verifyType: model.verifyType !== undefined ? model.verifyType : -1
+                                        isVip: model.isVip === true
+                                        hasCollect: model.hasCollect === true
                                     }
 
                                     MouseArea {
                                         anchors.fill: parent
-                                        cursorShape: Qt.PointingHandCursor
+                                        cursorShape: Qt.ArrowCursor
                                         onClicked: panelRoot.openUserPage(model.mid, model.uname, model.face)
                                     }
                                 }
@@ -680,13 +684,13 @@ Item {
 
                                             MouseArea {
                                                 anchors.fill: parent
-                                                cursorShape: Qt.PointingHandCursor
+                                                cursorShape: Qt.ArrowCursor
                                                 onClicked: panelRoot.openUserPage(model.mid, model.uname, model.face)
                                             }
                                         }
 
                                         Image {
-                                            source: panelRoot.levelIconSource(model.level)
+                                            source: panelRoot.levelIconSource(model.level, model.isSeniorMember === true)
                                             width: 32
                                             height: 16
                                             sourceSize: Qt.size(width * Screen.devicePixelRatio, height * Screen.devicePixelRatio)
@@ -865,7 +869,7 @@ Item {
                                                     // z:-1 垫底：让 FluImage 加载失败时的 Reload 按钮可点击，
                                                     // 否则点击被图片预览事件截走
                                                     z: -1
-                                                    cursorShape: Qt.PointingHandCursor
+                                                    cursorShape: Qt.ArrowCursor
                                                     onClicked: {
                                                         panelRoot.openCommentImagePreview(commentItem.parentModel.pictures, index)
                                                     }
@@ -1072,12 +1076,14 @@ Item {
                                                 pendantImage: modelData.pendantImage || ""
                                                 avatarSize: 28
                                                 verifyType: modelData.verifyType !== undefined ? modelData.verifyType : -1
+                                                isVip: modelData.isVip === true
+                                                hasCollect: modelData.hasCollect === true
                                                 placeholderText: "?"
                                             }
 
                                             MouseArea {
                                                 anchors.fill: parent
-                                                cursorShape: Qt.PointingHandCursor
+                                                cursorShape: Qt.ArrowCursor
                                                 onClicked: panelRoot.openUserPage(modelData.mid, modelData.uname, modelData.face)
                                             }
                                         }
@@ -1097,13 +1103,13 @@ Item {
 
                                                     MouseArea {
                                                         anchors.fill: parent
-                                                        cursorShape: Qt.PointingHandCursor
+                                                        cursorShape: Qt.ArrowCursor
                                                         onClicked: panelRoot.openUserPage(modelData.mid, modelData.uname, modelData.face)
                                                     }
                                                 }
 
                                                 Image {
-                                                    source: panelRoot.levelIconSource(modelData.level)
+                                                    source: panelRoot.levelIconSource(modelData.level, modelData.isSeniorMember === true)
                                                     width: 32
                                                     height: 16
                                                     sourceSize: Qt.size(width * Screen.devicePixelRatio, height * Screen.devicePixelRatio)
@@ -1272,7 +1278,7 @@ Item {
                                                             anchors.fill: parent
                                                             // z:-1 垫底：让 FluImage 加载失败时的 Reload 按钮可点击
                                                             z: -1
-                                                            cursorShape: Qt.PointingHandCursor
+                                                            cursorShape: Qt.ArrowCursor
                                                             onClicked: {
                                                                 panelRoot.openCommentImagePreview(modelData.pictures, index)
                                                             }

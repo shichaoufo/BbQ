@@ -1167,6 +1167,11 @@ FluPage {
                 var level = 0
                 if (item.level !== undefined && !isNaN(Number(item.level))) level = Number(item.level)
 
+                // 硬核会员：等级标用 LV6 带闪电（user-lv6p.svg）
+                var isSeniorMember = false
+                if (item.is_senior_member !== undefined) isSeniorMember = Number(item.is_senior_member) === 1
+                else if (item.isSeniorMember !== undefined) isSeniorMember = Number(item.isSeniorMember) === 1
+
                 // 稿件数
                 var videos = 0
                 if (item.videos !== undefined && !isNaN(Number(item.videos))) videos = Number(item.videos)
@@ -1212,6 +1217,7 @@ FluPage {
                     uname: unameClean,
                     upic: upic,
                     level: level,
+                    isSeniorMember: isSeniorMember,
                     videos: videos,
                     fans: fans,
                     fansText: fmtNum(fans),
@@ -2112,6 +2118,7 @@ FluPage {
                             uname: (delegateItem.__row && delegateItem.__row.uname !== undefined) ? String(delegateItem.__row.uname) : ""
                             upic: (delegateItem.__row && delegateItem.__row.upic !== undefined) ? String(delegateItem.__row.upic) : ""
                             level: (delegateItem.__row && delegateItem.__row.level !== undefined) ? Number(delegateItem.__row.level) : 0
+                            isSeniorMember: (delegateItem.__row && delegateItem.__row.isSeniorMember !== undefined) ? (delegateItem.__row.isSeniorMember === true) : false
                             videos: (delegateItem.__row && delegateItem.__row.videos !== undefined) ? Number(delegateItem.__row.videos) : 0
                             fans: (delegateItem.__row && delegateItem.__row.fans !== undefined) ? Number(delegateItem.__row.fans) : 0
                             isUpuser: (delegateItem.__row && delegateItem.__row.isUpuser !== undefined) ? Number(delegateItem.__row.isUpuser) : 0

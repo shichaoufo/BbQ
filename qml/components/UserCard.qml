@@ -17,6 +17,7 @@ Rectangle {
     property string uname: ""
     property string upic: ""
     property int level: 0
+    property bool isSeniorMember: false  // 硬核会员：等级标用 LV6 带闪电
     property int videos: 0
     property int fans: 0
     property int isUpuser: 0
@@ -33,7 +34,9 @@ Rectangle {
 
     // ====== 工具函数 ======
     // LV 等级图标（与评论区 CommentPanel 一致，使用 qrc SVG 文件）
-    function levelIconSource(lv) {
+    function levelIconSource(lv, senior) {
+        // 硬核会员：LV6 带闪电（user-lv6p.svg），优先于普通 LV6
+        if (senior === true) return "qrc:/BiliQt/icons/level/user-lv6p.svg"
         return "qrc:/BiliQt/icons/level/user-lv" + (lv || 0) + ".svg"
     }
     function formatFans(n) {
@@ -130,7 +133,7 @@ Rectangle {
 
                 // LV 等级图标（与评论区一致，使用 user-lvN.svg）
                 Image {
-                    source: root.levelIconSource(root.level)
+                    source: root.levelIconSource(root.level, root.isSeniorMember)
                     Layout.preferredWidth: 32
                     Layout.preferredHeight: 16
                     sourceSize: Qt.size(32 * Screen.devicePixelRatio, 16 * Screen.devicePixelRatio)

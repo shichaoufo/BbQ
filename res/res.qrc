@@ -11,5 +11,7 @@
         <file>icons/level/user-up.svg</file>
         <file>icons/level/verify0.svg</file>
         <file>icons/level/verify1.svg</file>
+        <file>icons/level/dahuiyuan.png</file>
+        <file>icons/level/cangpin.gif</file>
     </qresource>
 </RCC>

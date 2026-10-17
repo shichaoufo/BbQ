@@ -27,6 +27,8 @@ Rectangle {
     property string userFace: ""
     property string userSign: ""
     property int userVerify: -1
+    property bool userIsVip: false       // 大会员（space 接口 vip.status==1）
+    property bool userHasCollect: false  // 藏品：数字藏品(NFT)头像（space 接口 face_nft==1）
     property string userFans: ""
     property string userAttention: ""
     property int vipType: 0
@@ -117,6 +119,8 @@ Rectangle {
                 face: pageRoot.userFace || ""
                 pendantImage: pageRoot.pendantImage || ""
                 verifyType: pageRoot.userVerify
+                isVip: pageRoot.userIsVip
+                hasCollect: pageRoot.userHasCollect
             }
 
             Text {
@@ -305,6 +309,8 @@ Rectangle {
         pageRoot.userFans = ""
         pageRoot.userAttention = ""
         pageRoot.pendantImage = ""
+        pageRoot.userIsVip = false
+        pageRoot.userHasCollect = false
         pageRoot.level = ""
         pageRoot.vipType = 0
         pageRoot.isFollowing = false
@@ -332,6 +338,8 @@ Rectangle {
                 pageRoot.userSign = d.sign || ""
                 pageRoot.level = d.level ? String(d.level.current_level || 0) : ""
                 pageRoot.vipType = d.vip ? (d.vip.type || 0) : 0
+                pageRoot.userIsVip = !!(d.vip && Number(d.vip.status) === 1)
+                pageRoot.userHasCollect = (Number(d.face_nft) === 1)
 
                 if (d.pendant) {
                     pageRoot.pendantImage = d.pendant.image || d.pendant.img || ""

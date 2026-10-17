@@ -14,6 +14,10 @@ Item {
     property real pendantScale: 1.5
     // 认证类型：-1=无, 0=个人认证(黄闪电), 1=机构认证(蓝闪电)
     property int verifyType: -1
+    // 大会员（评论 member.vip.vipStatus==1 / 动态 user.vip.status==1 / card、space 接口 vip.status==1）
+    property bool isVip: false
+    // 藏品：数字藏品（NFT）头像用户（评论 face_nft_new；card/动态/space 接口 face_nft）
+    property bool hasCollect: false
 
     width: root.avatarSize * root.pendantScale
     height: width
@@ -67,6 +71,27 @@ Item {
               : ""
         visible: root.verifyType === 0 || root.verifyType === 1
         fillMode: Image.PreserveAspectFit
+        sourceSize: Qt.size(64, 64)
+        asynchronous: true
+        z: 2
+    }
+
+    // 大会员 / 藏品角标：仅在没有认证标时显示（优先级：认证 > 大会员 > 藏品）。
+    // dahuiyuan.png = 大会员（粉圆“大”字）；cangpin.gif = 藏品（钻石，动图，故用 AnimatedImage）
+    AnimatedImage {
+        width: root.avatarSize * 0.4
+        height: width
+        anchors.right: avatar.right
+        anchors.bottom: avatar.bottom
+        anchors.rightMargin: -width * 0.15
+        anchors.bottomMargin: -height * 0.15
+        source: root.verifyType >= 0 ? ""
+              : root.isVip ? "qrc:/BiliQt/icons/level/dahuiyuan.png"
+              : root.hasCollect ? "qrc:/BiliQt/icons/level/cangpin.gif"
+              : ""
+        visible: source !== ""
+        playing: visible
+        fillMode: AnimatedImage.PreserveAspectFit
         sourceSize: Qt.size(64, 64)
         asynchronous: true
         z: 2
