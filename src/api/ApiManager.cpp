@@ -1873,6 +1873,56 @@ void ApiManager::sendLiveDanmakuEmoticon(const QString &roomId, const QString &e
                         query, roomId);
 }
 
+// 天选时刻一键参与：POST /xlive/lottery-interface/v1/Anchor/JoinLottery
+// （B 站网页直播原生接口，cookie+csrf）。lotteryId 来自 ANCHOR_LOT_START
+// 推送的 data.id。服务端按房间配置自动完成发弹幕/关注/投喂等条件。
+// 内联 POST 而非复用 sendLiveDanmakuPost：那货固定发
+// liveDanmakuSendResult 信号，参与结果必须走自己的 anchorLotteryJoinResult
+void ApiManager::joinLiveLottery(const QString &roomId, const QString &lotteryId)
+{
+    QString cookies = LoginManager::instance()->getCookies();
+    QString csrf = getCSRFToken();
+    if (cookies.isEmpty() || csrf.isEmpty()) {
+        emit anchorLotteryJoinResult(QByteArray("{\"code\":-101,\"message\":\"未登录\"}"));
+        return;
+    }
+
+    QUrlQuery query;
+    query.addQueryItem("id", lotteryId);
+    query.addQueryItem("csrf_token", csrf);
+    query.addQueryItem("csrf", csrf);
+    QByteArray postData = query.toString(QUrl::FullyEncoded).toUtf8();
+
+    QUrl qurl("https://api.live.bilibili.com/xlive/lottery-interface/v1/Anchor/JoinLottery");
+    QNetworkRequest request(qurl);
+    request.setHeader(QNetworkRequest::ContentTypeHeader, "application/x-www-form-urlencoded");
+    request.setRawHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
+    request.setRawHeader("Referer", QString("https://live.bilibili.com/%1").arg(roomId).toUtf8());
+    request.setRawHeader("Origin", "https://live.bilibili.com");
+    request.setRawHeader("Accept", "application/json, text/plain, */*");
+    request.setRawHeader("Cookie", cookies.toUtf8());
+
+    QSslConfiguration config = QSslConfiguration::defaultConfiguration();
+    config.setPeerVerifyMode(QSslSocket::VerifyNone);
+    request.setSslConfiguration(config);
+
+    QNetworkReply *reply = m_networkManager->post(request, postData);
+    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        if (reply->error() != QNetworkReply::NoError) {
+            qWarning() << "[ApiManager] joinLiveLottery network error:"
+                       << reply->errorString();
+            emit anchorLotteryJoinResult(QByteArray("{\"code\":-1,\"message\":\"network error: "
+                                                    + reply->errorString().toUtf8() + "\"}"));
+            reply->deleteLater();
+            return;
+        }
+        QByteArray data = reply->readAll();
+        qDebug() << "[ApiManager] joinLiveLottery response:" << data.left(500);
+        emit anchorLotteryJoinResult(data);
+        reply->deleteLater();
+    });
+}
+
 void ApiManager::getLiveEmoticons(const QString &roomId)
 {
     QString cookies = LoginManager::instance()->getCookies();

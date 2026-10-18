@@ -92,6 +92,7 @@ signals:
     void liveDanmuInfoReceived(const QByteArray &data);
     void liveDanmakuSendResult(const QByteArray &data);      // 发送弹幕（文字/表情）响应
     void liveEmoticonsReceived(const QByteArray &data);      // 表情包列表响应
+    void anchorLotteryJoinResult(const QByteArray &data);    // 天选时刻参与响应
     void videoDanmakuSendResult(const QByteArray &data);     // 视频弹幕发送响应
     void userUploadedVideosReceived(const QByteArray &data);
     void relatedVideosReceived(const QByteArray &data);
@@ -134,6 +135,11 @@ public:
                                              const QString &emoticonText);
     // 获取直播间可用表情包列表（web-ucenter 接口，带 cookie）
     Q_INVOKABLE void getLiveEmoticons(const QString &roomId);
+
+    // ===== 天选时刻一键参与（Web 路线：cookie + csrf）=====
+    // lotteryId 为 ANCHOR_LOT_START 推送里的 data.id。服务端会按房间配置
+    // 自动完成「发弹幕/加关注/投喂礼物」等条件，用户只需点一下
+    Q_INVOKABLE void joinLiveLottery(const QString &roomId, const QString &lotteryId);
 
     // ===== 视频弹幕发送（Web 路线：cookie + csrf，经 /x/v2/dm/post）=====
     // colorDecimal: 十进制颜色值（如 16777215=白色）；progressMs: 当前播放进度（毫秒，弹幕落点）

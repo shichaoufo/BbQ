@@ -648,7 +648,10 @@ void LiveDanmakuManager::parsePacket(const QByteArray &data)
                             if (face.isEmpty()) face = data["face"].toString();
                             QString message = data["message"].toString();
                             int price = data["price"].toInt();
-                            // time 为展示持续秒数（仅到时间自动消失，不做倒计时 UI）
+                            // time 为服务端设计的展示持续秒数（按金额分档）。
+                            // 注意：客户端 SC 显示时长已统一为固定 10 秒
+                            // （LivePlayerPage.scDisplayDuration），此值仅作协议
+                            // 原样透传，不再决定显示时长
                             int scTime = data["time"].toInt();
                             QString bgColor = data["background_color"].toString();
                             QString bgBottomColor = data["background_color2"].toString();
@@ -658,6 +661,28 @@ void LiveDanmakuManager::parsePacket(const QByteArray &data)
                                                    bgColor, bgBottomColor);
                         }
                         else if (cmd == "SEND_GIFT") {
+                        }
+                        // 天选时刻开启推送。data 含 id（参与接口的 lottery_id）、
+                        // award_name/award_num（奖品与数量）、require_text（参与
+                        // 条件）、danmu（需发送的弹幕）、max_time（有效期秒）。
+                        // 服务端只推一次；客户端仅在观看中首次收到时提示，不做
+                        // 官方那种"开奖前常驻"的选项
+                        else if (cmd == "ANCHOR_LOT_START") {
+                            QJsonObject data = obj["data"].toObject();
+                            emit anchorLotteryStarted(
+                                QString::number(data["id"].toVariant().toLongLong()),
+                                data["award_name"].toString(),
+                                lenientInt(data["award_num"]),
+                                data["require_text"].toString(),
+                                data["danmu"].toString(),
+                                lenientInt(data["max_time"]));
+                        }
+                        // 天选时刻结束：常驻抽奖按钮据此立刻隐藏（与本地倒计时
+                        // 归零互为兜底，服务端推送可能先到或后到）
+                        else if (cmd == "ANCHOR_LOT_END") {
+                            QJsonObject data = obj["data"].toObject();
+                            emit anchorLotteryEnded(
+                                QString::number(data["id"].toVariant().toLongLong()));
                         }
                         else if (cmd == "WELCOME") {
                         }

@@ -137,6 +137,10 @@ Rectangle {
         if (volumePopup.opened) volumePopup.close()
         if (danmakuPopup.opened) danmakuPopup.close()
         if (emoticonPopup.opened) emoticonPopup.close()
+        // 天选对话框同为模态：小窗/退出前必须关掉，否则 modal 遮层会盖在
+        // 480x270 的小窗视频上，且高度会被 overlay 裁剪
+        if (anchorLotteryDialog.opened) anchorLotteryDialog.close()
+        root._anchorLotteryId = ""
     }
 
     // 自动隐藏豁免：鼠标悬停在控制栏区域内，或任一弹出面板/菜单
@@ -604,6 +608,16 @@ Rectangle {
         // 5. 重置关注状态（新直播间需要重新获取）
         root.mid = ""
         root.isFollowing = false
+        // 5.1 清理天选时刻状态：新直播间不继承上一场的抽奖按钮/去重记录
+        root._lotteryId = ""
+        root._lotteryAward = ""
+        root._lotteryDeadline = 0
+        root._lotteryRemain = 0
+        root._lotteryJoinedId = ""
+        root._lotteryPendingJoinId = ""
+        root._lastAnchorLotteryPromptId = ""
+        root._anchorLotteryId = ""
+        if (anchorLotteryDialog.opened) anchorLotteryDialog.close()
         // 6. 重置发送弹幕状态：新房间表情包重新拉取，输入框清空
         root._emoticonsLoaded = false
         root._emoticonPackages = []
@@ -1024,9 +1038,116 @@ Rectangle {
     // （FluInfoBar.showCustom 动态创建组件时无法直接传参）
     property var _scQueue: []
 
+    // SC 横幅显示时长：固定 10 秒。B站官方按时长/金额分档（几块钱几秒钟、
+    // 大会员大额几十秒），我们不做金额分档，统一 10 秒，多个 SC 排队时
+    // 每个都占 10 秒（scInfoBar 的 showCustom 行为）
+    readonly property int scDisplayDuration: 10000
+
+    // ===== 天选时刻 =====
+    // 已提示过的 lottery id：服务端对同一场天选只推一次 ANCHOR_LOT_START，
+    // 但重连/切画质等场景可能重复收到，这里兜底去重（只影响"弹窗"，
+    // 常驻按钮的状态记录不受此限制）
+    property string _lastAnchorLotteryPromptId: ""
+    // 当前待参与的 lottery id（对话框打开期间有效）
+    property string _anchorLotteryId: ""
+
+    // 进行中的天选（单条模型：同房间连开两场时后到者覆盖前者——实际极罕见，
+    // 用户也只关心最近一场）。常驻按钮的可见性由这份状态驱动，与弹窗解耦：
+    // 点"取消"只关弹窗，不影响按钮
+    property string _lotteryId: ""
+    property string _lotteryAward: ""
+    property double _lotteryDeadline: 0      // Date.now() 毫秒时间戳
+    property int _lotteryRemain: 0           // 剩余秒（lotteryTick 每秒刷新）
+    // 已参与的 lottery id：按钮文案切换为"已抽奖"并停止重复请求
+    property string _lotteryJoinedId: ""
+    // 正在请求参与中的 id（响应回来时据此标记已参与；-101 等失败则不标记）
+    property string _lotteryPendingJoinId: ""
+    // 按钮是否有内容可显示（是否有未结束的天选）。
+    // 注意：真正的"隐藏/出现"由 topBar 的 opacity 统一控制（与控制栏其他
+    // 组件一致），这里只管"有没有抽奖"这一维度
+    readonly property bool lotteryButtonVisible: _lotteryId !== "" && _lotteryRemain > 0
+
+    // 结束/到点时的统一清理：状态归零 + 关掉仍挂着的提示弹窗。
+    // 弹窗一直没选（既没点参与也没点取消）的情况下，倒计时结束必须让它
+    // 自己消失——否则会留下一个内容已过期、点了也没用的对话框
+    function _clearLotteryState() {
+        root._lotteryId = ""
+        root._lotteryAward = ""
+        root._lotteryRemain = 0
+        if (anchorLotteryDialog.opened) anchorLotteryDialog.close()
+        root._anchorLotteryId = ""
+    }
+
+    // 每秒刷新剩余秒；归零即清空状态（按钮消失）。与服务端 ANCHOR_LOT_END
+    // 互为兜底——推送先到就直接清，推送丢了本地倒计时也能收尾
+    function _refreshLotteryRemain() {
+        if (root._lotteryId === "") {
+            root._lotteryRemain = 0
+            return
+        }
+        var remain = Math.ceil((root._lotteryDeadline - Date.now()) / 1000)
+        if (remain <= 0) {
+            root._clearLotteryState()
+        } else {
+            root._lotteryRemain = remain
+        }
+    }
+
+    Timer {
+        id: lotteryTick
+        interval: 1000
+        repeat: true
+        running: root._lotteryId !== ""
+        onTriggered: root._refreshLotteryRemain()
+    }
+
+    // 参与当前天选（弹窗按钮与常驻按钮共用）
+    function joinCurrentLottery() {
+        if (root._lotteryId === "") {
+            // 竞态兜底：点击瞬间正好到点（弹窗/按钮已在收起），给个明确反馈
+            // 而不是静默无响应
+            scInfoBar.showWarning("本场天选已结束")
+            return
+        }
+        if (root._lotteryJoinedId === root._lotteryId) {
+            scInfoBar.showInfo("已参与本场天选，静候开奖~")
+            return
+        }
+        if (!Login.isLoggedIn) {
+            scInfoBar.showWarning("请先登录后参与抽奖")
+            return
+        }
+        root._lotteryPendingJoinId = root._lotteryId
+        Api.joinLiveLottery(String(root.roomId), root._lotteryId)
+        scInfoBar.showInfo("正在参与，请稍候…")
+    }
+
     FluInfoBar {
         id: scInfoBar
         root: root
+    }
+
+    // 天选时刻提示对话框：收到 ANCHOR_LOT_START 时弹出一次（参与/取消）。
+    // 点了参与或取消都只关窗，不做官方那种开奖前常驻选项
+    FluContentDialog {
+        id: anchorLotteryDialog
+        title: "天选时刻"
+        message: ""
+        positiveText: "参与抽奖"
+        negativeText: "取消"
+        // 注意：设置了 onPositiveClickListener 后 FluContentDialog 不会自动
+        // 关闭（组件源码行为），需在处理函数里手动 close()
+        onPositiveClickListener: {
+            // 统一走 joinCurrentLottery：用进行中状态里的 id（与本次弹窗同一
+            // 个 id）；若已到点被清空，该函数首行直接 return，不会发无效请求
+            if (root._anchorLotteryId !== "") root.joinCurrentLottery()
+            root._anchorLotteryId = ""
+            anchorLotteryDialog.close()
+        }
+        onNegativeClickListener: {
+            root._anchorLotteryId = ""
+            anchorLotteryDialog.close()
+        }
     }
 
     // SC 横幅组件：对标B站官方SC样式——上半部纯色块（头像+昵称+¥金额，background_color），
@@ -1144,7 +1265,42 @@ Rectangle {
             if (root.isMiniWindow) return
             root._scQueue.push({ username: username, face: face, message: message,
                                  price: price, bgColor: bgColor, bgBottomColor: bgBottomColor })
-            scInfoBar.showCustom(scBannerComponent, scTime * 1000)
+            // scTime 是服务端按金额设计的展示秒数，已弃用：统一走固定 10 秒
+            scInfoBar.showCustom(scBannerComponent, root.scDisplayDuration)
+        }
+        // 天选时刻开启推送（WS ANCHOR_LOT_START）。
+        // ① 状态记录：无论小窗与否都记进进行中状态 → 常驻抽奖按钮据此显示；
+        //    小窗期间控制栏不显示，恢复普通窗口后按钮自然出现（按需求不补弹）
+        // ② 提示弹窗：仅非小窗、且同一 id 只弹一次
+        function onAnchorLotteryStarted(lotteryId, awardName, awardNum, requireText, danmu, maxTime) {
+            if (!lotteryId) return
+            root._lotteryId = lotteryId
+            root._lotteryAward = awardName || ""
+            root._lotteryDeadline = Date.now() + Math.max(1, maxTime) * 1000
+            root._refreshLotteryRemain()
+
+            // 小窗不弹提示：模态对话框会遮死 480x270 小窗视频且高度被 overlay 裁剪
+            if (root.isMiniWindow) return
+            if (lotteryId === root._lastAnchorLotteryPromptId) return
+            root._lastAnchorLotteryPromptId = lotteryId
+            root._anchorLotteryId = lotteryId
+            var lines = []
+            lines.push("奖品：" + (awardName || "未知奖品") + " ×" + (awardNum > 0 ? awardNum : 1))
+            if (requireText) lines.push("条件：" + requireText)
+            if (danmu) lines.push("弹幕：" + danmu)
+            if (maxTime > 0) {
+                var mins = Math.floor(maxTime / 60), secs = maxTime % 60
+                lines.push("有效期：" + (mins > 0 ? mins + " 分钟" : "") + (secs > 0 && mins === 0 ? secs + " 秒" : ""))
+            }
+            lines.push("取消后仍可在顶部控制栏点「抽奖」参与")
+            anchorLotteryDialog.message = lines.join("\n")
+            anchorLotteryDialog.open()
+        }
+        // 天选结束（WS ANCHOR_LOT_END）：立刻清掉进行中状态，常驻按钮消失；
+        // 若提示弹窗还开着（用户一直没选）也一并关闭
+        function onAnchorLotteryEnded(lotteryId) {
+            if (lotteryId && lotteryId !== root._lotteryId) return
+            root._clearLotteryState()
         }
         function onConnected() {
         }
@@ -1181,6 +1337,32 @@ Rectangle {
         }
         function onRelationReady(followed, attribute) {
             root.isFollowing = followed
+        }
+    }
+
+    // 天选时刻参与结果（Api.joinLiveLottery 的响应）
+    Connections {
+        target: Api
+        function onAnchorLotteryJoinResult(data) {
+            var pendingId = root._lotteryPendingJoinId
+            root._lotteryPendingJoinId = ""
+            try {
+                var dataStr = typeof data === "string" ? data : data.toString()
+                var resp = JSON.parse(dataStr)
+                if (resp.code === 0) {
+                    // 标记该 id 已参与：顶部常驻按钮文案切为"已抽奖"（按钮在
+                    // 天选结束前一直保留），并阻止重复请求
+                    if (pendingId !== "") root._lotteryJoinedId = pendingId
+                    scInfoBar.showSuccess("已参与天选时刻，静候开奖~")
+                } else {
+                    var errMsg = resp.message || resp.msg || ("错误码: " + resp.code)
+                    if (resp.code === -101) errMsg = "请先登录后参与抽奖"
+                    scInfoBar.showWarning("参与失败: " + errMsg)
+                }
+            } catch (e) {
+                console.warn("[LivePlayerPage] anchorLotteryJoinResult parse error:", e)
+                scInfoBar.showWarning("参与失败: 响应解析错误")
+            }
         }
     }
 
@@ -1655,6 +1837,7 @@ Rectangle {
             // 未关注：FluFilledButton（主题色实底，醒目）；已关注：FluButton
             //（普通灰底，低调）。两种状态视觉差异明显
             Loader {
+                id: followLoader
                 anchors.right: parent.right
                 anchors.top: parent.top
                 anchors.rightMargin: Theme.spacingMedium
@@ -1685,6 +1868,42 @@ Rectangle {
                         if (root.mid !== "") {
                             InteractionManager.followUser(root.mid, 2)
                         }
+                    }
+                }
+            }
+
+            // 天选时刻常驻抽奖按钮：位于关注按钮左侧，样式沿用关注按钮的
+            // 两态方案（未参与=FluFilledButton 主题色实底醒目；已参与=
+            // FluButton 灰底低调）。显隐完全跟随 topBar（控制栏隐藏时整棵
+            // 子树 opacity=0，不单独处理）；小窗模式显式不显示
+            Loader {
+                anchors.right: followLoader.left
+                anchors.rightMargin: Theme.spacingSmall
+                anchors.top: parent.top
+                anchors.topMargin: Theme.spacingMedium
+                active: root.lotteryButtonVisible && !root.isMiniWindow
+                sourceComponent: root._lotteryJoinedId === root._lotteryId
+                                 ? lotteryJoinedBtn : lotteryJoinBtn
+            }
+            Component {
+                id: lotteryJoinBtn
+                FluFilledButton {
+                    text: "抽奖"
+                    font: FluTextStyle.Caption
+                    onClicked: {
+                        closePopups()
+                        root.joinCurrentLottery()
+                    }
+                }
+            }
+            Component {
+                id: lotteryJoinedBtn
+                FluButton {
+                    text: "已抽奖"
+                    font: FluTextStyle.Caption
+                    onClicked: {
+                        closePopups()
+                        root.joinCurrentLottery()   // 内部提示已参与，不重复请求
                     }
                 }
             }
