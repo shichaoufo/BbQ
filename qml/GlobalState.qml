@@ -250,6 +250,98 @@ QtObject {
     // 从服务端 token / 原文里提取视频号。key 可能本身就是裸 BV/av 号
     //（实测 key="BV1do5ezGEkR"，app_url_schema 为空），旧实现只认带域名的
     // 形态，故裸号一律识别不出 → 不可点。
+    // ============ b23.tv 短链解析（评论区链接客户端内跳转）============
+    // 背景：评论区里 `https://b23.tv/WW3i6Ml` 这类**不含视频号的短链**在渲染
+    // 阶段无法判断目标类型（可能是视频/专栏/直播/动态），只能标记成普通网页
+    // 链接；点开时才请求短链、跟随 302 拿到最终地址，再决定走应用内还是浏览器。
+    // `https://b23.tv/BV1G38w6BE6V?...` 带视频号的形态由 _cmtVideoIdOf 直接
+    // 命中 video:，不会走到这里。
+    //
+    // 缓存：同一链接被点第二次直接用结果（键=原始短链，值=最终地址）
+    property var _shortLinkCache: ({})
+    // 等待解析结果的点击：{ 原始短链: { app: <发起点击的页面 App> } }。
+    // 解析是异步的，期间用户可能已切页面——保存 App 是为了跳转仍落在发起页
+    property var _shortLinkPending: ({})
+    // 解析能力挂在 App（AppManager 唯一实例）上，而不是 QML 模块单例 Api：
+    // GlobalState 是 pragma Singleton，import 自身模块会构成循环依赖，
+    // 而所有 openCommentLink 调用点都把 App 传了进来。Connections 动态挂
+    // 到它（target 为变量，换对象会自动重连）
+    property var _shortLinkTarget: null
+    // 注意：根是 QtObject，**没有 default property**，子对象不能裸声明，
+    // 必须挂到某个属性上（否则启动报 "Cannot assign to non-existent
+    // default property"）。target 为变量，换 App 对象会自动重连
+    property Connections _shortLinkConn: Connections {
+        target: root._shortLinkTarget
+        function onShortLinkResolved(sourceUrl, finalUrl) {
+            root._onShortLinkResolved(sourceUrl, finalUrl)
+        }
+    }
+
+    // 是否为"需要解析"的短链：b23.tv / bili23.cn 且自身不含 BV/av 号
+    function _cmtIsShortLink(u) {
+        var s = String(u || "")
+        if (!/^https?:\/\/(?:www\.)?(?:b23\.tv|bili23\.cn)\//i.test(s)) return false
+        return _cmtVideoIdOf(s) === ""
+    }
+
+    // 发起解析（命中缓存则直接跳）
+    function _cmtResolveShortLink(u, app) {
+        // 没有 App 对象就没法发请求（理论上不会发生：所有调用点都传 App）；
+        // 直接交浏览器，不能静默吞掉这次点击
+        if (!app) {
+            Qt.openUrlExternally(String(u))
+            return
+        }
+        var cached = root._shortLinkCache[String(u)]
+        if (cached) {
+            root._cmtOpenResolvedUrl(cached, String(u), app)
+            return
+        }
+        var pend = root._shortLinkPending
+        pend[String(u)] = { app: app }
+        root._shortLinkPending = pend
+        root._shortLinkTarget = app
+        app.resolveShortLink(String(u))
+    }
+
+    // 解析结果回来：缓存 + 分流；失败退回浏览器打开原始短链
+    function _onShortLinkResolved(sourceUrl, finalUrl) {
+        var pend = root._shortLinkPending[sourceUrl]
+        delete root._shortLinkPending[sourceUrl]
+        var app = pend ? pend.app : null
+        if (!finalUrl) {
+            Qt.openUrlExternally(sourceUrl)
+            return
+        }
+        root._shortLinkCache[sourceUrl] = finalUrl
+        root._cmtOpenResolvedUrl(finalUrl, sourceUrl, app)
+    }
+
+    // 最终地址分流：视频/用户主页走应用内，其余交给浏览器
+    // （番剧不内部跳：AppManager.openBangumi 需要 epId/seasonId 等上下文，
+    //   评论区链接给不出标题，内部打开体验不完整）
+    function _cmtOpenResolvedUrl(finalUrl, sourceUrl, app) {
+        var vid = _cmtVideoIdOf(finalUrl)
+        if (vid) {
+            var bvid = vid
+            if (/^[Aa][Vv][0-9]+$/.test(vid)) {
+                bvid = _cmtAvToBvid(parseInt(vid.substring(2), 10))
+            }
+            if (bvid) {
+                if (app) app.openVideo(bvid, "")
+                else Qt.openUrlExternally("https://www.bilibili.com/video/" + bvid)
+                return
+            }
+        }
+        var mm = /^https?:\/\/space\.bilibili\.com\/(\d+)/i.exec(String(finalUrl))
+        if (mm && mm[1] !== "0") {
+            if (app) app.openUserProfile(mm[1], "", "")
+            else Qt.openUrlExternally(String(finalUrl))
+            return
+        }
+        Qt.openUrlExternally(String(finalUrl))
+    }
+
     function _cmtVideoIdOf(s) {
         if (!s) return ""
         var m = /^(BV[0-9A-Za-z]{10}|av[0-9]+)$/.exec(s)
@@ -769,6 +861,12 @@ QtObject {
             if (h.indexOf("web:") === 0) {
                 var u = h.substring("web:".length)
                 if (u.indexOf("http") !== 0) return false
+                // b23.tv 短链（无视频号）：异步解析后再决定内部跳转/浏览器。
+                // 解析期间返回 true（本次点击已被消费，避免调用方再走一遍）
+                if (_cmtIsShortLink(u)) {
+                    _cmtResolveShortLink(u, app)
+                    return true
+                }
                 Qt.openUrlExternally(u)
                 return true
             }

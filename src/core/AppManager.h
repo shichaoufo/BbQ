@@ -42,6 +42,12 @@ public:
     Q_INVOKABLE void closeVideo();
     Q_INVOKABLE void openUserProfile(const QString &mid, const QString &name = "", const QString &face = "", int verify = -1);
     Q_INVOKABLE void closeUserProfile();
+
+    // 解析 b23.tv 短链（GET 并跟随 302），最终地址经 shortLinkResolved 回传。
+    // 放在 AppManager 而非 ApiManager：评论区链接路由 GlobalState（pragma
+    // Singleton）只能拿到页面传进来的 App 对象，取不到 QML 模块单例 Api
+    //（模块内文件 import 自身模块会构成循环依赖）。hostApp 就是本对象。
+    Q_INVOKABLE void resolveShortLink(const QString &url);
     Q_INVOKABLE void closeTab(int index);
     Q_INVOKABLE QVariantMap loadWindowGeometry() const;
     Q_INVOKABLE void saveWindowGeometry(int x, int y, int width, int height);
@@ -88,6 +94,8 @@ signals:
     void miniPlayerModeChanged();
     void miniPlayerModeExited();
     void miniPlayerHostChanged();
+    // 短链解析结果。finalUrl 为空串表示失败/不允许解析（QML 侧回退浏览器）
+    void shortLinkResolved(const QString &sourceUrl, const QString &finalUrl);
 
 private:
     static AppManager *s_instance;

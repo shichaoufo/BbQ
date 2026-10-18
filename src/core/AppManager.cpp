@@ -7,6 +7,11 @@
 #include <QQuickWindow>
 #include <QQuickItem>
 #include <QScreen>
+#include <QNetworkAccessManager>
+#include <QNetworkReply>
+#include <QNetworkRequest>
+#include <QUrl>
+#include <QStringList>
 
 #ifdef Q_OS_WIN
 #include <windows.h>
@@ -254,6 +259,55 @@ void AppManager::openUserProfile(const QString &mid, const QString &name, const 
 void AppManager::closeUserProfile()
 {
     emit userProfileCloseRequested();
+}
+
+// b23.tv 短链解析：GET 短链并跟随 302，把最终地址回传给 QML。
+// 评论区里 `https://b23.tv/WW3i6Ml` 这类短链不含视频号，渲染阶段无法判断
+// 目标类型，只能点开时解析；拿到最终地址后才能决定走应用内播放页还是浏览器。
+// 一次性 QNAM：与 PlayUrlManager 同策略（不长期复用连接）。
+// host 白名单 + 只允许 http(s)：不让调用方诱导本客户端请求任意地址。
+void AppManager::resolveShortLink(const QString &url)
+{
+    const QUrl u(url);
+    static const QStringList allowedHosts = {
+        QStringLiteral("b23.tv"), QStringLiteral("bili23.cn"),
+        QStringLiteral("bilibili.com"), QStringLiteral("www.bilibili.com"),
+        QStringLiteral("m.bilibili.com")
+    };
+    const QString scheme = u.scheme().toLower();
+    if (!u.isValid()
+        || (scheme != QStringLiteral("http") && scheme != QStringLiteral("https"))
+        || !allowedHosts.contains(u.host().toLower())) {
+        qWarning() << "[AppManager] resolveShortLink rejected:" << url;
+        emit shortLinkResolved(url, QString());
+        return;
+    }
+
+    QNetworkRequest request(u);
+    // 跟随重定向：NoLessSafeRedirectPolicy 只跟 http(s)→http(s)，拒绝被降级
+    request.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
+                         QNetworkRequest::NoLessSafeRedirectPolicy);
+    // 10s 传输超时：短链服务正常 1s 内返回，超时按解析失败处理（回退浏览器）
+    request.setTransferTimeout(10000);
+    request.setRawHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
+    request.setRawHeader("Referer", "https://www.bilibili.com/");
+
+    QNetworkAccessManager *manager = new QNetworkAccessManager(this);
+    QNetworkReply *reply = manager->get(request);
+    connect(reply, &QNetworkReply::finished, this, [this, reply, manager, url]() {
+        manager->deleteLater();
+        // 跟随重定向后 reply->url() 即最终地址；失败给空串让 QML 回退浏览器
+        QString finalUrl;
+        if (reply->error() == QNetworkReply::NoError) {
+            finalUrl = reply->url().toString();
+        } else {
+            qWarning() << "[AppManager] resolveShortLink error:" << reply->error()
+                       << reply->errorString();
+        }
+        qDebug() << "[AppManager] resolveShortLink" << url << "->" << finalUrl;
+        emit shortLinkResolved(url, finalUrl);
+        reply->deleteLater();
+    });
 }
 
 void AppManager::closeTab(int index)
