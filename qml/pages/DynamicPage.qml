@@ -499,6 +499,7 @@ FluPage {
             pendantImage: "",   // UP主头像框（装扮）
             verifyType: -1,     // 认证类型（-1=无, 0=个人, 1=机构）
             isVip: false,       // 大会员（user.vip.status==1）
+            isTop: false,       // 置顶动态（module_author.is_top）
             hasCollect: false,  // 藏品：数字藏品(NFT)头像（user.face_nft==1）
             // 初始化完整 cardbg，show 强制 bool，避免 JSON.parse 回来后 show=undefined 导致 CommentCardBg 的 visible 赋值 bool 失败
             cardbg: { show: false, image: "", fanNumDesc: "", fanColor: "#FB7299" },
@@ -558,6 +559,10 @@ FluPage {
                     result.isVip = (Number(user.vip.status) === 1)
                 }
 
+                // ===== 置顶标记（module_author.is_top）=====
+                // 详情页作者名配色与评论区一致：置顶 > 大会员 > 普通
+                result.isTop = (authorData.is_top === true)
+
                 // ===== 藏品：数字藏品（NFT）头像用户（face_nft: 0/1）=====
                 result.hasCollect = (Number(user.face_nft) === 1)
 
@@ -602,7 +607,18 @@ FluPage {
                 var descData = module.module_desc || {}
                 result.content = descData.text || ""
 
-                // ===== 正文跳转链接 jump_urls（评论区是 content.jump_url，动态是 module_desc.jump_url / desc_url / orig_text_map 等）=====
+                // ===== 正文跳转链接 jump_urls（评论区是 content.jump_url，动态是 module_desc.jump_url / desc_urls 等）=====
+                //
+                // 【2026-10-19】必须保留**完整条目**，不能只取 title 字符串。
+                // 服务端在每条 jump_url 里除 title 外还下发：
+                //   prefix_icon    前缀小图标（视频=播放图标、抽奖=礼物、商品=店铺图标）
+                //   pc_url / app_url_schema  跳转目标（页面/协议的原始形态）
+                //   underline / match_once / extra.is_word_search  渲染判据
+                // 评论区（CommentManager::parseJumpUrls）就是按这套字段渲染的，
+                // 所以那边能显示"播放图标+视频标题"；本页此前压成 {key: title}
+                // 字符串，图标和真实标题一起丢掉，正文里只能退回"🔗网页链接"。
+                // 注意：formatDynamicContent（列表卡片/转发卡片仍在用）已同步兼容
+                // 对象与字符串两种形态。
                 if (descData.jump_url) {
                     var jurls = descData.jump_url
                     if (typeof jurls === "object") {
@@ -611,7 +627,18 @@ FluPage {
                             var k = jkeys[jk]
                             var v = jurls[k]
                             if (v && typeof v === "object") {
-                                result.jumpUrls[k] = v.title || v.desc || k
+                                var vExtra = v.extra || {}
+                                result.jumpUrls[k] = {
+                                    title: v.title || v.desc || k,
+                                    prefixIcon: v.prefix_icon || "",
+                                    icon: v.icon || "",
+                                    pcUrl: v.pc_url || "",
+                                    appUrlSchema: v.app_url_schema || "",
+                                    underline: v.underline === true,
+                                    matchOnce: v.match_once !== false,
+                                    isWordSearch: vExtra.is_word_search === true
+                                                  || v.is_word_search === true
+                                }
                             } else {
                                 result.jumpUrls[k] = v || k
                             }
@@ -623,7 +650,17 @@ FluPage {
                         var u = descData.desc_urls[du] || {}
                         var origText = u.orig_text || u.text || ""
                         if (!origText) continue
-                        result.jumpUrls[origText] = u.title || origText
+                        result.jumpUrls[origText] = {
+                            title: u.title || origText,
+                            prefixIcon: u.prefix_icon || u.icon || "",
+                            icon: u.icon || "",
+                            pcUrl: u.pc_url || u.pc_url_normal || "",
+                            appUrlSchema: u.app_url_schema || "",
+                            underline: u.underline === true,
+                            matchOnce: u.match_once !== false,
+                            isWordSearch: (u.extra && u.extra.is_word_search === true)
+                                          || u.is_word_search === true
+                        }
                     }
                 }
 
@@ -791,12 +828,65 @@ FluPage {
                                 rAnyText = result.content.substring(rPos, rPos + rLen)
                             }
                             if (rAnyText && rLinkStr) {
-                                result.jumpUrls[rAnyText] = rLinkStr
+                                // 节点自带的图标：rich_text_nodes 的 WEB / LOTTERY 节点可能
+                                // 带 icon_url / icon_name（服务端下发的礼物、网页等小图）。
+                                // jump_url 表里有完整条目时以表为准（那里的 title/prefix_icon
+                                // 更权威），这里只在表里没有该 key（或只有字符串）时补一个
+                                // 对象，**绝不用字符串覆盖已有的完整字段**
+                                var rnIcon = ""
+                                if (rn.icon_url != null && String(rn.icon_url).length > 0)
+                                    rnIcon = fixHttp(String(rn.icon_url))
+                                else if (rn.icon != null && String(rn.icon).length > 0)
+                                    rnIcon = fixHttp(String(rn.icon))
+                                // 节点的显示文案（rn.text）才是给人看的那一版：
+                                //   BV 节点：orig_text 是裸网址，text 是"《XXX》视频标题"
+                                //   WEB 节点：text 是"网页链接"
+                                // 之前一律拿 orig_text 当标题，正文里就只能显示
+                                // "▶ BV号"或一长串 https 网址。这里把 text 取出来当 title，
+                                // 只要它不是网址、且不等同于原文占位文本就采用。
+                                var rnText = (rn.text != null) ? String(rn.text) : ""
+                                var rnTitle = ""
+                                if (rnText && rnText !== rAnyText
+                                        && !/^(https?:|ftp:|file:)\/\//i.test(rnText)
+                                        && !/^\/\//.test(rnText)) {
+                                    rnTitle = rnText
+                                }
+                                if (!result.jumpUrls[rAnyText] || typeof result.jumpUrls[rAnyText] === "string") {
+                                    result.jumpUrls[rAnyText] = {
+                                        title: rnTitle || rAnyText,
+                                        prefixIcon: rnIcon,
+                                        pcUrl: rLinkStr
+                                    }
+                                } else {
+                                    var rnExist = result.jumpUrls[rAnyText]
+                                    var rnExistTitle = rnExist.title ? String(rnExist.title) : ""
+                                    // 表里已有条目但标题是裸网址/空 → 用节点标题补上
+                                    if (rnTitle && (!rnExistTitle
+                                                    || /^(https?:|ftp:|file:)\/\//i.test(rnExistTitle)
+                                                    || rnExistTitle === rAnyText)) {
+                                        rnExist.title = rnTitle
+                                    }
+                                    if (!rnExist.pcUrl) rnExist.pcUrl = rLinkStr
+                                    if (!rnExist.prefixIcon && rnIcon) rnExist.prefixIcon = rnIcon
+                                }
+                                // BV 节点的 rid 就是 BV 号：正文里若出现裸 BV 号，也让它
+                                // 能显示标题（同一稿件的两种写法都指向同一目标）
+                                var rnRid = (rn.rid != null) ? String(rn.rid) : ""
+                                if (/^BV[0-9A-Za-z]{10}$/i.test(rnRid)
+                                        && result.content.indexOf(rnRid) >= 0) {
+                                    result.jumpUrls[rnRid] = {
+                                        title: rnTitle || rnRid,
+                                        prefixIcon: rnIcon,
+                                        pcUrl: rLinkStr
+                                    }
+                                }
                                 result.urlList.push({
                                     text: rAnyText,
                                     location: rPos,
                                     length: (rLen && rLen > 0 ? rLen : rAnyText.length),
-                                    jump_url: rLinkStr
+                                    jump_url: rLinkStr,
+                                    iconUrl: rnIcon,
+                                    iconName: (rn.icon_name != null ? String(rn.icon_name) : "")
                                 })
                             }
                         }
@@ -877,6 +967,15 @@ FluPage {
                         var atIdx1 = rawUrl.indexOf("@")
                         var fixedSrc = atIdx1 >= 0 ? rawUrl.substring(0, atIdx1) : rawUrl
                         var entry = { text: key, url: fixedSrc, width: eW, height: eH }
+                        // 动态表情源（gif_url / 个别版本 gifUrl / webp_url）：评论区
+                        // CommentRichText 的 AnimatedImage 路径靠它播放动图。服务端不下发
+                        // 时留空，_cmtEmoteIsAnimated 会自动退回静态渲染。
+                        // 同样剥掉 @ 尺寸后缀，避免动图被拼成静图
+                        var gifSrc = evv.gif_url || evv.gifUrl || evv.webp_url || ""
+                        if (gifSrc) {
+                            var atIdx2 = gifSrc.indexOf("@")
+                            entry.gifUrl = atIdx2 >= 0 ? gifSrc.substring(0, atIdx2) : gifSrc
+                        }
                         if (!result.emotes[key]) result.emotes[key] = entry
                     }
                     var ekeys = Object.keys(emote)
@@ -1087,6 +1186,194 @@ FluPage {
             pos++
         }
         return result
+    }
+
+    // ===== 动态正文 → 评论区富文本架构的桥接 =====
+    //
+    // 背景：详情页/列表卡片原来用本页自研的 formatDynamicContent（基于
+    // rich_text_nodes 的 location/length 做精准替换 + 若干 fallback 正则）输出
+    // 一整块 HTML 给 FluText(RichText)。评论区则走 GlobalState.formatCommentSegments
+    // + CommentRichText（token 扫描 + jump_url 富渲染 + 动态表情 AnimatedImage +
+    // openCommentLink 统一路由）。两套实现能力有差距：
+    //   · 动态表情：评论区能播 gif，本页旧实现只会画第一帧
+    //   · jump_url：评论区有 title/prefixIcon/underline/matchOnce 等完整渲染
+    //   · 链接路由：评论区统一走 openCommentLink（video:/user:/search:/web:）
+    //
+    // 字段映射：
+    //   content    -> message（原样透传，含 \n）
+    //   emotes     -> emotes（补 gifUrl/isAnimated）
+    //   atList[type=1] -> atNameToMid（key 去掉 @ 前缀）
+    //   topicList  -> topics（token 形态 "#关键词#"，点击跳官网搜索）
+    //   jumpUrls   -> jumpUrls（完整对象，含服务端 title/prefixIcon）
+    //   urlList    -> jumpUrls 追加（网页/互动抽奖链接）
+    //   atList[type=3] -> jumpUrls 追加（投票，📊 前缀）
+    //   videos     -> **仅用于本地兜底**：服务端 jump_url 没给标题时，
+    //                 用同稿件的动态视频卡片标题补上（见下方 sanitize 段）
+    //
+    // 该函数是"字段版"，列表 delegate（字段来自 *Json 角色）与详情页
+    // （dynamicBodySegments 包装）共用，保证两处渲染完全一致。
+    function dynamicSegmentsOf(content, emotesIn, jumpUrlsIn, atList, topicList, urlList, videos) {
+        var emotes = {}
+        var srcEmotes = emotesIn || {}
+        for (var ek in srcEmotes) {
+            var e = srcEmotes[ek]
+            if (!e || !e.url) continue
+            var entry = { url: e.url, width: (e.width > 0) ? e.width : 24, height: (e.height > 0) ? e.height : 24 }
+            // 动态表情源：服务端字段名历史上是 gif_url，个别版本是 gifUrl
+            var gif = e.gifUrl || e.gif_url || ""
+            if (gif) { entry.gifUrl = gif; entry.isAnimated = true }
+            emotes[ek] = entry
+        }
+
+        var ats = atList || []
+        var atNameToMid = {}
+        for (var i = 0; i < ats.length; i++) {
+            var a = ats[i]
+            if (parseInt(a.type) !== 1) continue
+            var name = String(a.text || "").replace(/^@+/, "")
+            var mid = a.data ? String(a.data) : ""
+            if (name && mid && mid !== "0" && mid !== "NaN") atNameToMid[name] = mid
+        }
+
+        var topics = {}
+        var tls = topicList || []
+        for (var j = 0; j < tls.length; j++) {
+            var t = tls[j]
+            var kw = t.keyword || String(t.text || "").replace(/^#|#$/g, "")
+            if (kw) topics[kw] = { jumpUrl: t.jump_url || "" }
+        }
+
+        var jumpUrls = {}
+        var ju = jumpUrlsIn || {}
+        for (var jk in ju) jumpUrls[jk] = ju[jk]
+        var urls = urlList || []
+        for (var u = 0; u < urls.length; u++) {
+            var U = urls[u]
+            var txt = String(U.text || "")
+            if (!txt) continue
+            var jump = (U.jump_url && String(U.jump_url).length > 0) ? String(U.jump_url) : ""
+            // jump_url 表里已有完整条目（含服务端 title / prefix_icon）时以它为准，
+            // 这里只补 urlList 独有的图标（rich_text_nodes 的 icon_url）
+            var exist = jumpUrls[txt]
+            if (exist && typeof exist === "object" && exist.title) {
+                if (!exist.prefixIcon && U.iconUrl) exist.prefixIcon = U.iconUrl
+                if (!exist.pcUrl && jump) exist.pcUrl = jump
+                continue
+            }
+            jumpUrls[txt] = {
+                title: txt,
+                prefixIcon: U.iconUrl || "",
+                pcUrl: jump
+            }
+        }
+        for (var v = 0; v < ats.length; v++) {
+            var A = ats[v]
+            if (parseInt(A.type) !== 3) continue
+            var vt = String(A.text || "")
+            if (vt) jumpUrls[vt] = { title: "📊" + vt }
+        }
+
+        // ===== 标题/图标兜底（服务端字段不全时的最后一道）=====
+        //
+        // 实测（2026-10-19 抓包 polymer/web-dynamic 接口，20+ 条样本）：
+        //   · LOTTERY 节点只有 {orig_text:"互动抽奖", rid, text:"互动抽奖", jump_url}，
+        //     **没有 icon_url / prefix_icon** —— 官方接口根本不给礼物图案，
+        //     网页端的礼物图标是前端静态资源。所以礼物只能用本地 emoji 兜底。
+        //   · BV 节点 text 字段才是视频标题（orig_text 是裸网址），已在上面的
+        //     解析里取用；只有拿不到标题时才退回 BV 号（用户认可）。
+        //   · WEB 节点 text = "网页链接"。
+        // 兜底规则：
+        //   · 能识别出稿件（BV/av 号命中动态自带的 videos 卡片）→ 用卡片标题，
+        //     无图标时补 "▶ " 文本前缀
+        //   · 链接含 lottery → 一律补 "🎁 互动抽奖"（服务端标题也叫这个，
+        //     但**没有图标**，所以这里不管 rawTitle 是否为空都要补 emoji，
+        //     否则正文里就是光秃秃四个字 —— 之前"没有礼物图标"就是这个原因）
+        //   · 其余长 URL → "🔗 网页链接"（不把原始网址塞进正文）
+        // 有 server prefixIcon 时不再叠 emoji（避免"图标+emoji"双重前缀）。
+        var vids = videos || []
+        var videoTitleFor = function (s) {
+            if (!s) return ""
+            var m = /BV[0-9A-Za-z]{10}/.exec(String(s))
+            var am = m ? null : /[Aa][Vv](\d+)/.exec(String(s))
+            for (var vi = 0; vi < vids.length; vi++) {
+                var vd = vids[vi] || {}
+                if (m && vd.bvid && String(vd.bvid).toLowerCase() === m[0].toLowerCase())
+                    return String(vd.title || "")
+                if (am && vd.aid && String(vd.aid) === am[1])
+                    return String(vd.title || "")
+            }
+            // 号对不上卡片，但整条动态只有一张稿件卡片、且这个链接确实是稿件：
+            // 用那张卡的标题（比裸 BV 号可读）
+            if (vids.length === 1 && vids[0] && vids[0].title
+                    && (m || am || /bilibili\.com\/video/i.test(String(s)))) {
+                return String(vids[0].title)
+            }
+            // 没匹配到卡片但有明确 BV 号：显示号本身也比裸网址可读
+            return m ? m[0] : ""
+        }
+        for (var key in jumpUrls) {
+            var ent = jumpUrls[key]
+            if (typeof ent === "string") ent = { title: ent }
+            // 话题 token（#xxx#）由扫描器的 topics 分支渲染成搜索链接，
+            // 这里的 jumpUrls 条目只是副产品（值往往是 search.bilibili.com 的 URL），
+            // 不参与渲染，也不能被下面的网页兜底改成"🔗 网页链接"
+            if (/^#[^#]+#$/.test(key)) {
+                jumpUrls[key] = ent
+                continue
+            }
+            var rawTitle = ent.title ? String(ent.title) : ""
+            var target = String(ent.pcUrl || ent.appUrlSchema || key || "")
+            var bareUrl = /^(https?:|ftp:|file:)\/\//i.test(rawTitle)
+                           || (rawTitle === key && /^(https?:|ftp:|file:)\/\//i.test(key))
+            var vidTitle = videoTitleFor(key) || videoTitleFor(target)
+            var hasIcon = !!ent.prefixIcon
+            var isLottery = /lottery/i.test(target) || /lottery/i.test(key)
+            // 是否真的是一条网页链接（@用户/话题/投票 的 target 不是 http，
+            // 它们由扫描器的 at/topic 分支消费，不会走到这里；这里再判一次，
+            // 避免给"@某人"这种普通文本挂上链接图标）
+            var isWebLink = /^https?:\/\//i.test(target) || /^https?:\/\//i.test(key)
+            if (vidTitle) {
+                // 播放标签：服务端有 prefix_icon（B站自己的播放小图）就用图，
+                // 没有就用 "▶ " —— 注意即使 rawTitle 已经是真实标题也要加，
+                // 否则标题一到位图标就没了（上一版就是这个毛病）
+                var showTitle = (rawTitle && !bareUrl) ? rawTitle : vidTitle
+                ent.title = (hasIcon ? "" : "▶ ") + showTitle.replace(/^▶\s*/, "")
+            } else if (isLottery) {
+                // 服务端只给"互动抽奖"四个字、没有图标 → 统一补礼物 emoji
+                var lotTitle = (rawTitle && !bareUrl) ? rawTitle : "互动抽奖"
+                ent.title = (hasIcon ? "" : "🎁 ") + lotTitle.replace(/^🎁\s*/, "")
+            } else if (isWebLink || !rawTitle || bareUrl) {
+                // 链接标签：同样优先服务端图标，否则 "🔗 "
+                var webTitle = (rawTitle && !bareUrl) ? rawTitle : "网页链接"
+                ent.title = (hasIcon ? "" : "🔗 ") + webTitle.replace(/^🔗\s*/, "")
+            }
+            jumpUrls[key] = ent
+        }
+
+        return GlobalState.formatCommentSegments(content || "", emotes, topics, atNameToMid, jumpUrls, {
+            linkColor: "#00A1D6",
+            hasPlayer: false,
+            durationMs: 0,
+            showPrefixIcon: true,
+            enableTimeRe: false   // 动态正文里的 12:34 不是视频时间戳，不染
+        })
+    }
+
+    // 详情页包装：从 currentDynamic 风格的对象里取字段，转给字段版
+    function dynamicBodySegments(d) {
+        if (!d) return []
+        return dynamicSegmentsOf(d.content || "", d.emotes || {}, d.jumpUrls || {},
+                                 d.atList || [], d.topicList || [], d.urlList || [],
+                                 d.videos || [])
+    }
+
+    // 动态正文富文本链接点击：评论区统一路由先行，其不消费的形态
+    // （如 bili://vote/ 提示）回落本页原有 openLinkHelper。
+    // App 必须显式传入：GlobalState 是 pragma Singleton，内部取不到
+    // main.cpp 注册的上下文属性 App。
+    function openDynamicRichLink(link) {
+        if (GlobalState.openCommentLink(link, App)) return
+        dynamic_page.openLinkHelper(link)
     }
 
     function formatDynamicContent(content, emotes, jumpUrls, atList, topicList, urlList, skipTimestamp) {
@@ -1316,12 +1603,24 @@ FluPage {
                 var jkey = jumpKeys[jki]
                 if (!jkey) continue
                 if (input.substring(pos, pos + jkey.length) === jkey) {
-                    var jtitle = jumpUrls[jkey] || jkey
+                    // jumpUrls 的 value 有两种形态：
+                    //   · 2026-10-19 之后：完整对象 {title, prefixIcon, pcUrl, appUrlSchema, ...}
+                    //     （与评论区的 JumpUrlInfo 同构，详情页正文交给评论区渲染器用）
+                    //   · 旧形态：标题字符串，或可直接打开的 URL
+                    // 本函数（列表卡片 / 转发卡片摘要）只需要标题与跳转目标，
+                    // 图标不在这里渲染（RichText 路径不支持拼前缀小图）。
+                    var jv = jumpUrls[jkey]
+                    var jtitle = jkey
                     var jhref = ""
-                    // 如果 jumpUrls 的 value 是合法 URL/自定义协议，直接挂 a 链接打开；否则（与key相同，或纯标题）只高亮
-                    if (typeof jumpUrls[jkey] === "string" && jumpUrls[jkey] !== jkey) {
-                        if (/^(https?:\/\/|bilibili:\/\/|bili:\/\/)/.test(jumpUrls[jkey])) {
-                            jhref = jumpUrls[jkey]
+                    if (jv && typeof jv === "object") {
+                        jtitle = jv.title || jkey
+                        var cand = jv.pcUrl || jv.appUrlSchema || ""
+                        if (/^(https?:\/\/|bilibili:\/\/|bili:\/\/)/.test(cand)) jhref = cand
+                    } else {
+                        jtitle = jv || jkey
+                        if (typeof jv === "string" && jv !== jkey
+                            && /^(https?:\/\/|bilibili:\/\/|bili:\/\/)/.test(jv)) {
+                            jhref = jv
                         }
                     }
                     if (jhref) {
@@ -2321,7 +2620,15 @@ FluPage {
                                                 FluText {
                                                     text: itemData ? itemData.author : ""
                                                     font: Theme.fontNormal
-                                                    color: Theme.primary
+                                                    // 与评论区/详情页一致：置顶 → 主色，
+                                                    // 大会员 → 粉 #FB7299，普通 → 次级灰。
+                                                    // 之前这里写死 Theme.primary，所有 UP 主
+                                                    // 都是粉色，会员身份完全没体现。
+                                                    color: (itemData && itemData.isTop === true)
+                                                           ? FluTheme.primaryColor
+                                                           : ((itemData && itemData.isVip === true)
+                                                              ? "#FB7299"
+                                                              : FluTheme.fontSecondaryColor)
                                                 }
 
                                                 FluText {
@@ -2332,28 +2639,26 @@ FluPage {
                                             }
                                         }
 
-                                        // 文本内容（RichText：@用户链接🔗/网页链接/话题/AV号/表情/换行 — 点击 @ 或链接会触发 onLinkActivated）
-                                        FluText {
+                                        // 文本内容（评论区同款富文本架构，与详情页共用
+                                        // dynamicSegmentsOf：@用户/话题/网页·抽奖链接/
+                                        // AV·BV 号/静态与动态表情/换行）
+                                        // maxLines(5)：列表卡片保持原有的 5 行截断
+                                        CommentRichText {
                                             Layout.fillWidth: true
-                                            text: dynamic_page.formatDynamicContent(
-                                                      itemData ? itemData.content : "",
-                                                      itemEmotes,
-                                                      itemJumpUrls,
-                                                      itemAtList,
-                                                      itemTopicList,
-                                                      itemUrlList,
-                                                      true /* skipTimestamp: 动态卡片不识别时间戳 */)
-                                            font: Theme.fontNormal
-                                            color: FluTheme.fontPrimaryColor
-                                            textFormat: Text.RichText
-                                            wrapMode: Text.Wrap
-                                            maximumLineCount: 5
-                                            elide: Text.ElideRight
-                                            // 富文本链接点击处理（@用户跳转UP主主页/外链浏览器/视频AV号）
-                                            // FluText 最终是 QtQuick Text 的封装，所以 onLinkActivated 信号存在；
-                                            // 这里直接赋值给 DynamicPage 的公共 helper 函数即可。
+                                            Layout.preferredHeight: implicitHeight
+                                            maxLines: 5
+                                            segments: dynamic_page.dynamicSegmentsOf(
+                                                          itemData ? itemData.content : "",
+                                                          itemEmotes,
+                                                          itemJumpUrls,
+                                                          itemAtList,
+                                                          itemTopicList,
+                                                          itemUrlList,
+                                                          itemVideos)
+                                            bodyFont: Theme.fontNormal
+                                            bodyColor: FluTheme.fontPrimaryColor
                                             onLinkActivated: function(link) {
-                                                dynamic_page.openLinkHelper(link)
+                                                dynamic_page.openDynamicRichLink(link)
                                             }
                                         }
 
@@ -2392,29 +2697,32 @@ FluPage {
                                                     FluText {
                                                         text: itemHasForward ? itemForward.author : ""
                                                         font: Theme.fontSmall
-                                                        color: Theme.primary
+                                                        // 与主卡片/评论区一致：大会员粉色，普通灰色
+                                                        color: itemHasForward && itemForward.isVip === true
+                                                               ? "#FB7299" : FluTheme.fontSecondaryColor
                                                     }
                                                 }
 
-                                                // 转发内容（RichText：@/链接/表情 — 点击同样走跳转逻辑）
-                                                FluText {
+                                                // 转发内容（评论区同款富文本架构，maxLines 3 保持原截断）
+                                                CommentRichText {
                                                     Layout.fillWidth: true
-                                                    text: itemHasForward ? dynamic_page.formatDynamicContent(
-                                                                              itemForward.content || "",
-                                                                              itemForward.emotes || {},
-                                                                              itemForward.jumpUrls || {},
-                                                                              itemForward.atList || [],
-                                                                              itemForward.topicList || [],
-                                                                              itemForward.urlList || [],
-                                                                              true /* skipTimestamp: 动态卡片不识别时间戳 */)
-                                                                         : ""
-                                                    font: Theme.fontSmall
-                                                    color: FluTheme.fontPrimaryColor
-                                                    textFormat: Text.RichText
-                                                    wrapMode: Text.Wrap
-                                                    maximumLineCount: 3
-                                                    elide: Text.ElideRight
-                                                    onLinkActivated: function(link) { dynamic_page.openLinkHelper(link) }
+                                                    Layout.preferredHeight: implicitHeight
+                                                    maxLines: 3
+                                                    segments: itemHasForward
+                                                              ? dynamic_page.dynamicSegmentsOf(
+                                                                    itemForward.content || "",
+                                                                    itemForward.emotes || {},
+                                                                    itemForward.jumpUrls || {},
+                                                                    itemForward.atList || [],
+                                                                    itemForward.topicList || [],
+                                                                    itemForward.urlList || [],
+                                                                    itemForward.videos || [])
+                                                              : []
+                                                    bodyFont: Theme.fontSmall
+                                                    bodyColor: FluTheme.fontPrimaryColor
+                                                    onLinkActivated: function(link) {
+                                                        dynamic_page.openDynamicRichLink(link)
+                                                    }
                                                 }
 
                                                 // 转发图片
@@ -3516,7 +3824,16 @@ FluPage {
                                     FluText {
                                         text: currentDynamic ? (currentDynamic.author || "") : ""
                                         font: Theme.fontNormal
-                                        color: Theme.primary
+                                        // 与评论区作者名同一规则（见 CommentPanel 的
+                                        // color 绑定）：置顶用主色、大会员粉色 #FB7299、
+                                        // 普通用户灰色。此前恒用 Theme.primary（粉色），
+                                        // 导致普通会员的 UP 主名字也被染成粉色
+                                        color: {
+                                            if (!currentDynamic) return FluTheme.fontPrimaryColor
+                                            if (currentDynamic.isTop === true) return FluTheme.primaryColor
+                                            return currentDynamic.isVip === true
+                                                   ? "#FB7299" : FluTheme.fontSecondaryColor
+                                        }
                                     }
 
                                     FluText {
@@ -3531,26 +3848,22 @@ FluPage {
                                 // 关闭按钮已删除（用户要求）
                             }
 
-                            // 文本内容（RichText：@用户链接🔗/网页链接/话题/AV号/表情/换行 — 点击 @ 或链接会触发 onLinkActivated）
-                            FluText {
+                            // 文本内容（评论区同款富文本架构：CommentRichText +
+                            // GlobalState.formatCommentSegments，见 dynamicBodySegments）
+                            // 支持：@用户（点击开主页）/ 话题 / 网页与互动抽奖链接 /
+                            // AV·BV 号（应用内播放）/ 静态与**动态**表情（gif 播放）/
+                            // 换行；时间码按动态语义不识别
+                            CommentRichText {
                                 Layout.fillWidth: true
-                                // 详情页在 Flickable 内部，RichText 模式下 ColumnLayout 可能不会正确计算文本高度；
-                                // 显式绑定 preferredHeight 到 contentHeight，保证 Flickable.contentHeight 正确累加（解决无法向下滚动的问题）
-                                Layout.preferredHeight: contentHeight > 0 ? contentHeight : implicitHeight
-                                text: dynamic_page.formatDynamicContent(
-                                          currentDynamic ? (currentDynamic.content || "") : "",
-                                          currentDynamic ? (currentDynamic.emotes || {}) : {},
-                                          currentDynamic ? (currentDynamic.jumpUrls || {}) : {},
-                                          currentDynamic ? (currentDynamic.atList || []) : [],
-                                          currentDynamic ? (currentDynamic.topicList || []) : [],
-                                          currentDynamic ? (currentDynamic.urlList || []) : [],
-                                          true /* skipTimestamp: 动态卡片不识别时间戳 */)
-                                font: Theme.fontNormal
-                                color: FluTheme.fontPrimaryColor
-                                textFormat: Text.RichText
-                                wrapMode: Text.Wrap
+                                // 详情页在 Flickable 内部，显式把高度绑到 implicitHeight，
+                                // 保证 ColumnLayout/Flickable.contentHeight 正确累加
+                                // （原 FluText 用 contentHeight 绑定解决同一问题）
+                                Layout.preferredHeight: implicitHeight
+                                segments: dynamic_page.dynamicBodySegments(currentDynamic)
+                                bodyFont: Theme.fontNormal
+                                bodyColor: FluTheme.fontPrimaryColor
                                 onLinkActivated: function(link) {
-                                    dynamic_page.openLinkHelper(link)
+                                    dynamic_page.openDynamicRichLink(link)
                                 }
                             }
 
@@ -3614,29 +3927,33 @@ FluPage {
                                         FluText {
                                             text: detailForwardCard.forwardData.author || ""
                                             font: Theme.fontSmall
-                                            color: Theme.primary
+                                            // 转发卡片作者名同详情页规则：大会员粉色，普通灰色
+                                            color: detailForwardCard.hasForwardData
+                                                   && detailForwardCard.forwardData.isVip === true
+                                                   ? "#FB7299" : FluTheme.fontSecondaryColor
                                         }
                                     }
 
-                                    // 详情页转发正文（RichText）
-                                    FluText {
+                                    // 详情页转发正文（评论区同款富文本架构，maxLines 5）
+                                    CommentRichText {
                                         Layout.fillWidth: true
-                                        text: detailForwardCard.hasForwardData ? dynamic_page.formatDynamicContent(
-                                                                                   detailForwardCard.forwardData.content || "",
-                                                                                   detailForwardCard.forwardData.emotes || {},
-                                                                                   detailForwardCard.forwardData.jumpUrls || {},
-                                                                                   detailForwardCard.forwardData.atList || [],
-                                                                                   detailForwardCard.forwardData.topicList || [],
-                                                                                   detailForwardCard.forwardData.urlList || [],
-                                                                                   true /* skipTimestamp: 动态卡片不识别时间戳 */)
-                                                                              : ""
-                                        font: Theme.fontSmall
-                                        color: FluTheme.fontPrimaryColor
-                                        textFormat: Text.RichText
-                                        wrapMode: Text.Wrap
-                                        maximumLineCount: 5
-                                        elide: Text.ElideRight
-                                        onLinkActivated: function(link) { dynamic_page.openLinkHelper(link) }
+                                        Layout.preferredHeight: implicitHeight
+                                        maxLines: 5
+                                        segments: detailForwardCard.hasForwardData
+                                                  ? dynamic_page.dynamicSegmentsOf(
+                                                        detailForwardCard.forwardData.content || "",
+                                                        detailForwardCard.forwardData.emotes || {},
+                                                        detailForwardCard.forwardData.jumpUrls || {},
+                                                        detailForwardCard.forwardData.atList || [],
+                                                        detailForwardCard.forwardData.topicList || [],
+                                                        detailForwardCard.forwardData.urlList || [],
+                                                        detailForwardCard.forwardData.videos || [])
+                                                  : []
+                                        bodyFont: Theme.fontSmall
+                                        bodyColor: FluTheme.fontPrimaryColor
+                                        onLinkActivated: function(link) {
+                                            dynamic_page.openDynamicRichLink(link)
+                                        }
                                     }
 
                                     GridLayout {

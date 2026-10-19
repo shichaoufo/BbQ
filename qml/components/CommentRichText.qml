@@ -27,6 +27,11 @@ Item {
     property var segments: []
     property font bodyFont
     property color bodyColor: "#000000"
+    // 最大行数：0 = 不限制（评论正文）。>0 时按行数截断并显示省略号 ——
+    // 只对**单 Text 路径**（正文无动态表情）生效；含动态表情走 Flow 分段，
+    // Flow 的 item 是独立矩形，无法参与 Text 的 elide 机制，故不截断
+    // （动态卡片里同时出现动态表情又超长的概率极低）。
+    property int maxLines: 0
 
     signal linkActivated(string link)
 
@@ -73,6 +78,10 @@ Item {
         textFormat: Text.RichText
         wrapMode: Text.Wrap
         verticalAlignment: Text.AlignTop
+        // maxLines > 0 时按行数截断（列表卡片摘要用，等价原 FluText 的
+        // maximumLineCount + elide 组合）；0 时 -1/ElideNone 即不限制
+        maximumLineCount: root.maxLines > 0 ? root.maxLines : -1
+        elide: root.maxLines > 0 ? Text.ElideRight : Text.ElideNone
         onLinkActivated: function(link) { root.linkActivated(link) }
     }
 

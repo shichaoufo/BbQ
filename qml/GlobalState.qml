@@ -211,6 +211,10 @@ QtObject {
     function _cmtIconSrc(u) {
         var s = String(u || "")
         if (!s) return ""
+        // 服务端给的图标常见协议相对形态（"//i0.hdslb.com/bfs/..."）：
+        // Qt 富文本的 <img src> 不会替我们补协议，原样喂进去会加载失败（图标裂）。
+        // 评论区的 prefix_icon 与动态的 jump_url/节点图标都可能走这条，统一补全。
+        if (s.indexOf("//") === 0) s = "https:" + s
         if (s.indexOf("hdslb.com/") < 0) return s
         if (s.indexOf("@") >= 0) return s
         return s + "@40h.png"
@@ -485,6 +489,10 @@ QtObject {
     // opts         { durationMs, hasPlayer, enableWordRe, linkColor, showPrefixIcon }
     //              enableWordRe 控制词搜索热词是否染蓝可点，**默认开启**；
     //              传 false 即退回 PiliPlus 的默认行为（热词按普通文字显示）。
+    //              enableTimeRe 控制是否识别 "12:34" 时间码，**默认开启**；
+    //              传 false 则正文里的时间样式文本按普通文字处理。
+    //              动态正文用 false（动态里的 12:34 多半不是视频时间戳，
+    //              染蓝会造成误解）；评论区用默认值。
 
     // 把"收集 token + 组装总正则"抽出来，供下面两个渲染入口共用。
     // 每次调用都新建正则对象 —— 正则带 lastIndex 状态，复用会串味。
@@ -514,10 +522,12 @@ QtObject {
         toks.sort(function (a, b) { return b.length - a.length })
 
         // 2) 组装总正则：服务端 token 在前，泛化模式垫底（分组全非捕获，
-        //    以免污染替换回调参数）
+        //    以免污染替换回调参数）。
+        //    时间码模式可由 opts.enableTimeRe=false 关闭（动态正文不识别）。
         var alts = []
         for (var i = 0; i < toks.length; i++) alts.push(_cmtEscRe(toks[i]))
-        alts.push("(?:\\d{1,2})[:：]\\d{2}(?:[:：]\\d{2})?")
+        if (o.enableTimeRe !== false)
+            alts.push("(?:\\d{1,2})[:：]\\d{2}(?:[:：]\\d{2})?")
         alts.push("\\{vote:\\d+\\}")
         alts.push("https?:\\/\\/[-A-Za-z0-9+&@#\\/%?=~_|!:,.;]*[-A-Za-z0-9+&@#\\/%=~_|]")
         return { raw: raw, ctx: ctx, re: new RegExp(alts.join("|"), "g") }
