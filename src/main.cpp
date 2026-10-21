@@ -617,6 +617,7 @@ static void biliQtMessageHandler(QtMsgType type, const QMessageLogContext &conte
 #include "VideoDanmakuManager.h"
 #include "DanmakuCanvas.h"
 #include "FramePacer.h"
+#include "MasonryView.h"
 
 // ============ 全局焦点释放过滤器 ============
 // Qt Quick 的焦点只在可聚焦项（Controls/TextInput 等）之间转移：点击背景、
@@ -949,6 +950,7 @@ int main(int argc, char *argv[])
     qmlRegisterType<LiveDanmakuManager>("BiliQt", 1, 0, "LiveDanmakuManager");
     qmlRegisterType<VideoDanmakuManager>("BiliQt", 1, 0, "VideoDanmakuManager");
     qmlRegisterType<DanmakuCanvas>("BiliQt", 1, 0, "DanmakuCanvas");
+    qmlRegisterType<MasonryView>("BiliQt", 1, 0, "MasonryView");
 
     // 提前获取 WBI 签名密钥，避免在 QML/C++ 网络回调中触发同步 QEventLoop 导致闪退
     qDebug() << "[BiliQt] Pre-fetching WBI keys...";

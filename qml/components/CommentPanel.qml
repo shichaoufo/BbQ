@@ -461,9 +461,12 @@ Item {
         var src = pic.imgSrc
         if (pic.isAnimated) return src
         if (src.indexOf("@") >= 0) return src
-        var w = Math.max(1, Math.round(width * 5))
-        if (!crop) return src + "@" + w + "w.jpg"
-        var h = Math.max(1, Math.round(height * 5))
+        // 固定请求宽度（与布局无关）：缩放窗口时不重新下载，只做本地缩放。
+        // 高度只按格子比例算（评论区是方形格子），不跟实际像素走。
+        if (!crop) return src + "@" + GlobalState.imageFullRequestWidth + "w.jpg"
+        var ratio = width > 0 ? height / width : 1
+        var w = GlobalState.imageThumbRequestWidth
+        var h = Math.max(1, Math.round(w * ratio))
         return src + "@" + w + "w_" + h + "h_" + panelRoot.commentCropAnchor(pic) + ".jpg"
     }
 

@@ -47,6 +47,10 @@ find_package(Qt6 REQUIRED COMPONENTS
 # Qt 6.11 起 Gui 的 cmake 配置不再隐式加载 private target，必须显式声明
 find_package(Qt6 REQUIRED COMPONENTS GuiPrivate)
 
+# QmlModelsPrivate：MasonryView（两列瀑布流）用 QQmlDelegateModel 自管 delegate
+# 的创建/回收；该头文件在 QtQmlModels 的 private 目录下，QML 侧没有等价公开 API
+find_package(Qt6 REQUIRED COMPONENTS QmlModels QmlModelsPrivate)
+
 find_package(Qt6 COMPONENTS
     Core5Compat
     Quick5Compat
@@ -109,6 +113,7 @@ set(PROJECT_SOURCES
     src/danmaku/EmoticonCache.cpp
     src/player/DanmakuCanvas.cpp
     src/player/FramePacer.cpp
+    src/ui/MasonryView.cpp
     res/res.qrc
 )
 
@@ -146,6 +151,7 @@ set(PROJECT_HEADERS
     src/danmaku/EmoticonCache.h
     src/player/DanmakuCanvas.h
     src/player/FramePacer.h
+    src/ui/MasonryView.h
 )
 
 if(WIN32)
@@ -203,6 +209,7 @@ set(QML_RESOURCE_FILES
     qml/components/ImageViewer.qml
     qml/components/ImagePreviewMenu.qml
     qml/components/CommentRichText.qml
+    qml/components/ClampedRichText.qml
     qml/styles/Theme.qml
     qml/assets/icons/play.png
     qml/assets/iconpark.ttf
@@ -219,6 +226,7 @@ include_directories(
     ${CMAKE_SOURCE_DIR}/src/interaction
     ${CMAKE_SOURCE_DIR}/src/models
     ${CMAKE_SOURCE_DIR}/src/util
+    ${CMAKE_SOURCE_DIR}/src/ui
 )
 
 set(QRENCODE_SOURCES
@@ -317,6 +325,7 @@ qt_add_qml_module(${PROJECT_NAME}
         qml/components/ImageViewer.qml
         qml/components/ImagePreviewMenu.qml
         qml/components/CommentRichText.qml
+        qml/components/ClampedRichText.qml
         qml/styles/Theme.qml
     RESOURCES
         qml/assets/icons/play.png
@@ -374,6 +383,9 @@ target_link_libraries(${PROJECT_NAME} PRIVATE z)
 # DanmakuCanvas 图集路径使用 QRhi private API（newTexture/uploadTexture），
 # RHI 接口跨后端通用（D3D11/Metal/OpenGL），private 头随标准 Qt 安装提供
 target_link_libraries(${PROJECT_NAME} PRIVATE Qt${QT_VERSION_MAJOR}::GuiPrivate)
+
+# MasonryView：QQmlDelegateModel 在 QtQmlModels private 头里（QML 无等价公开 API）
+target_link_libraries(${PROJECT_NAME} PRIVATE Qt${QT_VERSION_MAJOR}::QmlModelsPrivate)
 
 # Windows 专属系统库
 # d3d11/dxgi：MpvObjectD3D11 渲染路径

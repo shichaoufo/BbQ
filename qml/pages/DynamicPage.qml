@@ -45,7 +45,25 @@ FluPage {
     // 左侧 UP 主列表
     ListModel { id: upListModel }
     // 综合动态列表
+    // 两列瀑布流由 C++ 的 MasonryView 负责（单滚动源 + 虚拟化 + 零留白），
+    // 这里只保留一个模型：列分配、累计高度、可见项创建/回收都在视图内部完成。
     ListModel { id: feedModel }
+
+    // 触底加载：由外层的 Flickable 触发
+    function _feedMaybeLoadMore(view) {
+        if (!visible || loading || !hasMore) return
+        if (view.contentHeight <= view.height) {
+            if (_feedAutoLoadCount < 3) {
+                _feedAutoLoadCount++
+                loadMoreFeed()
+            }
+            return
+        }
+        if (view.contentY + view.height >= view.contentHeight - view.height * 2) {
+            _feedAutoLoadCount = 0
+            loadMoreFeed()
+        }
+    }
 
     // 视频卡片布局参数（与 SearchPage / RecommendPage 一致）
     property int cardWidth: Theme.cardWidth
@@ -201,14 +219,15 @@ FluPage {
     //   长图会被缩成几十像素宽的细条，再被客户端放大回格子 → 排布时糊、点开预览才清晰。
     function dynamicImageSource(container) {
         if (!container || !container.pic) return ""
+        // 固定请求尺寸（见 GlobalState.imageThumbRequestWidth）：URL 与布局完全无关，
+        // 窗口缩放时纯本地缩放，不会重新下载。
+        // 高度只跟"设计比例"有关（方图 1:1、长图 1:2.6），不跟实际像素走。
         if (container.singleImage && !container.isLongPic)
             return GlobalState.fixImageUrl(container.pic.src,
-                                           container.width * Screen.devicePixelRatio,
-                                           0, false)
-        return dynamicImageUrl(container.pic,
-                               container.width * Screen.devicePixelRatio,
-                               container.height * Screen.devicePixelRatio,
-                               true)
+                                           GlobalState.imageFullRequestWidth, 0, false)
+        var ratio = container.isLongPic ? dynamic_page.dynamicImageMaxRatio : 1
+        var w = GlobalState.imageThumbRequestWidth
+        return dynamicImageUrl(container.pic, w, Math.max(1, Math.round(w * ratio)), true)
     }
 
     function _sizeValid() {
@@ -504,6 +523,13 @@ FluPage {
             // 初始化完整 cardbg，show 强制 bool，避免 JSON.parse 回来后 show=undefined 导致 CommentCardBg 的 visible 赋值 bool 失败
             cardbg: { show: false, image: "", fanNumDesc: "", fanColor: "#FB7299" },
             time: "",
+            // MODULE_TYPE_TITLE.module_title.text：活动/合集等标签（opus 里也当标题用）
+            tagText: "",
+            // 动态所属话题（module_dynamic.topic / MODULE_TYPE_TOPIC）：
+            // 卡片底部那个可点的“话题”胶囊，链接形如 /v/topic/detail?topic_id=...
+            topicName: "",
+            topicId: "",
+            topicJump: "",
             content: "",
             emotes: {},         // 表情包字典：key = "[微笑]" value = {url, width, height}
             jumpUrls: {},       // 正文中的跳转链接：key = "AV号/BV号/话题词" value = 显示标题
@@ -539,7 +565,11 @@ FluPage {
                 result.mid = user.mid || 0
                 result.author = user.name || user.uname || ""
                 result.face = user.face || ""
+                // 接口新版本给的是 pub_text（相对时间字符串），但不少条目（尤其转发内层）
+                // 只有 pub_ts，pub_text 为空 —— 这里用时间戳补上，否则转发卡片没有时间
                 result.time = authorData.pub_text || ""
+                if (!result.time && authorData.pub_ts)
+                    result.time = formatTime(Number(authorData.pub_ts))
 
                 // ===== 头像框 pendant（装扮）=====
                 if (user.pendant) {
@@ -602,6 +632,19 @@ FluPage {
                             show: !!(fan2.num_desc && fan2.num_desc !== "")
                         }
                     }
+                }
+            } else if (moduleType === "MODULE_TYPE_TITLE") {
+                // 活动/合集标签。老格式是 module.module_title，opus 新格式里
+                // 同一份数据也可能挂在 module_tag 下，两个都认
+                var titleData = module.module_title || module.module_tag || {}
+                result.tagText = titleData.text || ""
+            } else if (moduleType === "MODULE_TYPE_TOPIC") {
+                // opus 风格：话题单独成一个模块
+                var topicMod = module.module_topic || {}
+                if (topicMod.name) {
+                    result.topicName = topicMod.name
+                    result.topicId = String(topicMod.id || topicMod.topic_id || "")
+                    result.topicJump = topicMod.jump_url || ""
                 }
             } else if (moduleType === "MODULE_TYPE_DESC") {
                 var descData = module.module_desc || {}
@@ -1002,6 +1045,18 @@ FluPage {
             } else if (moduleType === "MODULE_TYPE_DYNAMIC") {
                 var dynamicData = module.module_dynamic || {}
                 var dataType = dynamicData.type || ""
+                // 话题（普通动态走这里；opus 走上面的 MODULE_TYPE_TOPIC）
+                var dynTopic = dynamicData.topic || {}
+                if (dynTopic.name) {
+                    result.topicName = dynTopic.name
+                    result.topicId = String(dynTopic.id || dynTopic.topic_id || "")
+                    if (dynTopic.jump_url)
+                        result.topicJump = dynTopic.jump_url
+                    else if (result.topicId)
+                        result.topicJump = "https://www.bilibili.com/v/topic/detail?topic_id="
+                                             + encodeURIComponent(result.topicId)
+                                             + "&topic_name=" + encodeURIComponent(result.topicName)
+                }
                 if (dataType === "MDL_DYN_TYPE_DRAW") {
                     var draw = dynamicData.dyn_draw || {}
                     var drawItems = draw.items || []
@@ -2115,11 +2170,15 @@ FluPage {
         } catch (e) {
             return
         }
+        _feedPatchImages(currentDynamic.id_str, json)
+    }
+
+    function _feedPatchImages(idStr, json) {
         for (var i = 0; i < feedModel.count; i++) {
             var it = feedModel.get(i)
-            if (it && String(it.id_str) === String(currentDynamic.id_str)) {
+            if (it && String(it.id_str) === String(idStr)) {
                 feedModel.setProperty(i, "imagesJson", json)
-                break
+                return
             }
         }
     }
@@ -2497,37 +2556,46 @@ FluPage {
                             Item {
                                 id: feedPageRoot
 
-                                ListView {
-                                    id: feedListView
-                                anchors.fill: parent
-                                anchors.leftMargin: dynamic_page.margins
-                                anchors.rightMargin: dynamic_page.margins + 20
-                                anchors.topMargin: dynamic_page.margins
-                                anchors.bottomMargin: dynamic_page.margins
-                                clip: true
-                                boundsBehavior: Flickable.StopAtBounds
-                                ScrollBar.vertical: FluScrollBar {}
-                                spacing: Theme.spacingMedium
+                                // ===== 两列瀑布流 =====
+                                // 滚动只由这一个 Flickable 负责（整页唯一滚动条）；
+                                // 列分配、累计高度、可见项的创建与回收都在 MasonryView（C++）里。
+                                // 之前用两个 ListView 互为镜像，两份 contentHeight 和两套
+                                // 边界夹紧必然错位：滑块乱跳、一列空白、到底后滚轮还能滚。
+                                Flickable {
+                                    id: feedFlick
+                                    anchors.fill: parent
+                                    anchors.leftMargin: dynamic_page.margins
+                                    anchors.topMargin: dynamic_page.margins
+                                    anchors.bottomMargin: dynamic_page.margins
+                                    clip: true
+                                    boundsBehavior: Flickable.StopAtBounds
+                                    contentWidth: width
+                                    contentHeight: feedMasonry.contentHeight
+                                    ScrollBar.vertical: FluScrollBar {}
 
-                                onContentYChanged: {
-                                    if (!dynamic_page.visible || dynamic_page.loading || !dynamic_page.hasMore) return
-                                    if (contentHeight <= height) {
-                                        if (dynamic_page._feedAutoLoadCount < 3) {
-                                            dynamic_page._feedAutoLoadCount++
-                                            dynamic_page.loadMoreFeed()
-                                        }
-                                        return
-                                    }
-                                    if (contentY + height >= contentHeight - feedListView.height) {
-                                        dynamic_page._feedAutoLoadCount = 0
-                                        dynamic_page.loadMoreFeed()
+                                    onContentYChanged: dynamic_page._feedMaybeLoadMore(feedFlick)
+
+                                    MasonryView {
+                                        id: feedMasonry
+                                        width: feedFlick.width - Theme.scrollBarReserve
+                                        model: feedModel
+                                        delegate: feedCardComponent
+                                        columnCount: 2
+                                        rowSpacing: Theme.spacingMedium
+                                        columnSpacing: Theme.spacingMedium
+                                        viewportY: feedFlick.contentY
+                                        viewportHeight: feedFlick.height
+                                        cacheBuffer: 600
                                     }
                                 }
 
-                                model: feedModel
+                                // 卡片委托：宽度由 MasonryView 统一设置（列宽随窗口变化）
+                                Component {
+                                    id: feedCardComponent
 
-                                delegate: Rectangle {
-                                    width: Math.max(0, feedListView.width - Theme.scrollBarReserve)
+                                    Rectangle {
+                                        // 窄卡时收起装扮卡、放宽内嵌视频/直播卡
+                                        readonly property bool narrowCard: width > 0 && width < 520
                                     height: itemData ? feedCardColumn.height + Theme.spacingLarge * 2 : 0
                                     radius: Theme.radiusMedium
                                     color: FluTheme.itemNormalColor
@@ -2572,6 +2640,10 @@ FluPage {
                                         z: 3
                                         showNoPrefix: false
                                         numberPosition: "left"
+                                        // 两列后卡片只有半宽：不隐藏（详情页有列表却没有会很奇怪），
+                                        // 改成等比缩小并保持右边缘对齐
+                                        scale: narrowCard ? 0.78 : 1
+                                        transformOrigin: Item.Right
                                         cardbg: {
                                             // 兜底：如果 JSON.parse 出来是空对象 {}，构造 show=false 的默认值，避免 CommentCardBg 里 visible = undefined 警告
                                             var c = itemCardbg
@@ -2593,12 +2665,33 @@ FluPage {
                                         anchors.margins: Theme.spacingLarge
                                         spacing: Theme.spacingMedium
 
+                                        // ====== 活动/合集标签（MODULE_TYPE_TITLE.module_title.text）======
+                                        // 官方卡片把它放在作者行上方，这里保持同样位置；无标签时不占位
+                                        Rectangle {
+                                            Layout.alignment: Qt.AlignLeft
+                                            Layout.preferredWidth: tagTextItem.implicitWidth + Theme.spacingMedium * 2
+                                            Layout.preferredHeight: 22
+                                            radius: 4
+                                            color: FluTheme.frameColor
+                                            visible: itemData && itemData.tagText && String(itemData.tagText).length > 0
+
+                                            FluText {
+                                                id: tagTextItem
+                                                anchors.centerIn: parent
+                                                text: itemData && itemData.tagText ? String(itemData.tagText) : ""
+                                                font: Theme.fontSmall
+                                                color: FluTheme.fontSecondaryColor
+                                            }
+                                        }
+
                                         // 头部：头像 + 用户名 + 时间
                                         RowLayout {
                                             Layout.fillWidth: true
                                             spacing: Theme.spacingSmall
                                             // 右侧给装扮留空间（现在装扮 width=175 + 24px 额外间距），避免头像/昵称行与装扮重叠
-                                            Layout.rightMargin: (itemCardbg && itemCardbg.show) ? 190 : 0
+                                            // 装扮缩放到 0.78 后视觉宽度约 140，这里按同一比例让位
+                                            Layout.rightMargin: (itemCardbg && itemCardbg.show)
+                                                                ? (narrowCard ? 152 : 190) : 0
 
                                             // ====== 头像框 AvatarWithPendant（替代纯 CircleAvatar），与评论区一致 ======
                                             AvatarWithPendant {
@@ -2639,14 +2732,54 @@ FluPage {
                                             }
                                         }
 
+                                        // ====== 话题胶囊（module_dynamic.topic / MODULE_TYPE_TOPIC）======
+                                        // 官方位置在正文开头，单独一行；点击进话题详情
+                                        Rectangle {
+                                            id: topicChip
+                                            Layout.alignment: Qt.AlignLeft
+                                            Layout.preferredWidth: topicChipText.implicitWidth + Theme.spacingMedium * 2
+                                            Layout.preferredHeight: 24
+                                            radius: 12
+                                            color: topicMa.containsMouse ? FluTheme.itemHoverColor
+                                                                          : FluTheme.frameColor
+                                            visible: itemData && itemData.topicName
+                                                     && String(itemData.topicName).length > 0
+
+                                            FluText {
+                                                id: topicChipText
+                                                anchors.centerIn: parent
+                                                text: itemData && itemData.topicName ? String(itemData.topicName) : ""
+                                                font: Theme.fontSmall
+                                                color: FluTheme.primaryColor
+                                            }
+
+                                            MouseArea {
+                                                id: topicMa
+                                                anchors.fill: parent
+                                                hoverEnabled: true
+                                                cursorShape: Qt.PointingHandCursor
+                                                onClicked: {
+                                                    var url = itemData ? String(itemData.topicJump || "") : ""
+                                                    if (!url && itemData && itemData.topicId)
+                                                        url = "https://www.bilibili.com/v/topic/detail?topic_id=" + itemData.topicId
+                                                    if (url) dynamic_page.openDynamicRichLink(url)
+                                                }
+                                            }
+                                        }
+
                                         // 文本内容（评论区同款富文本架构，与详情页共用
                                         // dynamicSegmentsOf：@用户/话题/网页·抽奖链接/
                                         // AV·BV 号/静态与动态表情/换行）
-                                        // maxLines(5)：列表卡片保持原有的 5 行截断
-                                        CommentRichText {
+                                        // 截断逻辑见 ClampedRichText：按整行裁切 + 独立一行的「查看更多」
+                                        ClampedRichText {
                                             Layout.fillWidth: true
                                             Layout.preferredHeight: implicitHeight
                                             maxLines: 5
+                                            // 只有视频/图片、没有正文时整个隐藏：
+                                            // 否则 ColumnLayout 仍会为它留一段 spacing，
+                                            // 表现为"视频和发布时间之间空一大截"
+                                            visible: itemData && itemData.content
+                                                     && String(itemData.content).length > 0
                                             segments: dynamic_page.dynamicSegmentsOf(
                                                           itemData ? itemData.content : "",
                                                           itemEmotes,
@@ -2659,6 +2792,9 @@ FluPage {
                                             bodyColor: FluTheme.fontPrimaryColor
                                             onLinkActivated: function(link) {
                                                 dynamic_page.openDynamicRichLink(link)
+                                            }
+                                            onMoreClicked: {
+                                                if (itemData) openDynamicDetail(itemData)
                                             }
                                         }
 
@@ -2701,10 +2837,17 @@ FluPage {
                                                         color: itemHasForward && itemForward.isVip === true
                                                                ? "#FB7299" : FluTheme.fontSecondaryColor
                                                     }
+                                                    // 发布时间（接口多数只给 pub_ts，由 parseDynamicItem 兜底格式化）
+                                                    FluText {
+                                                        text: itemHasForward ? (itemForward.time || "") : ""
+                                                        font: Theme.fontSmall
+                                                        color: FluTheme.fontTertiaryColor
+                                                        visible: text.length > 0
+                                                    }
                                                 }
 
-                                                // 转发内容（评论区同款富文本架构，maxLines 3 保持原截断）
-                                                CommentRichText {
+                                                // 转发内容：同样按整行截断（3 行）+ 独立一行的「查看更多」
+                                                ClampedRichText {
                                                     Layout.fillWidth: true
                                                     Layout.preferredHeight: implicitHeight
                                                     maxLines: 3
@@ -2723,16 +2866,21 @@ FluPage {
                                                     onLinkActivated: function(link) {
                                                         dynamic_page.openDynamicRichLink(link)
                                                     }
+                                                    onMoreClicked: {
+                                                        // 转发内容被截断时进原动态详情看全文
+                                                        if (itemHasForward && itemForward)
+                                                            dynamic_page.openDynamicDetail(itemForward)
+                                                    }
                                                 }
 
                                                 // 转发图片
                                                 GridLayout {
-                                                    Layout.fillWidth: false
-                                                    Layout.alignment: Qt.AlignLeft
-                                                    // 单图按三档宽度自适应（见 dynamicImageGridWidth），多图仍是 2/3 列宽
+                                                    // 单图按三档宽度自适应；多图撑满转发区宽度
+                                                    Layout.fillWidth: itemForwardImageCount > 1
+                                                    Layout.alignment: itemForwardImageCount > 1 ? Qt.AlignHCenter : Qt.AlignLeft
                                                     Layout.preferredWidth: itemForwardImageCount === 1
                                                                            ? dynamic_page.dynamicImageGridWidth(forwardColumn.width, itemForward.images)
-                                                                           : forwardColumn.width * 2 / 3
+                                                                           : forwardColumn.width
                                                     columns: dynamic_page.dynamicGridColumns(itemForwardImageCount)
                                                     rowSpacing: dynamic_page.dynamicImageSpacing
                                                     columnSpacing: dynamic_page.dynamicImageSpacing
@@ -2849,10 +2997,9 @@ FluPage {
                                                     }
                                                 }
 
-                                                // 转发视频
+                                                // 转发视频：与主卡一致，吃满转发区宽度
                                                 ColumnLayout {
-                                                    Layout.fillWidth: false
-                                                    Layout.preferredWidth: forwardColumn.width / 3
+                                                    Layout.fillWidth: true
                                                     spacing: Theme.spacingSmall
                                                     visible: itemForwardVideoCount > 0
 
@@ -2877,10 +3024,9 @@ FluPage {
                                                     }
                                                 }
 
-                                                // 转发直播
+                                                // 转发直播：与转发视频一致
                                                 ColumnLayout {
-                                                    Layout.fillWidth: false
-                                                    Layout.preferredWidth: forwardColumn.width / 3
+                                                    Layout.fillWidth: true
                                                     spacing: Theme.spacingSmall
                                                     visible: itemForwardLiveCount > 0
 
@@ -2917,12 +3063,13 @@ FluPage {
 
                                         // 图片网格
                                         GridLayout {
-                                            Layout.fillWidth: false
-                                            Layout.alignment: Qt.AlignLeft
-                                            // 单图按三档宽度自适应（见 dynamicImageGridWidth），多图仍是 2/3 列宽
+                                            // 单图按三档宽度自适应（见 dynamicImageGridWidth）；
+                                            // 多图撑满列宽，只留格间间距（与评论区一致）
+                                            Layout.fillWidth: itemImageCount > 1
+                                            Layout.alignment: itemImageCount > 1 ? Qt.AlignHCenter : Qt.AlignLeft
                                             Layout.preferredWidth: itemImageCount === 1
                                                                    ? dynamic_page.dynamicImageGridWidth(feedCardColumn.width, itemImages)
-                                                                   : feedCardColumn.width * 2 / 3
+                                                                   : feedCardColumn.width
                                             columns: dynamic_page.dynamicGridColumns(itemImageCount)
                                             rowSpacing: dynamic_page.dynamicImageSpacing
                                             columnSpacing: dynamic_page.dynamicImageSpacing
@@ -3066,10 +3213,9 @@ FluPage {
                                             }
                                         }
 
-                                        // 视频卡片
+                                        // 视频卡片：吃满当前列宽（只留卡片内边距）
                                         ColumnLayout {
-                                            Layout.fillWidth: false
-                                            Layout.preferredWidth: feedCardColumn.width / 3
+                                            Layout.fillWidth: true
                                             spacing: Theme.spacingSmall
                                             visible: itemVideoCount > 0
 
@@ -3094,10 +3240,9 @@ FluPage {
                                             }
                                         }
 
-                                        // 直播卡片
+                                        // 直播卡片：与视频卡一致，吃满列宽
                                         ColumnLayout {
-                                            Layout.fillWidth: false
-                                            Layout.preferredWidth: feedCardColumn.width / 3
+                                            Layout.fillWidth: true
                                             spacing: Theme.spacingSmall
                                             visible: itemLiveCount > 0
 
@@ -3198,7 +3343,7 @@ FluPage {
                                             // 统一刷新左侧关注列表，便于登录后立即加载
                                             dynamic_page.loadUpList()
                                             dynamic_page.loadFeed(dynamic_page.currentUpMid)
-                                            feedListView.positionViewAtBeginning()
+                                            feedFlick.contentY = 0
                                         }
                                     }
                                 }
@@ -3846,6 +3991,39 @@ FluPage {
                                 Item { Layout.fillWidth: true }
 
                                 // 关闭按钮已删除（用户要求）
+                            }
+
+                            // ====== 话题胶囊（与列表卡片一致，放在正文开头）======
+                            Rectangle {
+                                Layout.alignment: Qt.AlignLeft
+                                Layout.preferredWidth: detailTopicText.implicitWidth + Theme.spacingMedium * 2
+                                Layout.preferredHeight: 24
+                                radius: 12
+                                color: detailTopicMa.containsMouse ? FluTheme.itemHoverColor
+                                                                   : FluTheme.frameColor
+                                visible: currentDynamic && currentDynamic.topicName
+                                         && String(currentDynamic.topicName).length > 0
+
+                                FluText {
+                                    id: detailTopicText
+                                    anchors.centerIn: parent
+                                    text: currentDynamic && currentDynamic.topicName ? String(currentDynamic.topicName) : ""
+                                    font: Theme.fontSmall
+                                    color: FluTheme.primaryColor
+                                }
+
+                                MouseArea {
+                                    id: detailTopicMa
+                                    anchors.fill: parent
+                                    hoverEnabled: true
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: {
+                                        var url = currentDynamic ? String(currentDynamic.topicJump || "") : ""
+                                        if (!url && currentDynamic && currentDynamic.topicId)
+                                            url = "https://www.bilibili.com/v/topic/detail?topic_id=" + currentDynamic.topicId
+                                        if (url) dynamic_page.openDynamicRichLink(url)
+                                    }
+                                }
                             }
 
                             // 文本内容（评论区同款富文本架构：CommentRichText +

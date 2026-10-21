@@ -762,6 +762,14 @@ QtObject {
         return pathLower.endsWith(".gif") || pathLower.endsWith(".webp")
     }
 
+    // 图片请求宽度：**固定值，与布局尺寸无关**。
+    // 之前按"当前布局像素"拼 URL（@640w_400h.jpg），窗口一变 URL 就变，Qt 当新图重新下载。
+    // 现在一律用固定宽度请求，缩放窗口只做本地缩放，永不重新下载。
+    // 取 480：九宫格/评论缩略图实际显示 100~250px，480 足够；再大一倍纯属浪费内存。
+    readonly property int imageThumbRequestWidth: 480
+    // 单张原比例图（详情正文、评论单图）：显示宽度可能到 700px+，给 1080 保证不糊
+    readonly property int imageFullRequestWidth: 1080
+
     // 返回固定尺寸（480x270，16:9）的 CDN 图片 URL。
     // 用于视频/直播卡片封面等场景：URL 不随显示尺寸变化，确保只在第一次显示时下载一次，
     // 后续 resize 由 Qt 在本地做 GPU 缩放，避免反复重新下载导致转圈圈和封面闪动。
