@@ -148,6 +148,14 @@ public:
         QString pic;             // 视频封面URL
         QString description;     // 视频简介
 
+        // 联合投稿（staff）。B站"联合投稿"视频的每个参与者都在这份数组里，
+        // 每项含 mid / name / face / title（身份，如 UP主、参演、配音）。
+        // 普通单人投稿时该数组为空，改用 owner* 字段。
+        QList<QVariantMap> staff;
+        // 原始 staff JSON（紧凑格式）。QVariantMap 转换在个别字段上会丢值，
+        // QML 侧直接解析这段原文更可靠。
+        QString staffJson;
+
         // req_user 字段（仅登录态下 web view 接口返回）
         // 表示当前登录用户对该视频的互动状态
         bool reqLike = false;       // 是否已点赞

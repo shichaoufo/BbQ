@@ -29,6 +29,14 @@ Rectangle {
     property string upFans: ""
     property int upVipType: 0
     property bool upHasCollect: false   // UP 主是否数字藏品(NFT)头像用户（钻石角标）
+
+    // ===== 联合投稿 / 标签 =====
+    // videoAuthors：联合投稿（staff）参与者，单人投稿时只放 owner 一个
+    // 每项 { mid, name, face, title(身份：UP主/参演/…), vip, verify }
+    property var videoAuthors: []
+    property bool isJointVideo: false
+    // videoTags：[{ id, name }]，来自 /x/tag/archive/tags
+    property var videoTags: []
     property string viewCount: "0"
     property string danmakuCount: "0"
     property string pubDate: ""
@@ -338,6 +346,19 @@ Rectangle {
     function openUpProfile() {
         if (String(pageRoot.mid) === "") return
         App.openUserProfile(String(pageRoot.mid), pageRoot.upName, pageRoot.upFace, pageRoot.upVerify)
+    }
+
+    // 联合投稿里点某位参与者：用该参与者自己的 mid/头像打开主页
+    function openUpProfileById(mid) {
+        if (mid === undefined || mid === null || String(mid) === "" || String(mid) === "0") return
+        for (var i = 0; i < pageRoot.videoAuthors.length; i++) {
+            var a = pageRoot.videoAuthors[i]
+            if (String(a.mid) === String(mid)) {
+                App.openUserProfile(String(mid), a.name || "", a.face || "", a.verify === undefined ? -1 : a.verify)
+                return
+            }
+        }
+        App.openUserProfile(String(mid), "", "", -1)
     }
 
     // 打开评论区用户主页（本页评论列表为自绘 delegate，非 CommentPanel 组件）
@@ -777,6 +798,56 @@ Rectangle {
     // 同步倍速到底层 mpv
     onPlaybackSpeedChanged: {
         if (mpvPlayer) mpvPlayer.speed = playbackSpeed
+    }
+
+    // 联合投稿：优先解析 C++ 传来的原始 staff JSON
+    //（QVariantMap 转换会丢 title，原文字节才是可靠的）
+    function applyVideoAuthors(detail) {
+        var arr = []
+        if (detail.staffJson && detail.staffJson.length > 2) {
+            try {
+                var parsed = JSON.parse(detail.staffJson)
+                if (parsed && parsed.length > 0) arr = parsed
+            } catch (e) {
+                console.warn("[Authors] parse staffJson failed:", e)
+            }
+        }
+        if (arr.length === 0 && detail.staff && detail.staff.length > 0)
+            arr = detail.staff
+
+        if (arr.length > 0) {
+            var list = []
+            for (var i = 0; i < arr.length; i++) {
+                var s = arr[i] || {}
+                list.push({
+                    mid: String(s.mid || ""),
+                    name: s.name || "",
+                    face: s.face || "",
+                    // 身份：staff[].title（UP主/参演/配音…）
+                    title: s.title || s.role || "",
+                    vip: !!(s.vip && s.vip.status === 1),
+                    verify: (s.official && s.official.type !== undefined) ? s.official.type : -1
+                })
+            }
+            pageRoot.videoAuthors = list
+            pageRoot.isJointVideo = true
+        } else {
+            pageRoot.videoAuthors = [{
+                mid: String(detail.ownerMid || ""),
+                name: detail.ownerName || "",
+                face: detail.ownerFace || "",
+                title: "",
+                vip: pageRoot.upVipType > 0,
+                verify: (detail.ownerVerify === undefined ? -1 : detail.ownerVerify)
+            }]
+            pageRoot.isJointVideo = false
+        }
+        try {
+            if (detail.bvid)
+                Api.getVideoTags(detail.bvid)
+        } catch (e) {
+            console.warn("[VideoPlayerPage] request tags failed:", e)
+        }
     }
 
     function formatFans(num) {
@@ -2292,6 +2363,26 @@ Rectangle {
     }
 
     Connections {
+        target: Api
+        function onVideoTagsReceived(data) {
+            try {
+                var doc = JSON.parse(data)
+                if (doc.code !== 0) return
+                var arr = doc.data || []
+                var out = []
+                for (var i = 0; i < arr.length; i++) {
+                    var t = arr[i] || {}
+                    if (!t.tag_name) continue
+                    out.push({ id: t.tag_id, name: t.tag_name })
+                }
+                pageRoot.videoTags = out
+            } catch (e) {
+                console.warn("[VideoPlayerPage] parse tags failed:", e)
+            }
+        }
+    }
+
+    Connections {
         target: PlayUrlManager
         // 字幕轨列表来自 /x/player/wbi/v2（与章节 view_points 同接口），
         // 不在 playurl 响应里。空列表 = 该视频无字幕，顶部字幕按钮随之隐藏
@@ -2316,6 +2407,7 @@ Rectangle {
                 // 填充UP主信息
                 pageRoot.upName = detail.ownerName || ""
                 pageRoot.upFace = detail.ownerFace || ""
+                pageRoot.applyVideoAuthors(detail)
                 pageRoot.upPendantImage = detail.ownerPendant || ""
                 // view 接口的 owner 通常不下发 official_verify（恒 -1），UP 主认证
                 // 主要由 card 接口的 upVipReady 补齐；仅在有效值时才赋值，防止把
@@ -2488,6 +2580,7 @@ Rectangle {
             pageRoot.videoTitle = detail.title || ""
             pageRoot.upName = detail.ownerName || ""
             pageRoot.upFace = detail.ownerFace || ""
+            pageRoot.applyVideoAuthors(detail)
             pageRoot.upPendantImage = detail.ownerPendant || ""
             // view 接口的 owner 通常不下发 official_verify（恒 -1），UP 主认证
             // 主要由 card 接口的 upVipReady 补齐；仅在有效值时才赋值，防止把
@@ -4927,47 +5020,102 @@ Rectangle {
                     padding: 10
 
                     RowLayout {
+                        id: upInfoRow
                         anchors.fill: parent
-                        spacing: 10
+                        spacing: 0
 
-                        Rectangle {
-                            width: 44
-                            height: 44
-                            radius: 22
-                            color: "#40FFFFFF"
+                        // ===== 联合投稿：多位作者横向排列（可拖动，滚动条隐藏）=====
+                        Flickable {
+                            id: jointAuthorStrip
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: 48
                             Layout.alignment: Qt.AlignVCenter
-                            antialiasing: true
+                            visible: pageRoot.isJointVideo && pageRoot.videoAuthors.length > 0
+                            clip: true
+                            contentWidth: jointAuthorRow.width
+                            contentHeight: height
+                            boundsBehavior: Flickable.StopAtBounds
+                            flickableDirection: Flickable.HorizontalFlick
+                            ScrollBar.horizontal: FluScrollBar { policy: ScrollBar.AlwaysOff }
 
-                            AvatarWithPendant {
-                                anchors.centerIn: parent
-                                avatarSize: 40
-                                face: pageRoot.upFace
-                                pendantImage: pageRoot.upPendantImage
-                                verifyType: pageRoot.upVerify
-                                isVip: pageRoot.upVipType > 0
-                                hasCollect: pageRoot.upHasCollect
-                                placeholderText: "UP"
-                            }
+                            Row {
+                                id: jointAuthorRow
+                                spacing: 18
+                                anchors.verticalCenter: parent.verticalCenter
 
-                            // 头像可点击：打开 UP 主用户主页（经 App 广播由
-                            // 当前可见导航页处理：关闭视频 + 打开主页）
-                            MouseArea {
-                                anchors.fill: parent
-                                cursorShape: Qt.ArrowCursor
-                                onClicked: pageRoot.openUpProfile()
+                                Repeater {
+                                    model: pageRoot.videoAuthors
+
+                                    Row {
+                                        spacing: 5
+                                        anchors.verticalCenter: parent.verticalCenter
+
+                                        AvatarWithPendant {
+                                            avatarSize: 36
+                                            face: modelData.face || ""
+                                            verifyType: modelData.verify === undefined ? -1 : modelData.verify
+                                            isVip: modelData.vip === true
+                                            placeholderText: modelData.name ? modelData.name.charAt(0) : "UP"
+                                            anchors.verticalCenter: parent.verticalCenter
+                                        }
+
+                                        Column {
+                                            spacing: 2
+                                            anchors.verticalCenter: parent.verticalCenter
+
+                                            FluText {
+                                                text: modelData.name || ""
+                                                font: FluTextStyle.Body
+                                                color: modelData.vip === true ? "#FB7299" : FluTheme.fontPrimaryColor
+
+                                                MouseArea {
+                                                    anchors.fill: parent
+                                                    cursorShape: Qt.ArrowCursor
+                                                    onClicked: pageRoot.openUpProfileById(modelData.mid)
+                                                }
+                                            }
+
+                                            // 身份：UP主 / 参演 / 配音…（B站 staff 里的 title）
+                                            FluText {
+                                                text: (modelData.title && modelData.title.length > 0)
+                                                      ? modelData.title : "参演"
+                                                font: FluTextStyle.Caption
+                                                color: FluTheme.fontSecondaryColor
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
 
-                        ColumnLayout {
-                            Layout.fillWidth: true
-                            spacing: 2
+                        // 单人作者区：用普通 Row（顺序排布，间距完全可控）。
+                        // 不用 RowLayout 是因为它按"格子"分配宽度，实测会产生 20~30px 的隐形间隙，
+                        // spacing / leftMargin 都改不动。
+                        Row {
+                            Layout.fillWidth: !pageRoot.isJointVideo
+                            visible: !pageRoot.isJointVideo
+                            spacing: 6
 
-                            FluText {
-                                text: pageRoot.upName
-                                font: FluTextStyle.Body
-                                color: pageRoot.upVipType > 0 ? "#FB7299" : FluTheme.fontPrimaryColor
+                            Rectangle {
+                                id: upAvatarBox
+                                width: 44
+                                height: 44
+                                radius: 22
+                                color: "#40FFFFFF"
+                                antialiasing: true
+                                anchors.verticalCenter: parent.verticalCenter
 
-                                // 用户名可点击：打开 UP 主用户主页
+                                AvatarWithPendant {
+                                    anchors.centerIn: parent
+                                    avatarSize: 40
+                                    face: pageRoot.upFace
+                                    pendantImage: pageRoot.upPendantImage
+                                    verifyType: pageRoot.upVerify
+                                    isVip: pageRoot.upVipType > 0
+                                    hasCollect: pageRoot.upHasCollect
+                                    placeholderText: "UP"
+                                }
+
                                 MouseArea {
                                     anchors.fill: parent
                                     cursorShape: Qt.ArrowCursor
@@ -4975,54 +5123,80 @@ Rectangle {
                                 }
                             }
 
-                            FluText {
-                                text: pageRoot.upFans
-                                font: FluTextStyle.Caption
-                                color: FluTheme.fontSecondaryColor
-                                visible: pageRoot.upFans !== ""
+                            Column {
+                                id: upNameCol
+                                spacing: 2
+                                anchors.verticalCenter: parent.verticalCenter
+
+                                FluText {
+                                    text: pageRoot.upName
+                                    font: FluTextStyle.Body
+                                    color: pageRoot.upVipType > 0 ? "#FB7299" : FluTheme.fontPrimaryColor
+
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        cursorShape: Qt.ArrowCursor
+                                        onClicked: pageRoot.openUpProfile()
+                                    }
+                                }
+
+                                FluText {
+                                    text: pageRoot.upFans
+                                    font: FluTextStyle.Caption
+                                    color: FluTheme.fontSecondaryColor
+                                    visible: pageRoot.upFans !== ""
+                                }
                             }
-                        }
+                            // 名称与关注按钮之间留点空隙（Row 的 spacing 是 6，
+                            // 这里额外加 10，避免按钮贴着名字）
+                            Item {
+                                width: 10
+                                height: 1
+                            }
 
-                        // 未关注：FluFilledButton（主题色实底，醒目）；已关注：
-                        // FluButton（普通灰底，低调）。与直播播放页关注按钮一致
-                        Loader {
-                            Layout.preferredWidth: 70
-                            Layout.preferredHeight: 30
-                            sourceComponent: pageRoot.isFollowing ? followPlainBtn : followFilledBtn
+                            Loader {
+                                anchors.verticalCenter: parent.verticalCenter
+                                // 普通 Row 里不用 Layout.*，直接给尺寸
+                                width: 70
+                                height: 30
+                                sourceComponent: pageRoot.isFollowing ? followPlainBtn : followFilledBtn
+                                // 联合投稿：关注对象不明确（多作者），隐藏关注按钮
+                                visible: !pageRoot.isJointVideo
 
-                            Component {
-                                id: followFilledBtn
-                                FluFilledButton {
-                                    text: "+ 关注"
-                                    anchors.fill: parent
-                                    onClicked: {
-                                        if (pageRoot.mid === "") return
-                                        if (!pageRoot.requireLogin()) return
-                                        InteractionManager.followUser(pageRoot.mid, 1)
-                                        pageRoot.isFollowing = true
+                                Component {
+                                    id: followFilledBtn
+                                    FluFilledButton {
+                                        text: "+ 关注"
+                                        anchors.fill: parent
+                                        onClicked: {
+                                            if (pageRoot.mid === "") return
+                                            if (!pageRoot.requireLogin()) return
+                                            InteractionManager.followUser(pageRoot.mid, 1)
+                                            pageRoot.isFollowing = true
+                                        }
+                                    }
+                                }
+                                Component {
+                                    id: followPlainBtn
+                                    FluButton {
+                                        text: "已关注"
+                                        anchors.fill: parent
+                                        onClicked: {
+                                            if (pageRoot.mid === "") return
+                                            if (!pageRoot.requireLogin()) return
+                                            InteractionManager.followUser(pageRoot.mid, 2)
+                                            pageRoot.isFollowing = false
+                                        }
                                     }
                                 }
                             }
-                            Component {
-                                id: followPlainBtn
-                                FluButton {
-                                    text: "已关注"
-                                    anchors.fill: parent
-                                    onClicked: {
-                                        if (pageRoot.mid === "") return
-                                        if (!pageRoot.requireLogin()) return
-                                        InteractionManager.followUser(pageRoot.mid, 2)
-                                        pageRoot.isFollowing = false
-                                    }
-                                }
-                            }
                         }
-
-                        Item { Layout.fillWidth: true }
 
                         Row {
                             spacing: 12
-                            Layout.alignment: Qt.AlignVCenter
+                            // 靠右对齐：作者区是唯一的 fillWidth 项，这里再显式右对齐兜底
+                            Layout.alignment: Qt.AlignRight | Qt.AlignVCenter
+                            Layout.rightMargin: 0
 
                             Row {
                                 spacing: 4
@@ -5277,6 +5451,58 @@ Rectangle {
                         }
 
                         Item { Layout.fillWidth: true }
+
+                        Item { Layout.fillWidth: true }
+                    }
+                }
+
+                // ===== 视频标签（单独一行，放在互动栏下方）=====
+                Flickable {
+                    id: bottomTagStrip
+                    width: parent.width
+                    height: 26
+                    clip: true
+                    visible: pageRoot.videoTags.length > 0
+                    contentWidth: bottomTagRow.width
+                    contentHeight: height
+                    boundsBehavior: Flickable.StopAtBounds
+                    flickableDirection: Flickable.HorizontalFlick
+                    ScrollBar.horizontal: FluScrollBar { policy: ScrollBar.AlwaysOff }
+
+                    Row {
+                        id: bottomTagRow
+                        spacing: 6
+                        anchors.verticalCenter: parent.verticalCenter
+
+                        Repeater {
+                            model: pageRoot.videoTags
+
+                            Rectangle {
+                                height: 24
+                                width: bottomTagText.implicitWidth + 20
+                                radius: 12
+                                anchors.verticalCenter: parent.verticalCenter
+                                color: bottomTagHover.containsMouse ? FluTheme.itemHoverColor
+                                                                    : FluTheme.frameColor
+
+                                FluText {
+                                    id: bottomTagText
+                                    anchors.centerIn: parent
+                                    text: modelData.name || ""
+                                    font: FluTextStyle.Caption
+                                    color: FluTheme.fontSecondaryColor
+                                }
+
+                                MouseArea {
+                                    id: bottomTagHover
+                                    anchors.fill: parent
+                                    hoverEnabled: true
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: Qt.openUrlExternally(
+                                        "https://www.bilibili.com/tag/" + encodeURIComponent(modelData.name || ""))
+                                }
+                            }
+                        }
                     }
                 }
             }

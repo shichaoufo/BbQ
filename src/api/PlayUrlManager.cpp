@@ -1161,6 +1161,13 @@ QVariantMap PlayUrlManager::videoDetailToMap(const VideoDetail &detail) const
     map["pubdate"] = QString::number(detail.pubdate);
     map["pic"] = detail.pic;
     map["description"] = detail.description;
+    // QVariant 不接受 QList<QVariantMap>，转成 QVariantList 再交给 QML
+    QVariantList staffList;
+    staffList.reserve(detail.staff.size());
+    for (const QVariantMap &sm : detail.staff)
+        staffList.append(sm);
+    map["staff"] = staffList;
+    map["staffJson"] = detail.staffJson;
     map["reqLike"] = detail.reqLike;
     map["reqDislike"] = detail.reqDislike;
     map["reqCoin"] = detail.reqCoin;
@@ -1421,6 +1428,25 @@ void PlayUrlManager::getVideoUrlByAid(const QString &aid, const QString &overrid
         detail.ownerPendant = ownerPendant["image"].toString();
         detail.ownerVerify = owner["official_verify"].toObject()["type"].toInt(-1);
 
+        // ===== 联合投稿 staff =====
+        detail.staff.clear();
+        const QJsonArray staffArr = dataObj["staff"].toArray();
+        for (const QJsonValue &sv : staffArr) {
+            QJsonObject so = sv.toObject();
+            QVariantMap m;
+            m["mid"] = QString::number(so["mid"].toVariant().toLongLong());
+            m["name"] = so["name"].toString();
+            m["face"] = so["face"].toString();
+            // title 是身份（UP主/参演/配音/剪辑…），B站部分条目给的是 label
+            m["title"] = so["title"].toString(so["label"].toString());
+            m["vip"] = so["vip"].toObject()["status"].toInt(0) == 1;
+            m["verify"] = so["official"].toObject()["type"].toInt(-1);
+            if (!m["mid"].toString().isEmpty() && m["mid"].toString() != "0")
+                detail.staff.append(m);
+        }
+        detail.staffJson = QString::fromUtf8(
+            QJsonDocument(staffArr).toJson(QJsonDocument::Compact));
+
         QJsonObject stat = dataObj["stat"].toObject();
         detail.view = stat["view"].toVariant().toLongLong();
         detail.danmaku = stat["danmaku"].toVariant().toLongLong();
@@ -1564,6 +1590,24 @@ void PlayUrlManager::getVideoUrlByBvid(const QString &bvid, const QString &overr
         QJsonObject ownerPendant = owner["pendant"].toObject();
         detail.ownerPendant = ownerPendant["image"].toString();
         detail.ownerVerify = owner["official_verify"].toObject()["type"].toInt(-1);
+
+        // ===== 联合投稿 staff（第二个详情解析入口，播放页实际走这条）=====
+        detail.staff.clear();
+        const QJsonArray staffArr2 = dataObj["staff"].toArray();
+        for (const QJsonValue &sv : staffArr2) {
+            QJsonObject so = sv.toObject();
+            QVariantMap m;
+            m["mid"] = QString::number(so["mid"].toVariant().toLongLong());
+            m["name"] = so["name"].toString();
+            m["face"] = so["face"].toString();
+            m["title"] = so["title"].toString(so["label"].toString());
+            m["vip"] = so["vip"].toObject()["status"].toInt(0) == 1;
+            m["verify"] = so["official"].toObject()["type"].toInt(-1);
+            if (!m["mid"].toString().isEmpty() && m["mid"].toString() != "0")
+                detail.staff.append(m);
+        }
+        detail.staffJson = QString::fromUtf8(
+            QJsonDocument(staffArr2).toJson(QJsonDocument::Compact));
 
         QJsonObject stat = dataObj["stat"].toObject();
         detail.view = stat["view"].toVariant().toLongLong();

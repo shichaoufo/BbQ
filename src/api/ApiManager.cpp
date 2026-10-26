@@ -413,12 +413,13 @@ void ApiManager::getUserSpaceInfo(const QString &mid)
     });
 }
 
-void ApiManager::getUserSpaceVideos(const QString &mid, int pn, int ps, const QString &order)
+void ApiManager::getUserSpaceVideos(const QString &mid, int pn, int ps, const QString &order, bool forceApp)
 {
     LoginManager *loginMgr = LoginManager::instance();
 
-    // 未登录时 web API /x/space/wbi/arc/search 返回 -352 风控，改用 APP API
-    if (!loginMgr->isLoggedIn()) {
+    // 未登录时 web API /x/space/wbi/arc/search 返回 -352 风控，改用 APP API；
+    // forceApp：登录态但 web 返回错误/空列表时的兜底（部分官方账号会命中）
+    if (!loginMgr->isLoggedIn() || forceApp) {
         // APP API 使用 cursor 分页，第一页不传 aid
         // fnval + fnver 为必需参数，缺失会导致 -3 签名错误
         QString orderStr = (order == "click") ? "click" : "pubdate";
@@ -440,7 +441,12 @@ void ApiManager::getUserSpaceVideos(const QString &mid, int pn, int ps, const QS
                 return;
             }
             QByteArray data = reply->readAll();
-            qDebug() << "[ApiManager] getUserSpaceVideos (APP) response:" << data.left(500);
+            {
+                const QJsonObject appRoot = QJsonDocument::fromJson(data).object();
+                if (appRoot.value("code").toInt(-999) != 0)
+                    qWarning() << "[SpaceVideos] APP failed. code:" << appRoot.value("code").toInt(-999)
+                               << "msg:" << appRoot.value("message").toString();
+            }
 
             // 转换 APP API 响应为 web API 格式
             QJsonDocument doc = QJsonDocument::fromJson(data);
@@ -521,14 +527,28 @@ void ApiManager::getUserSpaceVideos(const QString &mid, int pn, int ps, const QS
     }
 
     QNetworkReply *reply = m_networkManager->get(request);
-    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, mid, pn, ps, order]() {
         if (reply->error() != QNetworkReply::NoError) {
             emit errorOccurred(reply->errorString());
             reply->deleteLater();
             return;
         }
         QByteArray data = reply->readAll();
-        qDebug() << "[ApiManager] getUserSpaceVideos response:" << data.left(500);
+
+        // Release 构建里 qDebug 被编译掉（QT_NO_DEBUG_OUTPUT），排障信息用 qWarning
+        const QJsonObject root = QJsonDocument::fromJson(data).object();
+        const int code = root.value("code").toInt(-999);
+        const QJsonArray vlist = root.value("data").toObject()
+                                     .value("list").toObject().value("vlist").toArray();
+        // web 接口失败（风控/权限）或返回空列表时，回退 APP 接口再试一次
+        if (code != 0 || vlist.isEmpty()) {
+            qWarning() << "[SpaceVideos] web failed, fallback to APP. code:" << code
+                       << "msg:" << root.value("message").toString() << "mid:" << mid;
+            getUserSpaceVideos(mid, pn, ps, order, true);
+            reply->deleteLater();
+            return;
+        }
+
         emit userSpaceVideosReceived(data);
         reply->deleteLater();
     });
@@ -1078,6 +1098,13 @@ void ApiManager::getVideoDetailByBvid(const QString &bvid)
     QString params = QString("&bvid=%1").arg(bvid);
     url += "?" + params;
     
+    getRequest(url);
+}
+
+void ApiManager::getVideoTags(const QString &bvid)
+{
+    // 视频标签（播放页标签墙用）。公开接口，无需 wbi 签名。
+    QString url = QString("https://api.bilibili.com/x/tag/archive/tags?bvid=%1").arg(bvid);
     getRequest(url);
 }
 
@@ -2106,6 +2133,8 @@ void ApiManager::onReplyFinished(QNetworkReply *reply)
         emit wbiRecommendVideosReceived(data);
     } else if (url.contains("search/type")) {
         emit searchResultsReceived(data);
+    } else if (url.contains("x/tag/archive/tags")) {
+        emit videoTagsReceived(data);
     } else if (url.contains("x/web-interface/view")) {
         emit videoDetailReceived(data);
     }

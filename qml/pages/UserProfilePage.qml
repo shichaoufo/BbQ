@@ -23,6 +23,10 @@ Rectangle {
 
     // ===== 基本属性 =====
     property string mid: ""
+    // 本次视频请求针对的 mid：用于丢弃"换人后才回来的旧响应"。
+    // 不能拿响应里的 vlist[0].mid 比 —— 联合投稿的视频在空间列表里
+    // 归属的是主投稿人（mid 可能完全不同），那样会把整批数据误判为过期。
+    property string _videoReqMid: ""
     property string userName: ""
     property string userFace: ""
     property string userSign: ""
@@ -288,6 +292,7 @@ Rectangle {
         }
         if (!pageRoot.videoHasMore) return
         pageRoot.videoLoading = true
+        pageRoot._videoReqMid = String(pageRoot.mid)
         Api.getUserSpaceVideos(pageRoot.mid, pageRoot.videoPage, pageRoot.videoPageSize, pageRoot.videoOrder)
     }
 
@@ -365,10 +370,10 @@ Rectangle {
                 }
                 var d = obj.data || {}
                 var list = d.list ? d.list.vlist : []
-                // 过期响应防御：换人后上一用户的视频响应才返回时丢弃。
-                // vlist 条目自带作者 mid；APP API（未登录）路径可能不含
-                // mid（为 0/undefined），此时不拦截，保持原行为
-                if (list.length > 0 && list[0].mid && String(list[0].mid) !== String(pageRoot.mid)) return
+                // 过期响应防御：只比较"这次请求的目标 mid"和"当前页面 mid"。
+                // 旧写法拿 vlist[0].mid 比对：联合投稿视频归属主投稿人，
+                // mid 与空间主人不同，会把正常数据整批丢掉（鸣潮的空间就是这么坏的）。
+                if (pageRoot._videoReqMid !== "" && String(pageRoot.mid) !== pageRoot._videoReqMid) return
                 var pageInfo = d.page || {}
                 pageRoot.videoTotal = pageInfo.count || 0
                 var totalPages = Math.ceil(pageRoot.videoTotal / pageRoot.videoPageSize)

@@ -24,7 +24,9 @@ public:
     // userType: 0=全部用户, 1=UP主, 2=普通用户, 3=认证用户
     Q_INVOKABLE void searchUser(const QString &keyword, int page = 1, int orderType = 0, int userType = 0);
     Q_INVOKABLE void getSearchSuggest(const QString &keyword);
-    void getVideoDetailByBvid(const QString &bvid);
+    Q_INVOKABLE void getVideoDetailByBvid(const QString &bvid);
+    // 视频标签列表（播放页标签墙）
+    Q_INVOKABLE void getVideoTags(const QString &bvid);
     void getVideoDetailByAid(const QString &aid);
     Q_INVOKABLE void getUserUploadedVideos(const QString &mid, int pn = 1, int ps = 20);
     void getRelatedVideos(const QString &aid);
@@ -83,6 +85,8 @@ signals:
     void searchUserReceived(const QByteArray &data);
     void searchSuggestReceived(const QStringList &words);
     void videoDetailReceived(const QByteArray &data);
+    // 视频标签（/x/tag/archive/tags）：播放页标签墙
+    void videoTagsReceived(const QByteArray &data);
     void liveListReceived(const QByteArray &data);
     void liveAreaListReceived(const QByteArray &data);
     void subAreaLiveListReceived(const QByteArray &data);
@@ -165,7 +169,9 @@ public:
     Q_INVOKABLE void getUserSpaceInfo(const QString &mid);
     // 用户投稿视频列表 - WBI签名
     // order: pubdate=最新发布, click=最多播放, stow=最多收藏
-    Q_INVOKABLE void getUserSpaceVideos(const QString &mid, int pn = 1, int ps = 30, const QString &order = "pubdate");
+    // forceApp=true 时强制走 APP 接口（web 接口风控或返回空时的兜底）
+    Q_INVOKABLE void getUserSpaceVideos(const QString &mid, int pn = 1, int ps = 30,
+                                        const QString &order = "pubdate", bool forceApp = false);
     // 用户空间动态列表（与动态综合页相同的API，指定host_mid）
     Q_INVOKABLE void getUserSpaceDynamics(const QString &mid, const QString &offset = "", int ps = 20);
 

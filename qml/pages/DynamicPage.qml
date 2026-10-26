@@ -44,6 +44,14 @@ FluPage {
 
     // 左侧 UP 主列表
     ListModel { id: upListModel }
+
+    // ===== 关注列表「有新动态」红点 =====
+    // 数据来自 uplist 接口的 has_update（服务端算好，非轮询）。
+    // 但登录时左侧列表走的是 followings 接口（完整关注列表，不带该字段），
+    // 所以两边并行请求，用 mid → hasUpdate 的 map 合并；map 与到达顺序无关。
+    property var _upHasUpdate: ({})
+    // 上次拉红点数据的时间戳（ms）：切回页面时用它做节流
+    property double _lastUpListFetch: 0
     // 综合动态列表
     // 两列瀑布流由 C++ 的 MasonryView 负责（单滚动源 + 虚拟化 + 零留白），
     // 这里只保留一个模型：列分配、累计高度、可见项创建/回收都在视图内部完成。
@@ -202,6 +210,18 @@ FluPage {
 
     // 动态图片 URL：包一层 GlobalState.fixImageUrl，把方形缩略图的服务端裁剪锚点
     // 由固定居中(1e_1c)换成按图片朝向选择（见 dynamicCropAnchor）。crop=false 时与 fixImageUrl 完全一致。
+    // 直播分区显示：父分区 + 子分区。
+    // 有时两者相同（如父分区、子分区都叫"购物"），拼起来会变成"购物 购物"，
+    // 这种情况只显示一次。
+    function liveCategory(parentArea, area) {
+        var p = (parentArea || "").trim()
+        var a = (area || "").trim()
+        if (!p) return a
+        if (!a) return p
+        if (p === a) return a
+        return p + " " + a
+    }
+
     function dynamicImageUrl(pic, width, height, crop) {
         var url = GlobalState.fixImageUrl(pic && pic.src ? pic.src : "", width, height, crop)
         if (crop && url.indexOf("_1e_1c.") >= 0)
@@ -259,18 +279,32 @@ FluPage {
             //（与 HomePage/HistoryPage 的既定行为一致）
             if (videoVisible) closeVideoPlayer()
             if (liveVisible) closeLiveRoom()
+            return
+        }
+        // 重新切回动态页：轻量刷新一次红点状态。
+        // uplist 只返回一个子集，请求很小；加 30s 节流，避免来回切页刷接口。
+        if (_pageReady && Login.isLoggedIn) {
+            var now = Date.now()
+            if (now - _lastUpListFetch > 30000) {
+                _lastUpListFetch = now
+                Api.getDynamicUpList()
+            }
         }
     }
 
     function loadUpList() {
         // 登录时使用 /x/relation/followings 接口获取完整关注列表（支持分页）
         // 未登录时回退到 uplist 接口（会触发登录提示）
+        _upHasUpdate = ({})
+        _lastUpListFetch = Date.now()
         if (Login.isLoggedIn) {
             _followingsGeneration++
             _followingsPage = 0
             _followingsTotal = -1
             upListModel.clear()
             _loadFollowingsPage(1)
+            // 关注列表接口不带"有无新动态"，额外拉一次 uplist 拿 has_update 合并进来
+            Api.getDynamicUpList()
         } else {
             Api.getDynamicUpList()
         }
@@ -294,13 +328,23 @@ FluPage {
         var total = (doc.data && doc.data.total !== undefined) ? doc.data.total : 0
         _followingsTotal = total
 
+        // 已有 mid 集合：分页重入或其他数据源插队时不会插入重复行
+        var existing = ({})
+        for (var e = 0; e < upListModel.count; e++)
+            existing[String(upListModel.get(e).mid)] = true
+
         for (var i = 0; i < list.length; i++) {
             var item = list[i]
+            var mid = Number(item.mid) || 0
+            var key = String(mid)
+            if (existing[key]) continue
+            existing[key] = true
             upListModel.append({
-                mid: Number(item.mid) || 0,
+                mid: mid,
                 name: item.uname || "",
                 face: item.face || "",
-                hasUpdate: false
+                // followings 接口没有该字段，用并行拿到的 uplist 结果补
+                hasUpdate: _upHasUpdate[key] === true
             })
         }
 
@@ -374,15 +418,45 @@ FluPage {
             }
             return
         }
-        upListModel.clear()
-        var items = doc.data && doc.data.items ? doc.data.items : []
+        // 结构是 data.up_list.items（不是 data.items）：
+        // { data: { up_list: { items: [{mid,uname,face,has_update}], has_more, offset }, live_users } }
+        // 之前按 data.items 取，永远空数组，红点一个都不亮。
+        var upRoot = (doc.data && doc.data.up_list) ? doc.data.up_list : doc.data
+        var items = (upRoot && upRoot.items) ? upRoot.items : []
+
+        // 1) 先落进 map：与 followings 的到达顺序无关
         for (var i = 0; i < items.length; i++) {
-            var item = items[i]
+            var it = items[i]
+            var mid = Number(it.mid) || 0
+            if (mid > 0)
+                _upHasUpdate[String(mid)] = it.has_update === true
+        }
+
+        // 2) 关注列表已经填好了：只更新红点，不重建列表
+        if (upListModel.count > 0) {
+            for (var j = 0; j < upListModel.count; j++) {
+                var row = upListModel.get(j)
+                var v = _upHasUpdate[String(row.mid)]
+                if (v !== undefined && row.hasUpdate !== v)
+                    upListModel.setProperty(j, "hasUpdate", v)
+            }
+            return
+        }
+
+        // 3) 登录态下以 followings 为唯一列表来源。
+        //    这里如果也去填充，会和 followings 的分页结果叠加成两份（uplist 先到就会重复），
+        //    所以登录时只把它当"红点数据源"。
+        if (Login.isLoggedIn)
+            return
+
+        // 4) 未登录：uplist 本身就是列表来源
+        for (var k = 0; k < items.length; k++) {
+            var item = items[k]
             upListModel.append({
                 mid: Number(item.mid) || 0,
                 name: item.uname || "",
                 face: item.face || "",
-                hasUpdate: item.has_update || false
+                hasUpdate: item.has_update === true
             })
         }
     }
@@ -523,6 +597,7 @@ FluPage {
             // 初始化完整 cardbg，show 强制 bool，避免 JSON.parse 回来后 show=undefined 导致 CommentCardBg 的 visible 赋值 bool 失败
             cardbg: { show: false, image: "", fanNumDesc: "", fanColor: "#FB7299" },
             time: "",
+            pubTs: 0,           // 发布时间戳：用于左侧关注列表的「有新动态」红点
             // MODULE_TYPE_TITLE.module_title.text：活动/合集等标签（opus 里也当标题用）
             tagText: "",
             // 动态所属话题（module_dynamic.topic / MODULE_TYPE_TOPIC）：
@@ -568,8 +643,9 @@ FluPage {
                 // 接口新版本给的是 pub_text（相对时间字符串），但不少条目（尤其转发内层）
                 // 只有 pub_ts，pub_text 为空 —— 这里用时间戳补上，否则转发卡片没有时间
                 result.time = authorData.pub_text || ""
-                if (!result.time && authorData.pub_ts)
-                    result.time = formatTime(Number(authorData.pub_ts))
+                result.pubTs = Number(authorData.pub_ts || 0)
+                if (!result.time && result.pubTs > 0)
+                    result.time = formatTime(result.pubTs)
 
                 // ===== 头像框 pendant（装扮）=====
                 if (user.pendant) {
@@ -2409,11 +2485,24 @@ FluPage {
                             anchors.rightMargin: Theme.pageMargins
                             spacing: 12
 
-                            CircleAvatar {
+                            Item {
                                 Layout.preferredWidth: 36
                                 Layout.preferredHeight: 36
-                                source: model.face
-                                placeholderText: model.name ? model.name.charAt(0) : ""
+
+                                CircleAvatar {
+                                    anchors.fill: parent
+                                    source: model.face
+                                    placeholderText: model.name ? model.name.charAt(0) : ""
+                                }
+
+                                // 有新动态：头像右上角红点。
+                                // 数据来自 uplist 接口的 has_update（服务端算，非轮询），
+                                // 与 PiliPlus 的 item.hasUpdate 同一套。
+                                FluBadge {
+                                    isDot: true
+                                    position: "topRight"
+                                    visible: model.hasUpdate === true
+                                }
                             }
 
                             FluText {
@@ -2428,7 +2517,11 @@ FluPage {
                         MouseArea {
                             anchors.fill: parent
                             hoverEnabled: true
-                            onClicked: selectUp(model.mid, model.name, model.face)
+                            onClicked: {
+                                // 乐观更新：点开即清红点，下次拉 uplist 以服务端 has_update 为准
+                                upListModel.setProperty(index, "hasUpdate", false)
+                                selectUp(model.mid, model.name, model.face)
+                            }
                         }
                     }
                 }
@@ -3044,7 +3137,7 @@ FluPage {
                                                             cover: liveData.cover || ""
                                                             streamer: liveData.streamer || (itemHasForward && itemForward.author) || ""
                                                             viewers: liveData.viewers || ""
-                                                            category: (liveData.parentArea ? liveData.parentArea + " " : "") + (liveData.area || "")
+                                                            category: dynamic_page.liveCategory(liveData.parentArea, liveData.area)
 
                                                             onClicked: dynamic_page.openLiveRoom(liveData.roomId || "", liveData.title || "", liveData.streamer || "")
                                                         }
@@ -3260,7 +3353,7 @@ FluPage {
                                                     cover: liveData.cover || ""
                                                     streamer: liveData.streamer || (itemData && itemData.author) || ""
                                                     viewers: liveData.viewers || ""
-                                                    category: (liveData.parentArea ? liveData.parentArea + " " : "") + (liveData.area || "")
+                                                    category: dynamic_page.liveCategory(liveData.parentArea, liveData.area)
 
                                                     onClicked: dynamic_page.openLiveRoom(liveData.roomId || "", liveData.title || "", liveData.streamer || "")
                                                 }
@@ -4314,7 +4407,7 @@ FluPage {
                                                 cover: liveData.cover || ""
                                                 streamer: liveData.streamer || detailForwardCard.forwardData.author || ""
                                                 viewers: liveData.viewers || ""
-                                                category: (liveData.parentArea ? liveData.parentArea + " " : "") + (liveData.area || "")
+                                                category: dynamic_page.liveCategory(liveData.parentArea, liveData.area)
 
                                                 onClicked: dynamic_page.openLiveRoom(liveData.roomId || "", liveData.title || "", liveData.streamer || "")
                                             }
@@ -4547,7 +4640,7 @@ FluPage {
                                         cover: liveData.cover || ""
                                         streamer: liveData.streamer || (currentDynamic ? currentDynamic.author : "") || ""
                                         viewers: liveData.viewers || ""
-                                        category: (liveData.parentArea ? liveData.parentArea + " " : "") + (liveData.area || "")
+                                        category: dynamic_page.liveCategory(liveData.parentArea, liveData.area)
 
                                         onClicked: dynamic_page.openLiveRoom(liveData.roomId || "", liveData.title || "", liveData.streamer || "")
                                     }
