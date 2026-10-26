@@ -289,6 +289,9 @@ public:
 
         mpv_render_context_render(ctx, params);
 
+        // 与 D3D11 实现对齐：真正画出一帧才 +1，供 QML 的画面卡死看门狗判断。
+        m_renderedFrames.fetch_add(1, std::memory_order_relaxed);
+
         // 注意：MPV_RENDER_PARAM_ADVANCED_CONTROL 要求 report_swap 在画面真正被 swap 到屏幕后调用。
         // 但 QQuickFramebufferObject::render() 只是渲染到 FBO，真正的窗口 swap 由 Qt 在更晚阶段完成，
         // 我们难以在正确的时机调用 report_swap。若在此处提前调用，mpv 的帧节奏控制会出错，
@@ -1464,6 +1467,11 @@ void MpvObject::loadFile(const QString &file)
     QByteArray fileData = file.toUtf8();
     const char *cmd[] = {"loadfile", fileData.constData(), "replace", nullptr};
     mpv_command_async(m_mpv, 0, cmd);
+}
+
+qint64 MpvObject::renderedFrameCount() const
+{
+    return m_renderedFrames.load(std::memory_order_relaxed);
 }
 
 QVariantMap MpvObject::getVideoInfo()

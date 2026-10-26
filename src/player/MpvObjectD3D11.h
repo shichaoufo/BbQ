@@ -76,6 +76,12 @@ public:
     Q_INVOKABLE void updatePosition();
     Q_INVOKABLE QVariantMap getVideoInfo();
 
+    // 已渲染帧计数（单调递增）。
+    // 给 QML 的"音频在走、画面卡住"看门狗用：只在 renderMpv() 里 +1，
+    // 所以"数值不变"就等于"确实没有新画面输出"（暂停/正常播放都会变，
+    // 卡在最后一帧则不变）。与 position 是否前进联合判断即可定位卡顿。
+    Q_INVOKABLE qint64 renderedFrameCount() const;
+
     // ===== 字幕（外挂字幕轨）=====
     // 与 MpvObject 同签名同语义。B站字幕是独立的 bcc JSON 文件
     // （player/wbi/v2 响应 data.subtitle.subtitles[].subtitle_url），
@@ -181,6 +187,10 @@ private:
     // from the Qt render thread (updatePaintNode / ensureD3D11Resources).
     std::atomic<int> m_videoWidth{0};
     std::atomic<int> m_videoHeight{0};
+
+    // 渲染线程累加、GUI 线程读取的"真的画出去多少帧"计数。
+    // 用于 QML 侧的画面卡死看门狗（见 renderedFrameCount()）。
+    std::atomic<qint64> m_renderedFrames{0};
 
     // Stale textures from previous resizes. They are intentionally kept alive
     // until destruction to avoid releasing GPU resources while the D3D11

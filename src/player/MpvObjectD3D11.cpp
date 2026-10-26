@@ -401,13 +401,18 @@ void MpvObjectD3D11::applyCacheOptions()
         mpv_set_option_string(m_mpv, "vf", "");
     } else {
         // 视频点播：大 cache 抗网络抖动，避免 CDN 断流时 demuxer 缓存耗尽停住
-        // 30s 前向 + 32M 字节上限（约 30-60s 1080p 视频数据）
-        // 16M 回看缓冲（seek 后退时不需重新下载）
+        //
+        // 注意 DASH 是**两路独立 demuxer**：视频（-30077/-30080）与音频
+        // （-30280）各一条 HTTP 连接、各一份缓存，CDN 掐其中一路时另一路照跑。
+        // 视频码率通常是音频的 10-20 倍，同样秒数吃掉的数据量完全不同，
+        // 所以"视频先断"是常态 —— 表现就是本次要修的"画面停住、声音还在"。
+        // 这里把前向缓存从 30s/64M 提到 45s/96M：断流瞬间多留 15s 余量，
+        // 配合 QML 侧的画面看门狗（检测到冻结自动换 CDN 续播）即可自愈。
         mpv_set_option_string(m_mpv, "cache", "yes");
-        mpv_set_option_string(m_mpv, "cache-secs", "30");
-        mpv_set_option_string(m_mpv, "demuxer-max-bytes", "64M");
-        mpv_set_option_string(m_mpv, "demuxer-max-back-bytes", "16M");
-        mpv_set_option_string(m_mpv, "demuxer-readahead-secs", "30");
+        mpv_set_option_string(m_mpv, "cache-secs", "45");
+        mpv_set_option_string(m_mpv, "demuxer-max-bytes", "96M");
+        mpv_set_option_string(m_mpv, "demuxer-max-back-bytes", "24M");
+        mpv_set_option_string(m_mpv, "demuxer-readahead-secs", "45");
         mpv_set_option_string(m_mpv, "vf", "amf_frc");
     }
 }
@@ -1461,6 +1466,14 @@ void MpvObjectD3D11::renderMpv()
 
     mpv_render_context_render(m_mpvRender, params);
     mpv_render_context_report_swap(m_mpvRender);
+
+    // 只有真正执行到这里才算"画出去一帧"：QML 侧看门狗靠它判断画面是否停住。
+    m_renderedFrames.fetch_add(1, std::memory_order_relaxed);
+}
+
+qint64 MpvObjectD3D11::renderedFrameCount() const
+{
+    return m_renderedFrames.load(std::memory_order_relaxed);
 }
 
 void MpvObjectD3D11::reinitVideoChain()

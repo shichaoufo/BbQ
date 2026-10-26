@@ -94,6 +94,11 @@ Rectangle {
     property int playbackRetryCount: 0
     property int _savedPositionBeforeRetry: 0
     property bool _retryingPlayback: false
+    // 画面卡死看门狗状态（见文件后部 videoStallWatchdog 的长注释）
+    property int _stallTicks: 0
+    property int _stallRecoverCount: 0
+    property int _stallLastFrames: -1
+    property int _stallLastPos: -1
     
     // 番剧相关属性
     property bool isBangumi: false
@@ -1661,6 +1666,11 @@ Rectangle {
         pageRoot.playbackRetryCount = 0
         pageRoot._retryingPlayback = false
         pageRoot._savedPositionBeforeRetry = 0
+        // 画面看门狗复位（换视频后重新计数，否则沿用上一个视频的冻结计数）
+        pageRoot._stallTicks = 0
+        pageRoot._stallRecoverCount = 0
+        pageRoot._stallLastFrames = -1
+        pageRoot._stallLastPos = -1
         // 字幕状态复位：换视频必须清空字幕轨，否则切到"无字幕"的新视频时，
         // 新视频发出的空列表会被 onSubtitleListReady 的"空列表不覆盖非空"
         // 守卫拦下，导致**残留上一个视频的字幕按钮**（点进去是别人的字幕）
@@ -1855,6 +1865,63 @@ Rectangle {
             
             mpvPlayer.play()
             pageRoot._pendingSeek = pageRoot._savedPositionBeforeRetry
+        }
+    }
+
+    // ===== 画面卡死看门狗：音频在走、画面不动 =====
+    //
+    // 症状：播放中突然"声音正常、画面停在最后一帧"，不报错、不退出。
+    //
+    // 机制（不是猜的，对着 mpv 行为推的）：B站 DASH 的视频流（-30077 等）
+    // 与音频流（-30280）是**两条独立的 HTTP 连接、两个 demuxer**。
+    // CDN 掐断其中一条时，另一条照跑：
+    //   · 掐音频 → 声音消失、画面继续（2026-10-17 已修，去 Cookie 降低风控命中）
+    //   · 掐视频 → 视频轨走到 EOF，配合 keep-open 把最后一帧一直挂着；
+    //              而 video-sync=audio 让音频继续当主时钟往前跑
+    //              => 正是现在这个"音频正常、画面卡住"
+    // 两个症状是同一机制的两个方向，所以修法同构：**检测 + 自愈**，而不是合并流。
+    //
+    // 判定条件（三个同时满足才算卡）：
+    //   1. 在播放、有视频轨、不是拖进度后的加载中
+    //   2. position 在前进（音频时钟在走，排除"整体缓冲中")
+    //   3. renderedFrameCount 连续 3 秒不变（真的没有新画面输出）
+    // 处理：换 CDN 备份地址 + 回到原位置重播（复用 playbackRetryTimer 那条链路，
+    // 它会轮换 videoBackupUrls/audioBackupUrls）。最多自愈 2 次，避免死循环。
+    Timer {
+        id: videoStallWatchdog
+        interval: 1000
+        repeat: true
+        running: pageRoot.visible && mpvPlayer.playing && mpvPlayer.hasVideo
+                 && mpvPlayer.duration > 0 && !pageRoot.wasClosed
+        onTriggered: {
+            var frames = mpvPlayer.renderedFrameCount()
+            var pos = mpvPlayer.position
+
+            var framesMoved = (pageRoot._stallLastFrames >= 0 && frames !== pageRoot._stallLastFrames)
+            var posAdvanced = (pageRoot._stallLastPos >= 0 && pos > pageRoot._stallLastPos)
+
+            if (framesMoved || !posAdvanced) {
+                // 有画面输出，或时间根本没走（缓冲/刚起播/暂停）—— 不算卡
+                pageRoot._stallTicks = 0
+            } else {
+                pageRoot._stallTicks += 1
+            }
+
+            pageRoot._stallLastFrames = frames
+            pageRoot._stallLastPos = pos
+
+            if (pageRoot._stallTicks >= 3 && pageRoot._stallRecoverCount < 2
+                    && !pageRoot._retryingPlayback) {
+                pageRoot._stallRecoverCount += 1
+                console.warn("[VideoStall] 画面停住 " + pageRoot._stallTicks + "s（音频仍在走），"
+                             + "换 CDN 续播 attempt=" + pageRoot._stallRecoverCount
+                             + " pos=" + pos + " frames=" + frames)
+                pageRoot._stallTicks = 0
+                pageRoot._savedPositionBeforeRetry = pos
+                pageRoot.playbackRetryCount += 1
+                pageRoot._retryingPlayback = true
+                playbackRetryTimer.restart()
+            }
         }
     }
 

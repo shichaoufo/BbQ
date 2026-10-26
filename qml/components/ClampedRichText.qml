@@ -22,13 +22,34 @@ Item {
     signal linkActivated(string link)
     signal moreClicked()
 
-    TextMetrics {
-        id: metrics
-        font: root.bodyFont
-        text: "国"
+    // 探针：让 Qt 自己把 maxLines 行排一遍，读它的真实整块高度。
+    //
+    // 为什么不能用 TextMetrics.height × maxLines（原来就是这么写的）：
+    // TextMetrics.height 是**单行字体度量**（ascent+descent，可能是小数），
+    // 而真实排版会**逐行向上取整**。实测 Qt 6.11 / 微软雅黑 / pointSize 14：
+    //   100% 缩放：metrics.height = 24.000，实际每行 24px，5 行 = 120  → 差值 0，看不出来
+    //   150% 缩放：metrics.height = 24.125，实际每行 25px，5 行 = 125
+    //              metrics × 5 = 120.625 → 裁掉 4.4px，正好把最后一行切掉下半截
+    // 单行的小数误差乘以行数就会被放大 —— 这就是"只有 150% 才截断"的原因。
+    readonly property string _probeText: {
+        var n = Math.max(1, root.maxLines)
+        var s = ""
+        for (var i = 0; i < n; i++) s += (i === 0 ? "" : "\n") + "国"
+        return s
     }
-    readonly property real lineH: Math.max(12, metrics.height)
-    readonly property real bodyH: lineH * Math.max(1, root.maxLines)
+
+    Text {
+        id: lineProbe
+        visible: false
+        text: root._probeText
+        font: root.bodyFont
+        textFormat: Text.PlainText
+        wrapMode: Text.NoWrap
+    }
+
+    // N 行整块的精确高度（已含逐行取整）
+    readonly property real lineH: Math.max(1, lineProbe.implicitHeight / Math.max(1, root.maxLines))
+    readonly property real bodyH: Math.max(1, lineProbe.implicitHeight)
     readonly property bool truncated: body.implicitHeight > bodyH + 1
 
     implicitHeight: Math.min(body.implicitHeight, bodyH)

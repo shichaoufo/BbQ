@@ -70,6 +70,10 @@ public:
     // 获取实际播放的视频参数（宽、高、codec、fps、bitrate 等），用于验证当前流的真实画质
     Q_INVOKABLE QVariantMap getVideoInfo();
 
+    // 已渲染帧计数（单调递增）。与 D3D11 实现同签名同语义，
+    // QML 的画面卡死看门狗直接调用，不做平台分支。
+    Q_INVOKABLE qint64 renderedFrameCount() const;
+
     // ===== 字幕（外挂字幕轨）=====
     // B站字幕不在视频流里，是独立的 bcc JSON 文件（player/wbi/v2 响应
     // data.subtitle.subtitles[].subtitle_url）。本方法负责下载、转成 SRT、
@@ -208,6 +212,9 @@ private:
     // ==================================================================
     QMutex m_renderMutex;
     std::atomic<bool> m_shuttingDown{false};
+
+    // 渲染线程累加、GUI 线程读取的"真的画出去多少帧"计数。
+    std::atomic<qint64> m_renderedFrames{0};
 
     // "渲染上下文已被重建、需要重选视频轨"的标记。由 MpvRenderer 置位，
     // 下一次渲染定时器在 GUI 线程消费。渲染线程→GUI 线程，用 atomic 同步。
