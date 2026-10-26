@@ -541,3 +541,19 @@ if(CMAKE_BUILD_TYPE STREQUAL "Debug")
         COMMENT "Copying QML files to output directory for hot reload..."
     )
 endif()
+
+# ===== 客户端"文件夹开关"配置文件（Windows）=====
+# 有一批功能是靠 exe 同目录的文件开启的，缺文件时**静默关闭**：
+#   · bsb.conf              空降助手接口基地址（默认 https://www.bsbsb.top/）
+#   · mpv-config/mpv.conf   mpv 选项（Windows 的 mpv config-dir 就指这个目录）
+# 新克隆/换机器很容易漏，症状是"功能莫名其妙没有"。构建后自动补默认值。
+# 注意：脚本是**只创建、不覆盖**，用户手改的 mpv.conf / bsb.conf 不会被清掉。
+if(WIN32)
+    add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+        COMMAND ${CMAKE_COMMAND}
+            "-DOUT_DIR=$<TARGET_FILE_DIR:${PROJECT_NAME}>"
+            "-DSRC_DIR=${CMAKE_SOURCE_DIR}"
+            -P ${CMAKE_SOURCE_DIR}/scripts/ensure_runtime_configs.cmake
+        COMMENT "Ensuring default bsb.conf / mpv-config/mpv.conf ..."
+    )
+endif()
