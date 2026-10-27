@@ -186,6 +186,8 @@ set(QML_RESOURCE_FILES
     qml/pages/LiveFollowingPage.qml
     qml/pages/LivePlayerPage.qml
     qml/pages/SearchPage.qml
+    qml/pages/SearchLanding.qml
+    qml/pages/SearchResultPage.qml
     qml/pages/VideoPlayerPage.qml
     qml/pages/DynamicPage.qml
     qml/pages/HistoryPage.qml
@@ -302,6 +304,8 @@ qt_add_qml_module(${PROJECT_NAME}
         qml/pages/LiveFollowingPage.qml
         qml/pages/LivePlayerPage.qml
         qml/pages/SearchPage.qml
+        qml/pages/SearchLanding.qml
+        qml/pages/SearchResultPage.qml
         qml/pages/VideoPlayerPage.qml
         qml/pages/DynamicPage.qml
         qml/pages/HistoryPage.qml

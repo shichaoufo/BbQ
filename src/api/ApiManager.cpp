@@ -1092,6 +1092,33 @@ void ApiManager::getSearchSuggest(const QString &keyword)
     });
 }
 
+void ApiManager::getSearchSquare(int limit)
+{
+    // 搜索首页的「大家都在搜」。接口不需要 wbi 签名，未登录可直接拿；
+    // 返回 data.trending.list[]，每项 { keyword, show_name, icon, heat_score }，
+    // icon 就是「热/新」那类小角标图。这里原样把 JSON 丢给 QML，
+    // 由界面决定切多少条给「大家都在搜」、多少条给「搜索发现」。
+    QString url = QString("https://api.bilibili.com/x/web-interface/search/square?limit=%1")
+                      .arg(qBound(1, limit, 50));
+
+    QNetworkRequest request{QUrl(url)};
+    request.setRawHeader(QByteArray("User-Agent"), QByteArray("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"));
+    request.setRawHeader(QByteArray("Referer"), QByteArray("https://search.bilibili.com/"));
+    request.setRawHeader(QByteArray("Accept"), QByteArray("application/json, text/plain, */*"));
+    request.setAttribute(QNetworkRequest::CacheLoadControlAttribute, QNetworkRequest::AlwaysNetwork);
+
+    QNetworkReply *reply = m_networkManager->get(request);
+    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        if (reply->error() == QNetworkReply::NoError) {
+            emit searchSquareReceived(reply->readAll());
+        } else {
+            qWarning() << "[ApiManager] getSearchSquare network error:" << reply->errorString();
+            emit searchSquareReceived(QByteArray());
+        }
+        reply->deleteLater();
+    });
+}
+
 void ApiManager::getVideoDetailByBvid(const QString &bvid)
 {
     QString url = m_apiBaseUrl + "/x/web-interface/view";

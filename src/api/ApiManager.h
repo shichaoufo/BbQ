@@ -24,6 +24,10 @@ public:
     // userType: 0=全部用户, 1=UP主, 2=普通用户, 3=认证用户
     Q_INVOKABLE void searchUser(const QString &keyword, int page = 1, int orderType = 0, int userType = 0);
     Q_INVOKABLE void getSearchSuggest(const QString &keyword);
+    // 搜索首页热词（大家都在搜 / 搜索发现）。
+    // 接口 /x/web-interface/search/square 不需要 wbi 签名，未登录也能拿到。
+    // limit 取 24：前 12 条给「大家都在搜」，其余给「搜索发现」。
+    Q_INVOKABLE void getSearchSquare(int limit = 24);
     Q_INVOKABLE void getVideoDetailByBvid(const QString &bvid);
     // 视频标签列表（播放页标签墙）
     Q_INVOKABLE void getVideoTags(const QString &bvid);
@@ -84,6 +88,9 @@ signals:
     void searchLiveReceived(const QByteArray &data);
     void searchUserReceived(const QByteArray &data);
     void searchSuggestReceived(const QStringList &words);
+    // 搜索首页「大家都在搜/搜索发现」：/x/web-interface/search/square
+    // 返回原始 JSON，由 QML 侧切分（trending.list 的 keyword/show_name/icon）
+    void searchSquareReceived(const QByteArray &data);
     void videoDetailReceived(const QByteArray &data);
     // 视频标签（/x/tag/archive/tags）：播放页标签墙
     void videoTagsReceived(const QByteArray &data);
