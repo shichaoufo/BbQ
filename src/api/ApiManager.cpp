@@ -13,6 +13,7 @@
 #include <QSslError>
 #include <QSettings>
 #include <QRandomGenerator>
+#include <functional>
 
 ApiManager::ApiManager(QObject *parent)
     : QObject(parent)
@@ -1927,54 +1928,136 @@ void ApiManager::sendLiveDanmakuEmoticon(const QString &roomId, const QString &e
                         query, roomId);
 }
 
-// 天选时刻一键参与：POST /xlive/lottery-interface/v1/Anchor/JoinLottery
-// （B 站网页直播原生接口，cookie+csrf）。lotteryId 来自 ANCHOR_LOT_START
-// 推送的 data.id。服务端按房间配置自动完成发弹幕/关注/投喂等条件。
-// 内联 POST 而非复用 sendLiveDanmakuPost：那货固定发
-// liveDanmakuSendResult 信号，参与结果必须走自己的 anchorLotteryJoinResult
-void ApiManager::joinLiveLottery(const QString &roomId, const QString &lotteryId)
+// 天选时刻一键参与。
+//
+// 正确端点是 POST /xlive/lottery-interface/v1/Anchor/Join
+//   表单：room_id / id / platform=pc / csrf
+// （此前写成 /Anchor/JoinLottery，服务端没有这个路径，一直返回 404。
+//  另外必须带 room_id 与 platform=pc，缺了也会被拒。）
+//
+// 条件不由服务端代做：require_type=1（关注主播）与 danmu（口令弹幕）都得
+// 客户端先自己完成，官方网页端同样是「关注 → 发弹幕 → 参与」三步。
+// 这里串行执行，前面一步失败也继续（已关注会返回 22014，弹幕有频率限制
+// 也可能失败，但都不该挡住参与），只把最后 Join 的结果回给 QML。
+void ApiManager::joinLiveLottery(const QString &roomId, const QString &lotteryId,
+                                 const QString &anchorMid, int requireType,
+                                 const QString &danmu)
 {
-    QString cookies = LoginManager::instance()->getCookies();
+    LoginManager *loginMgr = LoginManager::instance();
+    QString cookies = loginMgr->getCookies();
     QString csrf = getCSRFToken();
     if (cookies.isEmpty() || csrf.isEmpty()) {
         emit anchorLotteryJoinResult(QByteArray("{\"code\":-101,\"message\":\"未登录\"}"));
         return;
     }
 
-    QUrlQuery query;
-    query.addQueryItem("id", lotteryId);
-    query.addQueryItem("csrf_token", csrf);
-    query.addQueryItem("csrf", csrf);
-    QByteArray postData = query.toString(QUrl::FullyEncoded).toUtf8();
-
-    QUrl qurl("https://api.live.bilibili.com/xlive/lottery-interface/v1/Anchor/JoinLottery");
-    QNetworkRequest request(qurl);
-    request.setHeader(QNetworkRequest::ContentTypeHeader, "application/x-www-form-urlencoded");
-    request.setRawHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
-    request.setRawHeader("Referer", QString("https://live.bilibili.com/%1").arg(roomId).toUtf8());
-    request.setRawHeader("Origin", "https://live.bilibili.com");
-    request.setRawHeader("Accept", "application/json, text/plain, */*");
-    request.setRawHeader("Cookie", cookies.toUtf8());
-
-    QSslConfiguration config = QSslConfiguration::defaultConfiguration();
-    config.setPeerVerifyMode(QSslSocket::VerifyNone);
-    request.setSslConfiguration(config);
-
-    QNetworkReply *reply = m_networkManager->post(request, postData);
-    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
-        if (reply->error() != QNetworkReply::NoError) {
-            qWarning() << "[ApiManager] joinLiveLottery network error:"
-                       << reply->errorString();
-            emit anchorLotteryJoinResult(QByteArray("{\"code\":-1,\"message\":\"network error: "
-                                                    + reply->errorString().toUtf8() + "\"}"));
-            reply->deleteLater();
-            return;
+    // Anchor/Join 明确要求 cookie 里带 buvid3（设备指纹），而登录 cookie
+    // 未必含它 —— 缺了会被风控挡下。与 getUserSpaceDynamics 同法补齐。
+    auto appendCookie = [&cookies](const QString &key, const QString &val) {
+        if (val.isEmpty()) return;
+        if (!cookies.contains(key + "=")) {
+            if (!cookies.endsWith("; ")) cookies += "; ";
+            cookies += QString("%1=%2; ").arg(key, val);
         }
-        QByteArray data = reply->readAll();
-        qDebug() << "[ApiManager] joinLiveLottery response:" << data.left(500);
-        emit anchorLotteryJoinResult(data);
-        reply->deleteLater();
-    });
+    };
+    appendCookie("buvid3", loginMgr->getOrCreateBuvid3());
+    appendCookie("buvid4", loginMgr->getBuvid4());
+    appendCookie("b_nut", loginMgr->getBNut());
+    appendCookie("bili_ticket", loginMgr->getBiliTicket());
+
+    // 统一的表单 POST：Web 直播接口都是 cookie + csrf（bili_jct）
+    auto postForm = [this, cookies, roomId](const QString &url, const QByteArray &body,
+                                           std::function<void(const QByteArray &)> done) {
+        QUrl qurl(url);
+        QNetworkRequest request(qurl);
+        request.setHeader(QNetworkRequest::ContentTypeHeader,
+                          "application/x-www-form-urlencoded");
+        request.setRawHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                           "AppleWebKit/537.36 (KHTML, like Gecko) "
+                                           "Chrome/120.0.0.0 Safari/537.36");
+        request.setRawHeader("Referer", QString("https://live.bilibili.com/%1").arg(roomId).toUtf8());
+        request.setRawHeader("Origin", "https://live.bilibili.com");
+        request.setRawHeader("Accept", "application/json, text/plain, */*");
+        request.setRawHeader("Cookie", cookies.toUtf8());
+
+        QSslConfiguration config = QSslConfiguration::defaultConfiguration();
+        config.setPeerVerifyMode(QSslSocket::VerifyNone);
+        request.setSslConfiguration(config);
+
+        QNetworkReply *reply = m_networkManager->post(request, body);
+        connect(reply, &QNetworkReply::finished, this, [reply, done]() {
+            QByteArray data = reply->readAll();
+            if (reply->error() != QNetworkReply::NoError) {
+                qWarning() << "[ApiManager] anchor lottery step network error:"
+                           << reply->url().toString() << reply->errorString();
+                data = QByteArray("{\"code\":-1,\"message\":\"network error\"}");
+            }
+            reply->deleteLater();
+            done(data);
+        });
+    };
+
+    // 第三步：参与。这是唯一会把结果回给 QML 的请求
+    auto doJoin = [this, postForm, roomId, lotteryId, csrf]() {
+        QUrlQuery q;
+        q.addQueryItem("room_id", roomId);
+        q.addQueryItem("id", lotteryId);
+        q.addQueryItem("platform", "pc");
+        q.addQueryItem("csrf", csrf);
+        qDebug() << "[ApiManager] anchor lottery join -> room" << roomId << "id" << lotteryId;
+        postForm("https://api.live.bilibili.com/xlive/lottery-interface/v1/Anchor/Join",
+                 q.toString(QUrl::FullyEncoded).toUtf8(),
+                 [this](const QByteArray &resp) {
+                     qDebug() << "[ApiManager] anchor lottery join response:" << resp.left(500);
+                     emit anchorLotteryJoinResult(resp);
+                 });
+    };
+
+    // 第二步：口令弹幕（无口令则跳过）
+    std::function<void()> startJoin = doJoin;
+    const QString danmuText = danmu.trimmed();
+    if (!danmuText.isEmpty()) {
+        auto next = doJoin;
+        startJoin = [this, postForm, roomId, danmuText, csrf, next]() {
+            QUrlQuery q;
+            q.addQueryItem("bubble", "0");
+            q.addQueryItem("msg", danmuText);
+            q.addQueryItem("color", "16777215");
+            q.addQueryItem("mode", "1");
+            q.addQueryItem("fontsize", "25");
+            q.addQueryItem("rnd", QString::number(QDateTime::currentMSecsSinceEpoch()));
+            q.addQueryItem("roomid", roomId);
+            q.addQueryItem("csrf_token", csrf);
+            q.addQueryItem("csrf", csrf);
+            qDebug() << "[ApiManager] anchor lottery: send required danmu" << danmuText;
+            postForm("https://api.live.bilibili.com/msg/send",
+                     q.toString(QUrl::FullyEncoded).toUtf8(),
+                     [next](const QByteArray &resp) {
+                         qDebug() << "[ApiManager] anchor lottery danmu response:"
+                                  << resp.left(300);
+                         next();
+                     });
+        };
+    }
+
+    // 第一步：关注主播（仅 require_type==1 且拿得到 mid）
+    if (requireType == 1 && !anchorMid.isEmpty()) {
+        QUrlQuery q;
+        q.addQueryItem("act", "1");
+        q.addQueryItem("fid", anchorMid);
+        q.addQueryItem("re_src", "32");
+        q.addQueryItem("csrf", csrf);
+        auto next = startJoin;
+        qDebug() << "[ApiManager] anchor lottery: follow anchor" << anchorMid;
+        postForm("https://api.bilibili.com/x/relation/modify",
+                 q.toString(QUrl::FullyEncoded).toUtf8(),
+                 [next](const QByteArray &resp) {
+                     qDebug() << "[ApiManager] anchor lottery follow response:" << resp.left(300);
+                     next();
+                 });
+    } else {
+        startJoin();
+    }
 }
 
 void ApiManager::getLiveEmoticons(const QString &roomId)

@@ -148,9 +148,16 @@ public:
     Q_INVOKABLE void getLiveEmoticons(const QString &roomId);
 
     // ===== 天选时刻一键参与（Web 路线：cookie + csrf）=====
-    // lotteryId 为 ANCHOR_LOT_START 推送里的 data.id。服务端会按房间配置
-    // 自动完成「发弹幕/加关注/投喂礼物」等条件，用户只需点一下
-    Q_INVOKABLE void joinLiveLottery(const QString &roomId, const QString &lotteryId);
+    // lotteryId   ANCHOR_LOT_START 推送里的 data.id
+    // anchorMid   主播 mid（requireType==1 关注主播时用；其他情况可传空）
+    // requireType 0=无 1=关注主播 2=粉丝勋章 3=大航海
+    // danmu       需发送的口令弹幕（空=无弹幕要求）
+    //
+    // 注意：服务端**不会**替客户端满足关注/弹幕条件，官方网页端也是先关注、
+    // 再发口令弹幕、最后才调 Anchor/Join。所以这里按顺序串行补齐：关注 → 弹幕 → 参与。
+    Q_INVOKABLE void joinLiveLottery(const QString &roomId, const QString &lotteryId,
+                                     const QString &anchorMid, int requireType,
+                                     const QString &danmu);
 
     // ===== 视频弹幕发送（Web 路线：cookie + csrf，经 /x/v2/dm/post）=====
     // colorDecimal: 十进制颜色值（如 16777215=白色）；progressMs: 当前播放进度（毫秒，弹幕落点）

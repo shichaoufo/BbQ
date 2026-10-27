@@ -669,13 +669,19 @@ void LiveDanmakuManager::parsePacket(const QByteArray &data)
                         // 官方那种"开奖前常驻"的选项
                         else if (cmd == "ANCHOR_LOT_START") {
                             QJsonObject data = obj["data"].toObject();
+                            // require_type：0=无 1=关注主播 2=粉丝勋章等级 3=大航海。
+                            // 服务端**不会**替我们完成关注/发弹幕，官方网页端也是
+                            // 先关注、先发口令弹幕，再调 Anchor/Join，所以这里把
+                            // 条件类型与礼物价格一并交给 QML/接口层
                             emit anchorLotteryStarted(
                                 QString::number(data["id"].toVariant().toLongLong()),
                                 data["award_name"].toString(),
                                 lenientInt(data["award_num"]),
+                                lenientInt(data["require_type"]),
                                 data["require_text"].toString(),
                                 data["danmu"].toString(),
-                                lenientInt(data["max_time"]));
+                                lenientInt(data["max_time"]),
+                                lenientInt(data["gift_price"]));
                         }
                         // 天选时刻结束：常驻抽奖按钮据此立刻隐藏（与本地倒计时
                         // 归零互为兜底，服务端推送可能先到或后到）

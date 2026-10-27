@@ -50,11 +50,17 @@ signals:
     // 看过人数实时变化（WS WATCHED_CHANGE，data.text_large，如 "1.2万人看过"）
     void watchedShowChanged(const QString &textLarge);
     // 天选时刻开启（WS ANCHOR_LOT_START）。直播间触发天选时由服务端推送一次，
-    // QML 侧据此弹「参与/取消」对话框。字段：lotteryId（参与接口用）、
-    // awardName/awardNum（奖品）、requireText（参与条件）、danmu（要发送的
-    // 弹幕内容）、maxTime（有效期秒数）
+    // QML 侧据此弹「参与/取消」对话框。字段：
+    //   lotteryId  参与接口用的抽奖 id
+    //   awardName/awardNum  奖品名 / 数量
+    //   requireType 参与条件类型：0=无 1=关注主播 2=粉丝勋章等级 3=大航海(舰长/提督)
+    //   requireText 条件文案（"关注主播" 等，直接展示）
+    //   danmu       必须发送的弹幕口令（为空则无弹幕要求）
+    //   maxTime     有效期秒数
+    //   giftPrice   单个礼物价格（>0 表示必须先送礼物才能参与，本端不支持）
     void anchorLotteryStarted(const QString &lotteryId, const QString &awardName, int awardNum,
-                              const QString &requireText, const QString &danmu, int maxTime);
+                              int requireType, const QString &requireText, const QString &danmu,
+                              int maxTime, int giftPrice);
     // 天选时刻结束（WS ANCHOR_LOT_END）：QML 侧据此立即隐藏常驻的抽奖按钮，
     // 不必等本地倒计时归零（两路互为兜底）
     void anchorLotteryEnded(const QString &lotteryId);

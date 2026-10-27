@@ -615,6 +615,9 @@ Rectangle {
         root._lotteryRemain = 0
         root._lotteryJoinedId = ""
         root._lotteryPendingJoinId = ""
+        root._lotteryRequireType = 0
+        root._lotteryDanmu = ""
+        root._lotteryGiftPrice = 0
         root._lastAnchorLotteryPromptId = ""
         root._anchorLotteryId = ""
         if (anchorLotteryDialog.opened) anchorLotteryDialog.close()
@@ -1058,6 +1061,11 @@ Rectangle {
     property string _lotteryAward: ""
     property double _lotteryDeadline: 0      // Date.now() 毫秒时间戳
     property int _lotteryRemain: 0           // 剩余秒（lotteryTick 每秒刷新）
+    // 参与条件：ANCHOR_LOT_START 的 require_type（0 无 / 1 关注 / 2 粉丝勋章 / 3 大航海）、
+    // 需要发送的口令弹幕 danmu、以及单个礼物价格（>0 表示必须先送礼物，本端不支持）
+    property int _lotteryRequireType: 0
+    property string _lotteryDanmu: ""
+    property int _lotteryGiftPrice: 0
     // 已参与的 lottery id：按钮文案切换为"已抽奖"并停止重复请求
     property string _lotteryJoinedId: ""
     // 正在请求参与中的 id（响应回来时据此标记已参与；-101 等失败则不标记）
@@ -1074,6 +1082,9 @@ Rectangle {
         root._lotteryId = ""
         root._lotteryAward = ""
         root._lotteryRemain = 0
+        root._lotteryRequireType = 0
+        root._lotteryDanmu = ""
+        root._lotteryGiftPrice = 0
         if (anchorLotteryDialog.opened) anchorLotteryDialog.close()
         root._anchorLotteryId = ""
     }
@@ -1117,9 +1128,26 @@ Rectangle {
             scInfoBar.showWarning("请先登录后参与抽奖")
             return
         }
+        // 需送礼物的天选本端不支持（没有送礼链路），提前说明，别让用户
+        // 点了按钮只看到一句服务端的失败提示
+        if (root._lotteryGiftPrice > 0) {
+            scInfoBar.showWarning("该天选需要赠送礼物，暂不支持自动参与")
+            return
+        }
+        if (root._lotteryRequireType === 2 || root._lotteryRequireType === 3) {
+            scInfoBar.showWarning("该天选要求粉丝勋章/大航海，无法自动满足")
+            return
+        }
         root._lotteryPendingJoinId = root._lotteryId
-        Api.joinLiveLottery(String(root.roomId), root._lotteryId)
-        scInfoBar.showInfo("正在参与，请稍候…")
+        // 关注 + 口令弹幕由接口层按顺序补做（服务端不代做），
+        // anchorMid 只在 require_type==1（关注主播）时才用得上
+        Api.joinLiveLottery(String(root.roomId), root._lotteryId,
+                            String(root.mid), root._lotteryRequireType,
+                            root._lotteryDanmu)
+        var tip = "正在参与"
+        if (root._lotteryRequireType === 1 && !root.isFollowing) tip += "（自动关注主播）"
+        if (root._lotteryDanmu !== "") tip += "（自动发送口令弹幕）"
+        scInfoBar.showInfo(tip + "，请稍候…")
     }
 
     FluInfoBar {
@@ -1135,18 +1163,20 @@ Rectangle {
         message: ""
         positiveText: "参与抽奖"
         negativeText: "取消"
-        // 注意：设置了 onPositiveClickListener 后 FluContentDialog 不会自动
-        // 关闭（组件源码行为），需在处理函数里手动 close()
-        onPositiveClickListener: {
+        // 必须用 positiveClicked / negativeClicked 这两个**信号**。
+        // 不能用 onPositiveClickListener（那是 `property var`）：给它写
+        // JS 代码块会被当成绑定表达式，而在体内又改了 _anchorLotteryId
+        // ——读同一属性 → 触发绑定重算 → 循环，引擎报 Binding loop，
+        // 结果处理函数在弹窗刚打开时就被执行了一遍（发请求 + close()），
+        // 表现就是"对话框一闪而过"、抽奖按钮留在控制栏上。
+        onPositiveClicked: {
             // 统一走 joinCurrentLottery：用进行中状态里的 id（与本次弹窗同一
             // 个 id）；若已到点被清空，该函数首行直接 return，不会发无效请求
             if (root._anchorLotteryId !== "") root.joinCurrentLottery()
             root._anchorLotteryId = ""
-            anchorLotteryDialog.close()
         }
-        onNegativeClickListener: {
+        onNegativeClicked: {
             root._anchorLotteryId = ""
-            anchorLotteryDialog.close()
         }
     }
 
@@ -1272,10 +1302,14 @@ Rectangle {
         // ① 状态记录：无论小窗与否都记进进行中状态 → 常驻抽奖按钮据此显示；
         //    小窗期间控制栏不显示，恢复普通窗口后按钮自然出现（按需求不补弹）
         // ② 提示弹窗：仅非小窗、且同一 id 只弹一次
-        function onAnchorLotteryStarted(lotteryId, awardName, awardNum, requireText, danmu, maxTime) {
+        function onAnchorLotteryStarted(lotteryId, awardName, awardNum, requireType,
+                                        requireText, danmu, maxTime, giftPrice) {
             if (!lotteryId) return
             root._lotteryId = lotteryId
             root._lotteryAward = awardName || ""
+            root._lotteryRequireType = requireType > 0 ? requireType : 0
+            root._lotteryDanmu = danmu || ""
+            root._lotteryGiftPrice = giftPrice > 0 ? giftPrice : 0
             root._lotteryDeadline = Date.now() + Math.max(1, maxTime) * 1000
             root._refreshLotteryRemain()
 
@@ -1287,7 +1321,13 @@ Rectangle {
             var lines = []
             lines.push("奖品：" + (awardName || "未知奖品") + " ×" + (awardNum > 0 ? awardNum : 1))
             if (requireText) lines.push("条件：" + requireText)
-            if (danmu) lines.push("弹幕：" + danmu)
+            // 把"我们来帮你做什么"说清楚：关注和口令弹幕由客户端自动补做，
+            // 送礼/勋章这类满足不了的条件提前讲明
+            if (root._lotteryRequireType === 1) lines.push("参与方式：自动关注主播后抽奖")
+            if (root._lotteryDanmu !== "") lines.push("口令弹幕：" + root._lotteryDanmu + "（自动发送）")
+            if (root._lotteryGiftPrice > 0) lines.push("⚠ 需先赠送礼物，本端暂不支持")
+            if (root._lotteryRequireType === 2 || root._lotteryRequireType === 3)
+                lines.push("⚠ 要求粉丝勋章/大航海，无法自动满足")
             if (maxTime > 0) {
                 var mins = Math.floor(maxTime / 60), secs = maxTime % 60
                 lines.push("有效期：" + (mins > 0 ? mins + " 分钟" : "") + (secs > 0 && mins === 0 ? secs + " 秒" : ""))
@@ -1356,7 +1396,14 @@ Rectangle {
                     scInfoBar.showSuccess("已参与天选时刻，静候开奖~")
                 } else {
                     var errMsg = resp.message || resp.msg || ("错误码: " + resp.code)
-                    if (resp.code === -101) errMsg = "请先登录后参与抽奖"
+                    // 常见业务码给中文解释（其余原样展示服务端文案）
+                    switch (resp.code) {
+                    case -101: errMsg = "请先登录后参与抽奖"; break
+                    case -400: errMsg = "请求参数有误"; break
+                    case -403: errMsg = "风控拦截，稍后再试"; break
+                    case 400080: errMsg = "你已参与过本场天选"; break
+                    case 400090: errMsg = "抽奖已结束"; break
+                    }
                     scInfoBar.showWarning("参与失败: " + errMsg)
                 }
             } catch (e) {
