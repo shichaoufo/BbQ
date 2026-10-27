@@ -8,6 +8,7 @@
 // Q_PROPERTY(QQuickItem*) 需要：QQuickItem 完整类型 + 指针元类型注册
 //（仅有前置声明时 moc 生成的属性元调用代码在元类型系统注册处编译失败）
 #include <QQuickItem>
+#include <QFont>
 
 class AppManager : public QObject
 {
@@ -82,6 +83,19 @@ public:
     Q_INVOKABLE bool startSystemMove();
     // 读进程环境变量（QML 侧 main.qml 的弹幕驱动链自动测试等使用）
     Q_INVOKABLE static QString environmentVariable(const QString &name);
+
+    // 富文本前 maxLines 行的精确高度 + 总行数。
+    //
+    // 为什么需要它（2026-10-27 的 bug）：动态卡片按"整行截断"裁正文，原来用
+    // 一个 "国\n国\n…" 的 QML 探针算 N 行高。但正文里的 Unicode 表情（⭐ 等）
+    // 会触发字体回退，那一行的行盒变成 26px（普通行 24px），探针只反映纯汉字
+    // 行高 → 裁 120px 而真实 5 行是 122px，最后一行底部被切掉。
+    // QML 的 Text 在 RichText 下**不提供** lineCount / maximumLineCount / elide
+    //（官方文档明确不支持），所以只能回到 C++ 用 QTextDocument 排一遍
+    //（QQuickText 的富文本内部也是它，行高口径一致）。
+    // 返回 { height: 前 maxLines 行高度, lineCount: 总行数 }
+    Q_INVOKABLE QVariantMap measureRichTextLines(const QString &html, qreal width,
+                                                 const QFont &font, int maxLines);
 
 signals:
     void videoOpenRequested(const QString &bvid, const QString &title);

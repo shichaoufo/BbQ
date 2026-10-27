@@ -771,7 +771,10 @@ CommentManager::Comment CommentManager::parseCommentObject(const QJsonObject &ob
             QJsonObject emoteObj = emoteVal.toObject();
             for (auto it = emoteObj.begin(); it != emoteObj.end(); ++it) {
                 QString emoteText = it.key();
-                QJsonObject emoteDetail = it.value().toObject();
+                // 个别版本把 value 直接给成 URL 字符串（不是对象）
+                QJsonObject emoteDetail = it.value().isString()
+                    ? QJsonObject{{"url", it.value().toString()}}
+                    : it.value().toObject();
                 EmoteInfo info;
                 info.text = emoteText;
                 info.url = emoteDetail["url"].toString();
@@ -780,7 +783,12 @@ CommentManager::Comment CommentManager::parseCommentObject(const QJsonObject &ob
                 // 注意：这里只记录，是否用动图渲染由 UI 决定（Qt 富文本 <img>
                 // 即便喂 gif 也只画第一帧，白白多下载几倍体积）
                 info.gifUrl = emoteDetail["gif_url"].toString();
+                if (info.gifUrl.isEmpty()) info.gifUrl = emoteDetail["gifUrl"].toString();
+                if (info.gifUrl.isEmpty()) info.gifUrl = emoteDetail["webp_url"].toString();
                 info.isAnimated = !info.gifUrl.isEmpty();
+                // 只给了动图地址、没有静态图时，用动图地址兜底做首帧，
+                // 否则 [打call] 之类的表情会原样留在正文里
+                if (info.url.isEmpty()) info.url = info.gifUrl;
                 info.type = emoteDetail["type"].toInt();
                 if (emoteDetail.contains("meta")) {
                     QJsonObject meta = emoteDetail["meta"].toObject();
@@ -795,6 +803,18 @@ CommentManager::Comment CommentManager::parseCommentObject(const QJsonObject &ob
                 }
                 if (!info.url.isEmpty()) {
                     comment.emotes.insert(info.text, info);
+                    // key 的括号形态不统一（"[打call]" vs "打call"），正文里一定是
+                    // 带方括号的形态；两种都登记，避免漏替换后把 "[打call]" 留在正文里
+                    QString alt;
+                    if (info.text.startsWith('[') && info.text.endsWith(']'))
+                        alt = info.text.mid(1, info.text.size() - 2);
+                    else if (!info.text.contains('['))
+                        alt = QStringLiteral("[%1]").arg(info.text);
+                    if (!alt.isEmpty() && !comment.emotes.contains(alt)) {
+                        EmoteInfo alias = info;
+                        alias.text = alt;
+                        comment.emotes.insert(alt, alias);
+                    }
                 }
             }
         }

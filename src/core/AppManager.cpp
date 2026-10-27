@@ -12,6 +12,10 @@
 #include <QNetworkRequest>
 #include <QUrl>
 #include <QStringList>
+#include <QTextDocument>
+#include <QTextBlock>
+#include <QTextLayout>
+#include <QAbstractTextDocumentLayout>
 
 #ifdef Q_OS_WIN
 #include <windows.h>
@@ -184,6 +188,50 @@ bool AppManager::startSystemMove()
 QString AppManager::environmentVariable(const QString &name)
 {
     return qEnvironmentVariable(name.toUtf8().constData());
+}
+
+// 用 QTextDocument 排一遍富文本，取"前 maxLines 行的精确高度 + 总行数"。
+// QQuickText 的 RichText 路径内部同样是 QTextDocument，行高口径一致
+// （documentMargin 必须设 0，与 QQuickText 的行为对齐）。
+QVariantMap AppManager::measureRichTextLines(const QString &html, qreal width,
+                                             const QFont &font, int maxLines)
+{
+    QVariantMap out;
+    out["height"] = 0.0;
+    out["lineCount"] = 0;
+
+    if (width <= 0 || html.isEmpty())
+        return out;
+
+    QTextDocument doc;
+    doc.setDocumentMargin(0);
+    doc.setDefaultFont(font);
+    doc.setTextWidth(width);
+    doc.setHtml(html);
+
+    // 关键：QTextDocument 是**懒排版**。不先向 documentLayout 要一次尺寸，
+    // 每个 QTextBlock::layout() 都是空的（lineCount()==0），整个函数会返回
+    // 高度 0 —— 2026-10-27 第一次实现就踩了这个坑：量尺返回 0，QML 侧退回
+    // 旧探针，截断问题看起来"没修"。
+    (void)doc.documentLayout()->documentSize();
+
+    int idx = 0;          // 已统计到的行号（从 0 开始）
+    qreal firstH = 0;     // 前 maxLines 行的高度
+    for (QTextBlock block = doc.begin(); block.isValid(); block = block.next()) {
+        QTextLayout *layout = block.layout();
+        if (!layout)
+            continue;
+        const int lineCount = layout->lineCount();
+        for (int i = 0; i < lineCount; ++i) {
+            if (maxLines <= 0 || idx < maxLines)
+                firstH += layout->lineAt(i).height();
+            ++idx;
+        }
+    }
+
+    out["height"] = firstH;
+    out["lineCount"] = idx;
+    return out;
 }
 
 void AppManager::minimizeWindow(QObject *windowObj)

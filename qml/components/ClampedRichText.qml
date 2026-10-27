@@ -8,8 +8,7 @@ import BiliQt 1.0
 //
 // 为什么不用 CommentRichText 自带的 maxLines：那个只在"纯文本单 Text"路径生效，
 // 正文里只要有一个动态表情就会走 Flow 分段路径，那条路径无法 elide，整段都会展开。
-// 这里改成按高度裁切：用 TextMetrics 量出真实行高，裁在整行边界上，
-// 最后一行保证完整，下面再单独留一行给「查看更多」。
+// 这里改成按高度裁切，裁在整行边界上，最后一行保证完整，下面再单独留一行给「查看更多」。
 Item {
     id: root
 
@@ -22,15 +21,30 @@ Item {
     signal linkActivated(string link)
     signal moreClicked()
 
-    // 探针：让 Qt 自己把 maxLines 行排一遍，读它的真实整块高度。
+    // ---------- 高度怎么算 ----------
     //
-    // 为什么不能用 TextMetrics.height × maxLines（原来就是这么写的）：
-    // TextMetrics.height 是**单行字体度量**（ascent+descent，可能是小数），
-    // 而真实排版会**逐行向上取整**。实测 Qt 6.11 / 微软雅黑 / pointSize 14：
-    //   100% 缩放：metrics.height = 24.000，实际每行 24px，5 行 = 120  → 差值 0，看不出来
-    //   150% 缩放：metrics.height = 24.125，实际每行 25px，5 行 = 125
-    //              metrics × 5 = 120.625 → 裁掉 4.4px，正好把最后一行切掉下半截
-    // 单行的小数误差乘以行数就会被放大 —— 这就是"只有 150% 才截断"的原因。
+    // 教训（2026-10-27）：正文里出现 Unicode 表情（如 ⭐）时，Qt 会回退到
+    // Segoe UI Emoji 等字体，那一行的行盒变成 26px（实测：普通行 24px）。
+    // 早先的做法是用一个 "国\n国\n…" 的 QML 探针算 N 行高（5 × 24 = 120），
+    // 而真实内容是 4×24 + 26 = 122 → 裁在 120 就把最后一行底部切掉了 2px。
+    // 探针只能反映**纯汉字**行高，任何字体回退都会让它偏小。
+    //
+    // 为什么不用 Text.maximumLineCount：QML 的 Text 在 RichText 下**不支持**
+    // maximumLineCount / elide / lineCount（Qt 官方文档明确写了不支持），
+    // 试过 StyledText 量尺，行高与 RichText 差 4px，也不可靠。
+    // 所以改用 App.measureRichTextLines()：C++ 里用 QTextDocument 排一遍，
+    // 与 QQuickText 的富文本内部实现同源，能给出"前 N 行精确高度 + 总行数"。
+    readonly property bool _flowMode: body.hasAnimatedEmote
+
+    // C++ 量尺：{ height: 前 maxLines 行高度, lineCount: 总行数 }
+    readonly property var _measured: {
+        if (root.width <= 0) return ({ height: 0, lineCount: 0 })
+        return App.measureRichTextLines(body.plainHtml, root.width,
+                                        root.bodyFont, Math.max(1, root.maxLines))
+    }
+
+    // Flow 路径（含动态表情）仍用探针：那条路径的行高由分段矩形自己决定，
+    // 量尺反映的是富文本，对不上；且动态表情卡片极罕见，老办法足够。
     readonly property string _probeText: {
         var n = Math.max(1, root.maxLines)
         var s = ""
@@ -47,20 +61,32 @@ Item {
         wrapMode: Text.NoWrap
     }
 
-    // N 行整块的精确高度（已含逐行取整）
-    readonly property real lineH: Math.max(1, lineProbe.implicitHeight / Math.max(1, root.maxLines))
-    readonly property real bodyH: Math.max(1, lineProbe.implicitHeight)
-    readonly property bool truncated: body.implicitHeight > bodyH + 1
+    readonly property real bodyH: {
+        if (root.width <= 0) return Math.max(1, body.implicitHeight)
+        if (root._flowMode) return Math.max(1, lineProbe.implicitHeight)
+        var h = root._measured.height
+        // 量不到（空内容等）时退回正文自身高度，避免出现 0 高度。
+        // 量到则向上取整再 +1：C++ 的 QTextDocument 与 QQuickText 的行高可能有
+        // 亚像素差，宁可多留 1px（那 1px 是下一行的行首留白，看不出来），
+        // 也不能少 —— 少了就是把最后一行切掉。
+        return (h > 0) ? (Math.ceil(h) + 1)
+                       : Math.max(1, Math.min(body.implicitHeight, lineProbe.implicitHeight))
+    }
 
-    implicitHeight: Math.min(body.implicitHeight, bodyH)
-                    + (truncated ? moreText.implicitHeight : 0)
+    readonly property bool truncated: {
+        if (root.width <= 0) return false
+        if (root._flowMode) return body.implicitHeight > root.bodyH + 1
+        return root._measured.lineCount > Math.max(1, root.maxLines)
+    }
+
+    implicitHeight: bodyH + (truncated ? moreText.implicitHeight : 0)
 
     // 暴露给调用方绑 Layout.preferredHeight 用
     readonly property real naturalHeight: implicitHeight
 
     Item {
         width: parent.width
-        height: Math.min(body.implicitHeight, root.bodyH)
+        height: root.bodyH
         clip: true
 
         CommentRichText {
