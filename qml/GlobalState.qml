@@ -70,6 +70,83 @@ QtObject {
     property real searchScrollY: 0
     property bool searchHasSearched: false
 
+    // ---- 应用内搜索请求（评论关键词 / 标签 / 话题统一走这里）----
+    // 以前这些点击都是丢给系统浏览器打开 search.bilibili.com；现在客户端
+    // 自己有搜索页，改为切到搜索页并直接弹出结果页。main.qml 监听本信号，
+    // 因为它才持有导航容器和 SearchPage 实例（单例里取不到 App/页面对象）。
+    signal inAppSearchRequested(string keyword)
+    function openInAppSearch(keyword) {
+        var kw = String(keyword || "").trim()
+        if (kw === "") return false
+        inAppSearchRequested(kw)
+        return true
+    }
+
+    // ===== 页内弹层互斥（只服务还留在页面里的 live / detail）=====
+    // 视频 / 用户主页 / 搜索结果已改由下面的牌堆统一管理，不再走这条广播。
+    // 直播播放器和动态详情目前仍各自住在 DynamicPage / HistoryPage /
+    // SearchResultPage / LivePage 里（不是牌），同一时间只保留一个实例：
+    // 打开前广播一次，其它宿主收到后关掉自己那份。exceptHost 是发起方标识。
+    signal pageTypeCloseRequested(string type, string exceptHost)
+    function requestClosePagesOfType(type, exceptHost) {
+        pageTypeCloseRequested(type, exceptHost)
+    }
+
+    // ============================================================
+    // ===== 弹层牌堆（唯一权威，2026-10-27）=====
+    // ============================================================
+    // 语义：每种弹层页面 = 一张扑克牌。打开就是往牌堆上叠一张；同类型再次打开
+    // = 把这张牌从底下抽出来、叠到最上面（抽出的动作 = 关掉它旧的内容，叠上去
+    // = 在同一个实例里装新内容）。不管叠多少层，牌的总数是固定的那几张，
+    // 只是在不断重排顺序。
+    //
+    // 数组顺序 = 叠放顺序，末尾 = 最上面（右键关闭的就是末尾那张）。
+    // 以前是每个宿主页面自己维护 videoVisible/_overlayZSeq、再靠
+    // requestClosePagesOfType 广播互相"关掉"来模拟，漏一处就出错；
+    // 现在只有这一个列表说了算，页面不再持有叠放状态。
+    property var _cardStack: []
+    // z 只增不减：每次抽牌叠顶就取一个新值，保证"后叠的在上"。
+    property int _cardZSeq: 100
+
+    readonly property string topCard: _cardStack.length > 0 ? _cardStack[_cardStack.length - 1] : ""
+
+    function hasCard(type) { return _cardStack.indexOf(type) >= 0 }
+
+    // 抽牌 → 叠到最上面。返回本次分配的 z，调用方赋给牌实例。
+    function bringCardToFront(type) {
+        if (type === "") return _cardZSeq
+        var a = _cardStack.slice()
+        var i = a.indexOf(type)
+        if (i >= 0) a.splice(i, 1)
+        a.push(type)
+        _cardStack = a
+        _cardZSeq += 1
+        console.log("[CardStack] +" + type + " => [" + a.join(" < ") + "] z=" + _cardZSeq)
+        return _cardZSeq
+    }
+
+    function removeCard(type) {
+        var i = _cardStack.indexOf(type)
+        if (i < 0) return
+        var a = _cardStack.slice()
+        a.splice(i, 1)
+        _cardStack = a
+        console.log("[CardStack] -" + type + " => [" + a.join(" < ") + "]")
+    }
+
+    function clearCards() {
+        if (_cardStack.length === 0) return
+        _cardStack = []
+        console.log("[CardStack] clear")
+    }
+
+    // 这张牌上面还压着几张（0 = 就在最上面）。被压住时只暂停，不关闭。
+    function cardsAbove(type) {
+        var i = _cardStack.indexOf(type)
+        if (i < 0) return 0
+        return _cardStack.length - 1 - i
+    }
+
     // ============================================================
     // 评论 / 动态正文富文本渲染 —— 全项目唯一实现
     // ============================================================
@@ -123,6 +200,10 @@ QtObject {
         if (!m) return ""
         var kw = m[1].replace(/\+/g, " ")
         try { return decodeURIComponent(kw) } catch (e) { return kw }
+    }
+    // 是不是站内搜索地址（话题/标签的 jump_url 常常就是 search.bilibili.com 的链接）
+    function _cmtIsSearchUrl(u) {
+        return /^https?:\/\/search\.bilibili\.com\//i.test(String(u || ""))
     }
     // bilibili:// 官方 scheme -> 等价网页地址；解析不出返回 ""
     function _cmtSchemaToWeb(schema, fallbackKeyword) {
@@ -811,7 +892,7 @@ QtObject {
     // href 契约（由 formatCommentRichText 生成）：
     //   video:<BV|av>            应用内打开视频（裸 BV/av 号，来自服务端 jump_url）
     //   user:<mid>               打开用户主页（@提及）
-    //   search:<关键词>          系统浏览器打开 B 站官网搜索（词搜索热词 / #话题#）
+    //   search:<关键词>          客户端搜索结果页（不再走系统浏览器）
     //   web:<url>                系统浏览器打开（商品/番剧/专栏/直播/opus/任意 http）
     //   timestamp:<毫秒>         跳转播放进度 —— 需要播放器上下文，由页面自行处理
     //   http(s)://...            bili://user/ 等旧形态的兼容兜底
@@ -866,11 +947,11 @@ QtObject {
                 return true
             }
 
-            // 词搜索热词 / 话题：系统浏览器打开 B 站官网搜索
+            // 词搜索热词 / 话题：走客户端自己的搜索结果页
             if (h.indexOf("search:") === 0) {
                 var kw = h.substring("search:".length)
                 if (!kw) return false
-                Qt.openUrlExternally(_cmtSearchUrl(kw))
+                openInAppSearch(kw)
                 return true
             }
 
@@ -902,6 +983,11 @@ QtObject {
             }
 
             if (h.indexOf("http://") === 0 || h.indexOf("https://") === 0) {
+                // 站内搜索链接（话题/标签的 jump_url 常见形态）→ 应用内搜索结果页
+                if (_cmtIsSearchUrl(h)) {
+                    var skw = _cmtSearchKeyword(h)
+                    if (skw) { openInAppSearch(skw); return true }
+                }
                 Qt.openUrlExternally(h)
                 return true
             }

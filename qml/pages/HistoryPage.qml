@@ -35,9 +35,7 @@ FluPage {
         }
     }
 
-    property bool videoVisible: false
     property bool liveVisible: false
-    property bool userProfileVisible: false
 
     // Pivot 索引持久化守卫（与 HomePage 同一模式）：
     // 页面销毁时把"用户最后选中的 Tab"写回 GlobalState；
@@ -59,9 +57,9 @@ FluPage {
             //（Qt 语义：父项 visible 变化会直接改变全部子孙的 visible 值并触发
             //  visibleChanged），非真实切页，绝不能关闭播放器
             if (App.miniPlayerMode) return
-            // 切到其他导航页时，如果播放器还开着，关闭并卸载实例，避免声音串扰
             _loginWarnShown = false
-            if (videoVisible) closeVideoPlayer()
+            // 切到其他导航页：本页内还留着的直播播放器一并关闭；
+            // 视频页与用户主页是窗口级牌，由 main.qml 统一收牌
             if (liveVisible) closeLivePlayer()
         }
     }
@@ -506,11 +504,9 @@ FluPage {
 
                     onClicked: {
                         if (model.type === "bangumi" || model.isBangumi) {
-                            // 番剧始终走 openBangumiPlayer，确保选集、seasonType 等信息正确加载
-                            // openBangumiPlayer 内部会判断是否有真实 bvid：
-                            //   - 有真实 bvid：走番剧 API 获取完整信息后切换到普通视频路径
-                            //   - 无真实 bvid：走番剧专用接口
-                            history_page.openBangumiPlayer(model.bvid, model.epId, model.seasonId, model.title)
+                            // 番剧统一走 App.openBangumi（视频牌内部会判断有没有真实
+                            // bvid：有则按番剧接口取完整信息，无则用 bangumi_<epId> 占位）
+                            App.openBangumi(model.bvid || "", model.epId || "", model.seasonId || "", model.title)
                         } else if (model.type === "video") {
                             App.openVideo(model.bvid, model.title)
                         } else if (model.isLive) {
@@ -655,358 +651,8 @@ FluPage {
     }
 
     // 视频播放页/直播页/用户主页打开时，兜底拦截滚轮事件，防止其穿透到底层主页滚动视图。
-    MouseArea {
-        anchors.fill: historyFrame
-        z: 99
-        enabled: videoVisible || userProfileVisible
-        acceptedButtons: Qt.NoButton
-        hoverEnabled: true
-        onWheel: function(wheel) { wheel.accepted = true }
-    }
 
-    // ===== 用户主页 Overlay（动画/守卫模式与 HomePage userProfileOverlay 一致） =====
-    // z 序：滚轮守卫 99 < 用户主页 100 < 视频/直播 100(声明在后)。
-    // 从视频打开主页时视频先关闭（openUserProfile 内处理），从主页打开
-    // 视频时视频盖上主页
-    Item {
-        id: userProfileOverlay
-        anchors.fill: historyFrame
-        anchors.margins: Theme.playerOverlayMargin
-        z: 100
-        visible: opacity > 0 || openUserProfileAnim.running || closeUserProfileAnim.running
-        opacity: 0
 
-        property string profileMid: ""
-        property string profileName: ""
-        property string profileFace: ""
-        property int profileVerify: -1
-        property bool _profileCreated: false
-
-        Component {
-            id: userProfileComponent
-            UserProfilePage {
-                anchors.fill: parent
-                mid: userProfileOverlay.profileMid
-                userName: userProfileOverlay.profileName
-                userFace: userProfileOverlay.profileFace
-                userVerify: userProfileOverlay.profileVerify
-            }
-        }
-
-        Item {
-            id: userProfileContainer
-            anchors.fill: parent
-            transform: Translate {
-                id: userProfileTranslate
-                y: 0
-            }
-            MouseArea {
-                anchors.fill: parent
-                z: -1
-                enabled: userProfileLoader.active
-                onClicked: { /* 仅消费事件，不遮挡内部交互 */ }
-            }
-            Loader {
-                id: userProfileLoader
-                anchors.fill: parent
-                // 守卫：切导航栏时 history_page.visible=false 会使 overlay 的
-                // visible 从父级"流动"为 false，若不守卫会立即卸载销毁用户主
-                // 页实例，切回导航时重新加载。userProfileVisible 是逻辑状态，
-                // 不受父级隐藏影响（与 HomePage/SearchPage 同一模式）
-                active: (userProfileOverlay.visible || history_page.userProfileVisible) && userProfileOverlay._profileCreated
-                sourceComponent: userProfileComponent
-            }
-        }
-
-        Timer {
-            id: userProfileDestroyTimer
-            interval: 250
-            repeat: false
-            onTriggered: {
-                if (!userProfileVisible && !openUserProfileAnim.running && !closeUserProfileAnim.running) {
-                    userProfileOverlay._profileCreated = false
-                }
-            }
-        }
-
-        function doOpen() {
-            userProfileDestroyTimer.stop()
-            closeUserProfileAnim.stop()
-            _profileCreated = true
-            openUserProfileAnim.start()
-        }
-
-        function doClose() {
-            openUserProfileAnim.stop()
-            closeUserProfileAnim.stop()
-            userProfileDestroyTimer.start()
-            closeUserProfileAnim.start()
-        }
-
-        ParallelAnimation {
-            id: openUserProfileAnim
-            NumberAnimation {
-                target: userProfileOverlay
-                property: "opacity"
-                from: 0; to: 1; duration: 250
-                easing.type: Easing.OutCubic
-            }
-            NumberAnimation {
-                target: userProfileTranslate
-                property: "y"
-                from: userProfileOverlay.height * 0.15; to: 0
-                duration: 250
-                easing.type: Easing.OutCubic
-            }
-        }
-
-        ParallelAnimation {
-            id: closeUserProfileAnim
-            NumberAnimation {
-                target: userProfileOverlay
-                property: "opacity"
-                from: 1; to: 0; duration: 200
-                easing.type: Easing.InCubic
-            }
-            NumberAnimation {
-                target: userProfileTranslate
-                property: "y"
-                from: 0; to: userProfileOverlay.height * 0.15
-                duration: 200
-                easing.type: Easing.InCubic
-            }
-        }
-    }
-
-    Item {
-        id: videoOverlay
-        anchors.fill: historyFrame
-        anchors.margins: Theme.playerOverlayMargin
-        z: 100
-        visible: opacity > 0 || openVideoAnim.running || closeVideoAnim.running || switchVideoSeqAnim.running
-        opacity: 0
-
-        property string videoBvid: ""
-        property string videoTitleText: ""
-        property bool videoIsBangumi: false
-        property string videoEpId: ""
-        property string videoSeasonId: ""
-        property string _currentLoadedKey: ""
-        property bool _playerCreated: false
-        property string _pendingSwitchBvid: ""
-        property string _pendingSwitchTitle: ""
-        property bool _pendingSwitchIsBangumi: false
-        property string _pendingSwitchEpId: ""
-        property string _pendingSwitchSeasonId: ""
-        property string _pendingOpenBvid: ""  // 延迟打开时的 bvid
-        property bool _pendingOpenIsBangumi: false
-        property string _pendingOpenEpId: ""
-        property string _pendingOpenSeasonId: ""
-
-        Component {
-            id: videoPlayerComponent
-            VideoPlayerPage {
-                anchors.fill: parent
-                bvid: videoOverlay.videoBvid
-                videoTitle: videoOverlay.videoTitleText
-                isBangumi: videoOverlay.videoIsBangumi
-                epId: videoOverlay.videoEpId
-                seasonId: videoOverlay.videoSeasonId
-            }
-        }
-
-        Item {
-            id: videoContainer
-            anchors.fill: parent
-            transform: Translate {
-                id: videoTranslate
-                y: 0
-            }
-
-            // 仅在 Loader 实际加载了播放器时才启用，避免切换/关闭过程中
-            // 空 overlay 挡住主页卡片交互。
-            MouseArea {
-                anchors.fill: parent
-                z: -1
-                enabled: videoPlayerLoader.active
-                onClicked: { /* 仅消费事件，不执行任何操作 */ }
-            }
-
-            Loader {
-                id: videoPlayerLoader
-                anchors.fill: parent
-                // Loader.active 只受 _playerCreated 控制，不受 videoOverlay.visible 影响
-                // 这样当关闭动画完成后，videoOverlay.visible 变为 false，
-                // 但 Loader 仍保持激活，确保播放器在延迟销毁定时器触发前不会被过早销毁
-                active: videoOverlay._playerCreated
-                sourceComponent: videoPlayerComponent
-            }
-        }
-
-        // 延迟卸载定时器：在所有动画完成后再卸载实例，
-        // 避免在渲染线程仍持有 mpv 上下文时销毁导致卡死/闪退。
-        Timer {
-            id: videoPlayerDestroyTimer
-            interval: 400  // 动画(250ms) + 安全余量
-            repeat: false
-            onTriggered: {
-                // 只有当视频不可见且没有在切换/打开时才真正销毁
-                if (!videoVisible
-                    && !openVideoAnim.running
-                    && !closeVideoAnim.running
-                    && !switchVideoSeqAnim.running) {
-                    videoOverlay._playerCreated = false
-                }
-            }
-        }
-
-        function doOpen() {
-            videoPlayerDestroyTimer.stop()
-            closeVideoAnim.stop()
-            switchVideoSeqAnim.stop()
-            _playerCreated = true
-            openVideoAnim.start()
-        }
-
-        function doClose() {
-            videoPlayerDestroyTimer.stop()  // 停止之前可能的销毁定时器
-            openVideoAnim.stop()
-            closeVideoAnim.stop()
-            switchVideoSeqAnim.stop()
-            if (videoPlayerLoader.item) {
-                videoPlayerLoader.item.stopPlayer()
-            }
-            closeVideoAnim.start()
-            videoPlayerDestroyTimer.start()  // 动画完成后延迟销毁
-        }
-
-        function doSwitch(bvid, title, isBangumi, epId, seasonId) {
-            videoPlayerDestroyTimer.stop()  // 切换时停止销毁定时器
-            switchVideoSeqAnim.stop()
-            closeVideoAnim.stop()
-            openVideoAnim.stop()
-
-            _pendingSwitchBvid = bvid
-            _pendingSwitchTitle = title
-            _pendingSwitchIsBangumi = !!isBangumi
-            _pendingSwitchEpId = epId || ""
-            _pendingSwitchSeasonId = seasonId || ""
-            _playerCreated = true  // 保持播放器存活，只切换内容
-
-            if (videoPlayerLoader.item) {
-                videoPlayerLoader.item.stopPlayer()
-            }
-
-            switchVideoSeqAnim.start()
-        }
-
-        ParallelAnimation {
-            id: openVideoAnim
-            NumberAnimation {
-                target: videoOverlay
-                property: "opacity"
-                from: 0
-                to: 1
-                duration: 250
-                easing.type: Easing.OutCubic
-            }
-            NumberAnimation {
-                target: videoTranslate
-                property: "y"
-                from: videoOverlay.height * 0.15
-                to: 0
-                duration: 250
-                easing.type: Easing.OutCubic
-            }
-            // 关键优化：动画完成后再设置 bvid 触发加载，避免动画卡顿
-            onStopped: {
-                if (videoOverlay._pendingOpenBvid) {
-                    videoOverlay.videoBvid = videoOverlay._pendingOpenBvid
-                    videoOverlay.videoIsBangumi = videoOverlay._pendingOpenIsBangumi
-                    videoOverlay.videoEpId = videoOverlay._pendingOpenEpId
-                    videoOverlay.videoSeasonId = videoOverlay._pendingOpenSeasonId
-                    videoOverlay._pendingOpenBvid = ""
-                }
-            }
-        }
-
-        ParallelAnimation {
-            id: closeVideoAnim
-            NumberAnimation {
-                target: videoOverlay
-                property: "opacity"
-                from: 1
-                to: 0
-                duration: 200
-                easing.type: Easing.InCubic
-            }
-            NumberAnimation {
-                target: videoTranslate
-                property: "y"
-                from: 0
-                to: videoOverlay.height * 0.15
-                duration: 200
-                easing.type: Easing.InCubic
-            }
-            // onStopped 不再立即销毁播放器，由 videoPlayerDestroyTimer 统一管理
-        }
-
-        SequentialAnimation {
-            id: switchVideoSeqAnim
-
-            ParallelAnimation {
-                NumberAnimation {
-                    target: videoOverlay
-                    property: "opacity"
-                    from: 1
-                    to: 0
-                    duration: 200
-                    easing.type: Easing.InCubic
-                }
-                NumberAnimation {
-                    target: videoTranslate
-                    property: "y"
-                    from: 0
-                    to: videoOverlay.height * 0.3
-                    duration: 200
-                    easing.type: Easing.InCubic
-                }
-            }
-
-            ScriptAction {
-                script: {
-                    videoOverlay.videoBvid = videoOverlay._pendingSwitchBvid
-                    videoOverlay.videoTitleText = videoOverlay._pendingSwitchTitle
-                    videoOverlay.videoIsBangumi = videoOverlay._pendingSwitchIsBangumi
-                    videoOverlay.videoEpId = videoOverlay._pendingSwitchEpId
-                    videoOverlay.videoSeasonId = videoOverlay._pendingSwitchSeasonId
-                }
-            }
-            ParallelAnimation {
-                NumberAnimation {
-                    target: videoOverlay
-                    property: "opacity"
-                    from: 0
-                    to: 1
-                    duration: 250
-                    easing.type: Easing.OutCubic
-                }
-                NumberAnimation {
-                    target: videoTranslate
-                    property: "y"
-                    from: videoOverlay.height * 0.3
-                    to: 0
-                    duration: 250
-                    easing.type: Easing.OutCubic
-                }
-            }
-
-            onStopped: {
-                videoOverlay._pendingSwitchBvid = ""
-                videoOverlay._pendingSwitchTitle = ""
-            }
-        }
-    }
 
     // 共享弹幕管理器：放在 HistoryPage 层级，不随 LivePlayerPage 销毁/重建。
     // 避免 QWebSocket（SSL 握手线程）频繁创建/销毁导致卡死。
@@ -1158,100 +804,20 @@ FluPage {
         }
     }
 
+    // 页面类型互斥：直播播放器仍留在本页内（不是牌堆里的牌），
+    // 其它宿主打开直播时关掉自己这份；视频 / 用户主页已由牌堆统一管理。
     Connections {
-        target: App
-        function onVideoOpenRequested(bvid, title) {
-            // 非当前可见页面不响应，避免多实例同时打开视频造成卡顿
-            if (!history_page.visible) return
-            history_page.openVideoPlayer(bvid, title)
-        }
-        function onBangumiOpenRequested(bvid, epId, seasonId, title) {
-            if (!history_page.visible) return
-            history_page.openBangumiPlayer(bvid, epId, seasonId, title)
-        }
-        function onVideoCloseRequested() {
-            history_page.closeVideoPlayer()
-        }
-        function onUserProfileOpenRequested(mid, name, face, verify) {
-            if (!history_page.visible) return
-            history_page.openUserProfile(mid, name, face, verify)
-        }
-        function onUserProfileCloseRequested() {
-            history_page.closeUserProfile()
+        target: GlobalState
+        function onPageTypeCloseRequested(type, exceptHost) {
+            if (exceptHost === "history") return
+            if (type === "live" && history_page.liveVisible) history_page.closeLivePlayer()
         }
     }
 
-    function openBangumiPlayer(bvid, epId, seasonId, title) {
-        
-        videoOverlay.videoTitleText = title
-        videoOverlay.videoIsBangumi = true
-        videoOverlay.videoEpId = epId
-        videoOverlay.videoSeasonId = seasonId
-        
-        // 简化：直接设置番剧模式，统一走番剧API路径
-        // 如果有真实 bvid，用它；没有的话用 bangumi_ 前缀标识
-        var videoBvid = bvid
-        if (!videoBvid || videoBvid.indexOf("bangumi_") === 0) {
-            videoBvid = "bangumi_" + (epId || seasonId)
-        }
-        
-        if (videoVisible && videoOverlay.videoBvid === videoBvid) {
-            return
-        }
-        
-        // 立即设置 videoBvid，确保 Loader 创建时获取正确的值
-        videoOverlay.videoBvid = videoBvid
-        
-        if (videoVisible && videoOverlay._playerCreated) {
-            videoVisible = true
-            videoOverlay.doSwitch(videoBvid, title, true, epId, seasonId)
-        } else {
-            videoOverlay._pendingOpenBvid = videoBvid
-            videoOverlay._pendingOpenIsBangumi = true
-            videoOverlay._pendingOpenEpId = epId
-            videoOverlay._pendingOpenSeasonId = seasonId
-            videoVisible = true
-            videoOverlay.doOpen()
-        }
-    }
 
-    function openVideoPlayer(bvid, title) {
-        if (videoVisible && videoOverlay.videoBvid === bvid) {
-            return
-        }
-        
-        var oldBvid = videoOverlay.videoBvid
-        var hasOldVideo = videoVisible && videoOverlay._playerCreated && oldBvid !== "" && oldBvid !== bvid
-        
-        // 关键修复：立即设置 videoBvid，确保 Loader 创建新实例时获取正确的 bvid
-        videoOverlay.videoTitleText = title
-        videoOverlay.videoIsBangumi = false
-        videoOverlay.videoEpId = ""
-        videoOverlay.videoSeasonId = ""
-        videoOverlay.videoBvid = bvid  // 立即设置，避免时序问题
-        
-        if (hasOldVideo) {
-            // 切换视频时不需要延迟，因为已经有播放器实例
-            videoVisible = true
-            videoOverlay.doSwitch(bvid, title, false, "", "")
-        } else {
-            // 使用延迟加载
-            videoOverlay._pendingOpenBvid = bvid
-            videoOverlay._pendingOpenIsBangumi = false
-            videoOverlay._pendingOpenEpId = ""
-            videoOverlay._pendingOpenSeasonId = ""
-            videoVisible = true
-            videoOverlay.doOpen()
-        }
-    }
-
-    function closeVideoPlayer() {
-        if (!videoVisible) return
-        videoVisible = false
-        videoOverlay.doClose()
-    }
 
     function openLivePlayer(roomId, title, streamer) {
+        GlobalState.requestClosePagesOfType("live", "history")
         // 同一直播间已打开时直接忽略，避免重复加载
         if (liveVisible && liveOverlay.liveRoomId === roomId) {
             return
@@ -1277,29 +843,6 @@ FluPage {
         liveOverlay.doClose()
     }
 
-    // ===== 用户主页（z 序：滚轮守卫 99 < 主页 100 < 视频/直播 100(声明在后)） =====
-    // 入口：视频播放页 UP 信息区/评论区头像（先关视频，露出/替换主页）。
-    // 从主页打开视频时视频盖上主页，退出视频回主页
-    function openUserProfile(mid, name, face, verify) {
-        // 若视频/直播打开中，先关闭。顺序必须在 same-mid 去重之前：
-        // 下方已开着同用户主页时，也要关闭视频露出主页，而不是因去重
-        // 提前返回让视频留在原地
-        if (videoVisible) closeVideoPlayer()
-        if (liveVisible) closeLivePlayer()
-        if (userProfileVisible && userProfileOverlay.profileMid === mid) return
-        userProfileOverlay.profileMid = mid
-        userProfileOverlay.profileName = name || ""
-        userProfileOverlay.profileFace = face || ""
-        userProfileOverlay.profileVerify = verify !== undefined ? verify : -1
-        userProfileVisible = true
-        userProfileOverlay.doOpen()
-    }
-
-    function closeUserProfile() {
-        if (!userProfileVisible) return
-        userProfileVisible = false
-        userProfileOverlay.doClose()
-    }
 
     Component.onDestruction: {
         // 记住用户最后选中的 Tab，下次进历史页恢复

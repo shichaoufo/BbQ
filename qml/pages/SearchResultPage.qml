@@ -26,6 +26,9 @@ FluPage {
     property int initialSearchDelay: 0
     // 首屏搜索是否还欠着（等外层动画结束后由 triggerInitialSearch 清掉）
     property bool _pendingInitSearch: false
+    // 同实例重开搜索：已经搜过（hasSearched=true）也要再搜一次，用这个标记放行，
+    // 不改 hasSearched —— 否则结果区会先跳回"未搜索"的空态再变回结果列表。
+    property bool _forceNextInitSearch: false
 
     // 外层（SearchPage）在弹出动画结束后调用：此时再发首屏搜索，
     // 首屏建模的开销不会和动画抢帧。
@@ -34,12 +37,54 @@ FluPage {
         _pendingInitSearch = false
         initSearchFallback.stop()
         var kw = String(initialKeyword || "").trim()
-        if (kw !== "" && !hasSearched) _startSearch(kw)
+        if (kw === "") return
+        if (!hasSearched || _forceNextInitSearch) {
+            _forceNextInitSearch = false
+            _startSearch(kw)
+        }
     }
+
+    // 搜索牌（CardSearch）在**同一个实例**上换关键词时先调用这个：重置搜索状态，
+    // 顺手关掉本页内的直播播放器（直播还在页内，不是牌；视频/用户主页是更上面的
+    // 牌，不归本页管，也**不能**在这里关掉 —— 抽走搜索牌不该关别的牌）。
+    // 真正的请求由 triggerInitialSearch() 或 initSearchFallback 发出（错开首屏
+    // 建模开销，避免和动画抢帧）。
+    function prepareForNewSearch(kw) {
+        var k = String(kw || "").trim()
+        if (k === "") return
+        if (liveVisible) closeLivePlayer()
+        // 搜索框同步（updateText 内部会抑制联想下拉，不弹空列表框）
+        searchBox.updateText(k)
+        searchBox.focus = false
+        suggestDebounceTimer.stop()
+        suggestCloseTimer.stop()
+        _suggestWords = []
+        _suggestPopupOpen = false
+        // 允许同一个关键词再搜一次（同页重复点同一个标签）
+        _lastCommittedRequestId = 0
+        GlobalState.searchKeyword = k
+        // **立刻清屏并进入加载态**：这张牌马上要被抽到最上面（可能带弹出动画），
+        // 牌面上绝不能还留着上一次的搜索结果。清 ListModel 很便宜，真正的请求
+        // 仍然推迟到 triggerInitialSearch / 兜底定时器，不和动画抢帧。
+        GlobalState.searchResultModel.clear()
+        GlobalState.searchHasSearched = true
+        hasSearched = true
+        loading = true
+        submittedKeyword = k
+        _scrollRestored = false
+        _currentPage = 0
+        resultGrid.positionViewAtBeginning()
+        resultGrid.contentY = 0
+        _forceNextInitSearch = true
+        _pendingInitSearch = true
+        initSearchFallback.stop()
+        initSearchFallback.interval = Math.max(400, initialSearchDelay + 300)
+        initSearchFallback.start()
+    }
+
     property string submittedKeyword: ""
     property bool loading: false
     property bool hasMore: true
-    property bool videoVisible: false
     property int pageSize: Theme.pageSize
     property int _currentPage: 0
     property int _searchRequestId: 0
@@ -66,7 +111,6 @@ FluPage {
     // 直播搜索开关
     property bool liveVisible: false
     // 用户主页开关
-    property bool userProfileVisible: false
 
     // 直播卡片布局参数（与视频卡相同尺寸，竖向封面）
     property int liveCardHeight: 0  // 与视频卡相同：cardWidth*9/16+120，运行时在 cellHeight 计算
@@ -1309,9 +1353,7 @@ FluPage {
             //  visibleChanged），非真实切页，绝不能关闭播放器
             if (App.miniPlayerMode) return
             saveScroll()
-            // 切到其他导航页时关闭视频/直播播放器，避免声音串扰
-            //（与 HomePage/HistoryPage/DynamicPage 的既定行为一致）
-            if (videoVisible) closeVideoPlayer()
+            // 视频/用户主页由牌堆统一关闭；直播播放器仍在本页内，切页时一并关掉
             if (liveVisible) closeLivePlayer()
         }
     }
@@ -2231,21 +2273,6 @@ FluPage {
         } // 关闭顶层 ColumnLayout（顶部栏 + 结果区）
     }     // 关闭 FluFrame（searchFrame）
 
-    // ====== 视频播放器 overlay（从 HistoryPage 复制，支持视频+番剧+切换动画） ======
-    // 注意：FluPage 内部会把 children 包在 contentItem 里，所以这里的 parent
-    // 是 contentItem（尺寸和 FluPage 完全一致）。用 anchors.fill: parent 而不是
-    // search_page，否则 "Cannot anchor to an item that isn't a parent or sibling"
-    // 导致 videoOverlay 宽高 0×0，视频加载了但用户看不见。
-    // 兜底拦截滚轮：videoVisible=true 时消费滚轮，阻止穿透到底层 resultGrid
-    MouseArea {
-        anchors.fill: parent
-        z: 99
-        enabled: search_page.videoVisible
-        acceptedButtons: Qt.NoButton
-        hoverEnabled: true
-        onWheel: function(wheel) { wheel.accepted = true }
-    }
-
     // 兜底拦截滚轮：liveVisible=true 时消费滚轮，阻止穿透到底层 resultGrid
     MouseArea {
         anchors.fill: parent
@@ -2256,228 +2283,6 @@ FluPage {
         onWheel: function(wheel) { wheel.accepted = true }
     }
 
-    Item {
-        id: videoOverlay
-        // 与 HomePage 的 videoOverlay（fill homeFrame + margins 1）几何
-        // 一致：Frame 边距 + overlayMargin 内缩，播放器不遮 Frame 框线。
-        // 注意 anchors 单边 margin 会覆盖 margins 基数，故写成显式和
-        anchors.fill: parent
-        anchors.leftMargin: Theme.homeFrameLeftMargin + Theme.playerOverlayMargin
-        anchors.rightMargin: Theme.homeFrameRightMargin + Theme.playerOverlayMargin
-        anchors.bottomMargin: Theme.homeFrameBottomMargin + Theme.playerOverlayMargin
-        anchors.topMargin: Theme.homeFrameTopMargin + Theme.playerOverlayMargin
-        z: 104
-        visible: opacity > 0 || openVideoAnim.running || closeVideoAnim.running || switchVideoSeqAnim.running
-        opacity: 0
-
-        property string videoBvid: ""
-        property string videoTitleText: ""
-        property bool videoIsBangumi: false
-        property string videoEpId: ""
-        property string videoSeasonId: ""
-        property string _currentLoadedKey: ""
-        property bool _playerCreated: false
-        property string _pendingSwitchBvid: ""
-        property string _pendingSwitchTitle: ""
-        property bool _pendingSwitchIsBangumi: false
-        property string _pendingSwitchEpId: ""
-        property string _pendingSwitchSeasonId: ""
-        property string _pendingOpenBvid: ""
-        property bool _pendingOpenIsBangumi: false
-        property string _pendingOpenEpId: ""
-        property string _pendingOpenSeasonId: ""
-
-        Component {
-            id: videoPlayerComponent
-            VideoPlayerPage {
-                anchors.fill: parent
-                bvid: videoOverlay.videoBvid
-                videoTitle: videoOverlay.videoTitleText
-                isBangumi: videoOverlay.videoIsBangumi
-                epId: videoOverlay.videoEpId
-                seasonId: videoOverlay.videoSeasonId
-            }
-        }
-
-        Item {
-            id: videoContainer
-            anchors.fill: parent
-            transform: Translate {
-                id: videoTranslate
-                y: 0
-            }
-
-            MouseArea {
-                anchors.fill: parent
-                z: -1
-                enabled: videoPlayerLoader.active
-                onClicked: { /* 仅消费事件，防止穿透到底层搜索卡片 */ }
-            }
-
-            Loader {
-                id: videoPlayerLoader
-                anchors.fill: parent
-                active: videoOverlay._playerCreated
-                sourceComponent: videoPlayerComponent
-            }
-        }
-
-        Timer {
-            id: videoPlayerDestroyTimer
-            interval: 400
-            repeat: false
-            onTriggered: {
-                if (!search_page.videoVisible
-                    && !openVideoAnim.running
-                    && !closeVideoAnim.running
-                    && !switchVideoSeqAnim.running) {
-                    videoOverlay._playerCreated = false
-                }
-            }
-        }
-
-        function doOpen() {
-            videoPlayerDestroyTimer.stop()
-            closeVideoAnim.stop()
-            switchVideoSeqAnim.stop()
-            _playerCreated = true
-            openVideoAnim.start()
-        }
-
-        function doClose() {
-            videoPlayerDestroyTimer.stop()
-            openVideoAnim.stop()
-            closeVideoAnim.stop()
-            switchVideoSeqAnim.stop()
-            if (videoPlayerLoader.item) {
-                videoPlayerLoader.item.stopPlayer()
-            }
-            closeVideoAnim.start()
-            videoPlayerDestroyTimer.start()
-        }
-
-        function doSwitch(bvid, title, isBangumi, epId, seasonId) {
-            videoPlayerDestroyTimer.stop()
-            switchVideoSeqAnim.stop()
-            closeVideoAnim.stop()
-            openVideoAnim.stop()
-
-            _pendingSwitchBvid = bvid
-            _pendingSwitchTitle = title
-            _pendingSwitchIsBangumi = !!isBangumi
-            _pendingSwitchEpId = epId || ""
-            _pendingSwitchSeasonId = seasonId || ""
-            _playerCreated = true
-
-            if (videoPlayerLoader.item) {
-                videoPlayerLoader.item.stopPlayer()
-            }
-
-            switchVideoSeqAnim.start()
-        }
-
-        ParallelAnimation {
-            id: openVideoAnim
-            NumberAnimation {
-                target: videoOverlay
-                property: "opacity"
-                from: 0
-                to: 1
-                duration: 250
-                easing.type: Easing.OutCubic
-            }
-            NumberAnimation {
-                target: videoTranslate
-                property: "y"
-                from: videoOverlay.height * 0.15
-                to: 0
-                duration: 250
-                easing.type: Easing.OutCubic
-            }
-            onStopped: {
-                if (videoOverlay._pendingOpenBvid) {
-                    videoOverlay.videoBvid = videoOverlay._pendingOpenBvid
-                    videoOverlay.videoIsBangumi = videoOverlay._pendingOpenIsBangumi
-                    videoOverlay.videoEpId = videoOverlay._pendingOpenEpId
-                    videoOverlay.videoSeasonId = videoOverlay._pendingOpenSeasonId
-                    videoOverlay._pendingOpenBvid = ""
-                }
-            }
-        }
-
-        ParallelAnimation {
-            id: closeVideoAnim
-            NumberAnimation {
-                target: videoOverlay
-                property: "opacity"
-                from: 1
-                to: 0
-                duration: 200
-                easing.type: Easing.InCubic
-            }
-            NumberAnimation {
-                target: videoTranslate
-                property: "y"
-                from: 0
-                to: videoOverlay.height * 0.15
-                duration: 200
-                easing.type: Easing.InCubic
-            }
-        }
-
-        SequentialAnimation {
-            id: switchVideoSeqAnim
-            ParallelAnimation {
-                NumberAnimation {
-                    target: videoOverlay
-                    property: "opacity"
-                    from: 1
-                    to: 0
-                    duration: 200
-                    easing.type: Easing.InCubic
-                }
-                NumberAnimation {
-                    target: videoTranslate
-                    property: "y"
-                    from: 0
-                    to: videoOverlay.height * 0.3
-                    duration: 200
-                    easing.type: Easing.InCubic
-                }
-            }
-            ScriptAction {
-                script: {
-                    videoOverlay.videoBvid = videoOverlay._pendingSwitchBvid
-                    videoOverlay.videoTitleText = videoOverlay._pendingSwitchTitle
-                    videoOverlay.videoIsBangumi = videoOverlay._pendingSwitchIsBangumi
-                    videoOverlay.videoEpId = videoOverlay._pendingSwitchEpId
-                    videoOverlay.videoSeasonId = videoOverlay._pendingSwitchSeasonId
-                }
-            }
-            ParallelAnimation {
-                NumberAnimation {
-                    target: videoOverlay
-                    property: "opacity"
-                    from: 0
-                    to: 1
-                    duration: 250
-                    easing.type: Easing.OutCubic
-                }
-                NumberAnimation {
-                    target: videoTranslate
-                    property: "y"
-                    from: videoOverlay.height * 0.3
-                    to: 0
-                    duration: 250
-                    easing.type: Easing.OutCubic
-                }
-            }
-            onStopped: {
-                videoOverlay._pendingSwitchBvid = ""
-                videoOverlay._pendingSwitchTitle = ""
-            }
-        }
-    }
 
     // 共享弹幕管理器：放在 SearchPage 层级，不随 LivePlayerPage 销毁/重建。
     // 避免 QWebSocket（SSL 握手线程）频繁创建/销毁导致卡死。
@@ -2626,233 +2431,20 @@ FluPage {
         }
     }
 
-    // 兜底拦截滚轮：userProfileVisible=true 时消费滚轮，阻止穿透到底层 resultGrid
-    MouseArea {
-        anchors.fill: parent
-        z: 99
-        enabled: search_page.userProfileVisible
-        acceptedButtons: Qt.NoButton
-        hoverEnabled: true
-        onWheel: function(wheel) { wheel.accepted = true }
-    }
 
-    // ====== 用户主页 Overlay（与 HomePage 相同动画模式） ======
-    Item {
-        id: userProfileOverlay
-        // 与 videoOverlay 同几何：Frame 边距 + playerOverlayMargin 内缩，
-        // 所有弹出页尺寸统一（单边 margin 覆盖 margins 基数，故写成显式和）
-        anchors.fill: parent
-        anchors.leftMargin: Theme.homeFrameLeftMargin + Theme.playerOverlayMargin
-        anchors.rightMargin: Theme.homeFrameRightMargin + Theme.playerOverlayMargin
-        anchors.bottomMargin: Theme.homeFrameBottomMargin + Theme.playerOverlayMargin
-        anchors.topMargin: Theme.homeFrameTopMargin + Theme.playerOverlayMargin
-        z: 102
-        visible: opacity > 0 || openUserProfileAnim.running || closeUserProfileAnim.running
-        opacity: 0
-
-        property string profileMid: ""
-        property string profileName: ""
-        property string profileFace: ""
-        property int profileVerify: -1
-        property bool _profileCreated: false
-
-        Component {
-            id: userProfileComponent
-            UserProfilePage {
-                anchors.fill: parent
-                mid: userProfileOverlay.profileMid
-                userName: userProfileOverlay.profileName
-                userFace: userProfileOverlay.profileFace
-                userVerify: userProfileOverlay.profileVerify
-            }
-        }
-
-        Item {
-            id: userProfileContainer
-            anchors.fill: parent
-            transform: Translate {
-                id: userProfileTranslate
-                y: 0
-            }
-            MouseArea {
-                anchors.fill: parent
-                z: -1
-                enabled: userProfileLoader.active
-                onClicked: { /* 仅消费事件 */ }
-            }
-            Loader {
-                id: userProfileLoader
-                anchors.fill: parent
-                // 守卫：切导航栏时 search_page.visible=false 会使 overlay 的
-                // visible 从父级"流动"为 false，若不守卫会立即卸载销毁用户主
-                // 页实例，切回导航时重新加载。userProfileVisible 是逻辑状态，
-                // 不受父级隐藏影响（与 videoOverlay 的小窗守卫同一模式）
-                active: (userProfileOverlay.visible || search_page.userProfileVisible) && userProfileOverlay._profileCreated
-                sourceComponent: userProfileComponent
-            }
-        }
-
-        Timer {
-            id: userProfileDestroyTimer
-            interval: 250
-            repeat: false
-            onTriggered: {
-                if (!userProfileVisible && !openUserProfileAnim.running && !closeUserProfileAnim.running) {
-                    userProfileOverlay._profileCreated = false
-                }
-            }
-        }
-
-        // 与 HomePage 保持一致：立即创建 + 启动动画。
-        // 实例化开销发生在动画起始帧，被 OutCubic 缓动自然掩盖；
-        // 若延迟到动画结束后再创建，反而会让用户在动画收尾时看到明显卡顿。
-        function doOpen() {
-            userProfileDestroyTimer.stop()
-            closeUserProfileAnim.stop()
-            _profileCreated = true
-            openUserProfileAnim.start()
-        }
-
-        function doClose() {
-            openUserProfileAnim.stop()
-            closeUserProfileAnim.stop()
-            userProfileDestroyTimer.start()
-            closeUserProfileAnim.start()
-        }
-
-        ParallelAnimation {
-            id: openUserProfileAnim
-            NumberAnimation {
-                target: userProfileOverlay
-                property: "opacity"
-                from: 0; to: 1; duration: 250
-                easing.type: Easing.OutCubic
-            }
-            NumberAnimation {
-                target: userProfileTranslate
-                property: "y"
-                from: userProfileOverlay.height * 0.15; to: 0
-                duration: 250
-                easing.type: Easing.OutCubic
-            }
-        }
-
-        ParallelAnimation {
-            id: closeUserProfileAnim
-            NumberAnimation {
-                target: userProfileOverlay
-                property: "opacity"
-                from: 1; to: 0; duration: 200
-                easing.type: Easing.InCubic
-            }
-            NumberAnimation {
-                target: userProfileTranslate
-                property: "y"
-                from: 0; to: userProfileOverlay.height * 0.15
-                duration: 200
-                easing.type: Easing.InCubic
-            }
-        }
-    }
-
+    // 页面类型互斥：直播播放器仍留在本页内（不是牌堆里的牌），
+    // 其它宿主打开直播时关掉自己这份；视频/用户主页已改为牌堆管理，这里不再管。
     Connections {
-        target: App
-        function onVideoOpenRequested(bvid, title) {
-            // 非当前可见页面不响应，避免多页面同时打开播放器
-            if (!search_page.visible) return
-            search_page.openVideoPlayer(bvid, title)
-        }
-        function onBangumiOpenRequested(bvid, epId, seasonId, title) {
-            if (!search_page.visible) return
-            search_page.openBangumiPlayer(bvid, epId, seasonId, title)
-        }
-        function onVideoCloseRequested() {
-            search_page.closeVideoPlayer()
-        }
-        function onUserProfileOpenRequested(mid, name, face, verify) {
-            if (!search_page.visible) return
-            search_page.openUserProfile(mid, name, face, verify)
-        }
-        function onUserProfileCloseRequested() {
-            search_page.closeUserProfile()
+        target: GlobalState
+        function onPageTypeCloseRequested(type, exceptHost) {
+            if (exceptHost === "searchResult") return
+            if (type === "live" && search_page.liveVisible) search_page.closeLivePlayer()
         }
     }
 
-    function openUserProfile(mid, name, face, verify) {
-        // 若视频/直播打开中，先关闭。顺序必须在 same-mid 去重之前：
-        // 下方已开着同用户主页时（主页→视频→点UP本人头像），也要关闭
-        // 视频露出主页，而不是因去重提前返回让视频留在原地
-        if (videoVisible) closeVideoPlayer()
-        if (liveVisible) closeLivePlayer()
-        if (userProfileVisible && userProfileOverlay.profileMid === mid) return
-        userProfileOverlay.profileMid = mid
-        userProfileOverlay.profileName = name || ""
-        userProfileOverlay.profileFace = face || ""
-        userProfileOverlay.profileVerify = verify !== undefined ? verify : -1
-        userProfileVisible = true
-        userProfileOverlay.doOpen()
-    }
-
-    function closeUserProfile() {
-        if (!userProfileVisible) return
-        userProfileVisible = false
-        userProfileOverlay.doClose()
-    }
-
-    function openVideoPlayer(bvid, title) {
-        if (search_page.videoVisible && videoOverlay.videoBvid === bvid) return
-        var oldBvid = videoOverlay.videoBvid
-        var hasOldVideo = search_page.videoVisible && videoOverlay._playerCreated
-                         && oldBvid !== "" && oldBvid !== bvid
-        videoOverlay.videoTitleText = title
-        videoOverlay.videoIsBangumi = false
-        videoOverlay.videoEpId = ""
-        videoOverlay.videoSeasonId = ""
-        videoOverlay.videoBvid = bvid
-        if (hasOldVideo) {
-            search_page.videoVisible = true
-            videoOverlay.doSwitch(bvid, title, false, "", "")
-        } else {
-            videoOverlay._pendingOpenBvid = bvid
-            videoOverlay._pendingOpenIsBangumi = false
-            videoOverlay._pendingOpenEpId = ""
-            videoOverlay._pendingOpenSeasonId = ""
-            search_page.videoVisible = true
-            videoOverlay.doOpen()
-        }
-    }
-
-    function openBangumiPlayer(bvid, epId, seasonId, title) {
-        videoOverlay.videoTitleText = title
-        videoOverlay.videoIsBangumi = true
-        videoOverlay.videoEpId = epId
-        videoOverlay.videoSeasonId = seasonId
-        var videoBvid = bvid
-        if (!videoBvid || videoBvid.indexOf("bangumi_") === 0) {
-            videoBvid = "bangumi_" + (epId || seasonId)
-        }
-        if (search_page.videoVisible && videoOverlay.videoBvid === videoBvid) return
-        videoOverlay.videoBvid = videoBvid
-        if (search_page.videoVisible && videoOverlay._playerCreated) {
-            search_page.videoVisible = true
-            videoOverlay.doSwitch(videoBvid, title, true, epId, seasonId)
-        } else {
-            videoOverlay._pendingOpenBvid = videoBvid
-            videoOverlay._pendingOpenIsBangumi = true
-            videoOverlay._pendingOpenEpId = epId
-            videoOverlay._pendingOpenSeasonId = seasonId
-            search_page.videoVisible = true
-            videoOverlay.doOpen()
-        }
-    }
-
-    function closeVideoPlayer() {
-        if (!search_page.videoVisible) return
-        search_page.videoVisible = false
-        videoOverlay.doClose()
-    }
 
     function openLivePlayer(roomId, title, streamer) {
+        GlobalState.requestClosePagesOfType("live", "searchResult")
         // 同一直播间已打开时直接忽略，避免重复加载
         if (search_page.liveVisible && liveOverlay.liveRoomId === roomId) {
             return

@@ -18,9 +18,7 @@ FluPage {
         root: dynamic_page
     }
 
-    property bool videoVisible: false
     property bool liveVisible: false
-    property bool userProfileVisible: false
 
     // 页面状态
     property bool _pageReady: false
@@ -275,10 +273,10 @@ FluPage {
             //  visibleChanged），非真实切页，绝不能关闭直播播放器
             if (App.miniPlayerMode) return
             _loginWarnShown = false
-            // 切到其他导航页时关闭视频/直播播放器，避免声音串扰
-            //（与 HomePage/HistoryPage 的既定行为一致）
-            if (videoVisible) closeVideoPlayer()
+            // 切到其他导航页：本页内还留着的弹层（直播 / 动态详情）一并关闭。
+            // 视频页与用户主页已改为窗口级牌堆，切页时由 main.qml 统一收牌。
             if (liveVisible) closeLiveRoom()
+            if (detailVisible) closeDynamicDetail()
             return
         }
         // 重新切回动态页：轻量刷新一次红点状态。
@@ -808,6 +806,11 @@ FluPage {
                         var ntNum = nt != null ? parseInt(nt) : NaN
                         var isAt = (ntStr === "At" || ntStr === "at" || ntStr === "RICH_TEXT_NODE_TYPE_AT" || ntNum === 1)
                         var isTopic = (ntStr === "Topic" || ntStr === "topic" || ntStr === "RICH_TEXT_NODE_TYPE_TOPIC")
+                        // 表情节点（新版接口会把用到的表情也作为 rich_text_nodes 下发，
+                        // 带 emoji.url / emoji.gif_url）。desc.emote 字典在部分动态里
+                        // 是空的，这条路径就是那类动态的唯一表情来源。
+                        var isEmoji = (ntStr === "Emoji" || ntStr === "emoji"
+                                       || ntStr === "RICH_TEXT_NODE_TYPE_EMOJI")
                         // 2) 找 text（优先 orig_text，再 text；因为中奖场景等特殊格式，orig_text 更可靠）
                         var rt = ""
                         if (rn.orig_text != null && String(rn.orig_text).length > 0) rt = String(rn.orig_text)
@@ -940,6 +943,19 @@ FluPage {
                                 if (rLinkStr) result.jumpUrls[tText] = rLinkStr
                                 else if (tKeyword) result.jumpUrls[tText] = tKeyword
                             }
+                        } else if (isEmoji) {
+                            // 表情节点：登记到表情表（key 用正文里的原样形态，通常是
+                            // "[脱单doge]"）。registerEmote 定义在本函数靠前的位置，
+                            // var 是函数作用域，这里能直接用。
+                            var rnEmoji = rn.emoji || rn.emote || {}
+                            if (typeof rnEmoji === "string") rnEmoji = { url: rnEmoji }
+                            var rnEmojiUrl = rnEmoji.url || rnEmoji.gif_url || rnEmoji.webp_url
+                                             || rnEmoji.icon_url || ""
+                            if (rt && rnEmojiUrl) {
+                                if (typeof registerEmote === "function") registerEmote(rt, rnEmoji)
+                                else result.emotes[rt] = { text: rt, url: fixHttp(rnEmojiUrl),
+                                                           width: 24, height: 24 }
+                            }
                         } else {
                             // 其他带link节点：普通网页链接/互动抽奖/游戏详情页/视频外链 等
                             var rAnyText = rt.length > 0 ? rt : ""
@@ -1071,7 +1087,15 @@ FluPage {
                 if (typeof emote === "object") {
                     // 用一个辅助函数登记，除原始 key 外，也登记 ev.emoji / ev.en / ev.name 作为备用 key（B 站不同版本 API 返回字段名不同）
                     var registerEmote = function(key, evv) {
-                        if (!key || !evv || !evv.url) return
+                        if (!key || !evv) return
+                        // 个别版本接口把 value 直接给成 URL 字符串（不是对象）
+                        if (typeof evv === "string") evv = { url: evv }
+                        // 只有 gif_url / webp_url、没有 url 的条目也要收：
+                        // 以前这里直接 return，导致正文里的 [打call] 之类
+                        // 原样留下文字（服务端偶尔只给动图地址）
+                        var gifSrc0 = evv.gif_url || evv.gifUrl || evv.webp_url || ""
+                        var url0 = evv.url || gifSrc0
+                        if (!url0) return
                         var metaSize2 = 0
                         if (evv.meta) {
                             var mss = evv.meta.size || 0
@@ -1082,9 +1106,8 @@ FluPage {
                         var eW = metaSize2 || evv.width || 24
                         var eH = metaSize2 || evv.height || 24
                         // 先剥掉 @xxx.png/@xxx 尺寸后缀，避免 RichText 再拼接一次；fixImageUrl 会处理 http→https
-                        var rawUrl = evv.url || ""
-                        var atIdx1 = rawUrl.indexOf("@")
-                        var fixedSrc = atIdx1 >= 0 ? rawUrl.substring(0, atIdx1) : rawUrl
+                        var atIdx1 = url0.indexOf("@")
+                        var fixedSrc = atIdx1 >= 0 ? url0.substring(0, atIdx1) : url0
                         var entry = { text: key, url: fixedSrc, width: eW, height: eH }
                         // 动态表情源（gif_url / 个别版本 gifUrl / webp_url）：评论区
                         // CommentRichText 的 AnimatedImage 路径靠它播放动图。服务端不下发
@@ -1096,6 +1119,21 @@ FluPage {
                             entry.gifUrl = atIdx2 >= 0 ? gifSrc.substring(0, atIdx2) : gifSrc
                         }
                         if (!result.emotes[key]) result.emotes[key] = entry
+                        // 同一份数据里 key 的括号形态并不统一：有的版本给 "[打call]"，
+                        // 有的给 "打call"（或 emoji/name 字段就是裸名）。正文里一定是
+                        // 带方括号的形态，所以两种都登记一份，否则就会漏替换、
+                        // 正文里原样留下 "[打call]" 这几个字。
+                        var altKey = null
+                        if (key.length > 1 && key.charAt(0) === "[" && key.charAt(key.length - 1) === "]")
+                            altKey = key.substring(1, key.length - 1)
+                        else if (key.indexOf("[") < 0)
+                            altKey = "[" + key + "]"
+                        if (altKey && !result.emotes[altKey]) {
+                            var alias = {}
+                            for (var ak in entry) alias[ak] = entry[ak]
+                            alias.text = altKey
+                            result.emotes[altKey] = alias
+                        }
                     }
                     var ekeys = Object.keys(emote)
                     for (var ek = 0; ek < ekeys.length; ek++) {
@@ -1107,6 +1145,23 @@ FluPage {
                         if (ev.name) registerEmote(ev.name, ev)
                         if (ev.en) registerEmote(ev.en, ev)
                     }
+                    // 诊断：正文里有 [xxx] 形态却没命中表情表时记一行日志。
+                    // 只用来定位"服务端到底有没有下发这条表情 / 字段叫什么"，
+                    // 不参与渲染逻辑（每次解析最多一行，不会刷屏）。
+                    try {
+                        var _toks = String(result.content || "").match(/\[[^\[\]]{1,12}\]/g) || []
+                        var _miss = []
+                        for (var _ti = 0; _ti < _toks.length; _ti++) {
+                            if (!result.emotes[_toks[_ti]] && _miss.indexOf(_toks[_ti]) < 0)
+                                _miss.push(_toks[_ti])
+                        }
+                        if (_miss.length > 0) {
+                            console.log("[DynEmote] 未命中:", _miss.join(","),
+                                        "| 表情表条目:", Object.keys(result.emotes).length,
+                                        "| emote字段:", Object.keys(emote).slice(0, 10).join("|"),
+                                        "| desc键:", Object.keys(descData).slice(0, 12).join("|"))
+                        }
+                    } catch (eDE) {}
                 }
             } else if (moduleType === "MODULE_TYPE_STAT") {
                 var statData = module.module_stat || {}
@@ -1348,8 +1403,12 @@ FluPage {
         var srcEmotes = emotesIn || {}
         for (var ek in srcEmotes) {
             var e = srcEmotes[ek]
-            if (!e || !e.url) continue
-            var entry = { url: e.url, width: (e.width > 0) ? e.width : 24, height: (e.height > 0) ? e.height : 24 }
+            // 兼容 value 直接是 URL 字符串的形态
+            if (typeof e === "string") e = { url: e }
+            if (!e) continue
+            var eUrl = e.url || e.gifUrl || e.gif_url || e.webp_url || ""
+            if (!eUrl) continue
+            var entry = { url: eUrl, width: (e.width > 0) ? e.width : 24, height: (e.height > 0) ? e.height : 24 }
             // 动态表情源：服务端字段名历史上是 gif_url，个别版本是 gifUrl
             var gif = e.gifUrl || e.gif_url || ""
             if (gif) { entry.gifUrl = gif; entry.isAnimated = true }
@@ -1505,6 +1564,20 @@ FluPage {
     function openDynamicRichLink(link) {
         if (GlobalState.openCommentLink(link, App)) return
         dynamic_page.openLinkHelper(link)
+    }
+
+    // 动态底部的话题胶囊：用客户端自己的搜索结果页搜这个词。
+    // 以前是把 jump_url（往往是 search.bilibili.com 的地址）丢给系统浏览器，
+    // 现在客户端自己有搜索页，没必要再跳出去。名字拿不到时退回原来的链接跳转。
+    function openTopicChip(name, jumpUrl, topicId) {
+        var kw = String(name || "").replace(/^#|#$/g, "").trim()
+        if (kw !== "") {
+            GlobalState.openInAppSearch(kw)
+            return
+        }
+        var url = String(jumpUrl || "")
+        if (!url && topicId) url = "https://www.bilibili.com/v/topic/detail?topic_id=" + topicId
+        if (url) dynamic_page.openDynamicRichLink(url)
     }
 
     function formatDynamicContent(content, emotes, jumpUrls, atList, topicList, urlList, skipTimestamp) {
@@ -1988,7 +2061,20 @@ FluPage {
         return out
     }
 
+    // 页面类型互斥：直播 / 动态详情仍留在本页内（不是牌堆里的牌），
+    // 其它宿主打开同类页面时关掉自己这份；视频 / 用户主页已由牌堆统一管理。
+    Connections {
+        target: GlobalState
+        function onPageTypeCloseRequested(type, exceptHost) {
+            if (exceptHost === "dynamic") return
+            if (type === "live" && dynamic_page.liveVisible) dynamic_page.closeLiveRoom()
+            else if (type === "detail" && dynamic_page.detailVisible) dynamic_page.closeDynamicDetail()
+        }
+    }
+
     function openDynamicDetail(dynamic) {
+        // 同类互斥：其它宿主的动态详情页先关掉
+        GlobalState.requestClosePagesOfType("detail", "dynamic")
         // 取消可能 pending 的关闭清理（关闭后 250ms 内又重开），避免清掉新数据
         detailCleanupTimer.stop()
         currentDynamic = normalizeDynamicForDetail(dynamic)
@@ -2852,10 +2938,11 @@ FluPage {
                                                 hoverEnabled: true
                                                 cursorShape: Qt.PointingHandCursor
                                                 onClicked: {
-                                                    var url = itemData ? String(itemData.topicJump || "") : ""
-                                                    if (!url && itemData && itemData.topicId)
-                                                        url = "https://www.bilibili.com/v/topic/detail?topic_id=" + itemData.topicId
-                                                    if (url) dynamic_page.openDynamicRichLink(url)
+                                                    if (!itemData) return
+                                                    dynamic_page.openTopicChip(
+                                                        itemData.topicName || "",
+                                                        itemData.topicJump || "",
+                                                        itemData.topicId || "")
                                                 }
                                             }
                                         }
@@ -3448,347 +3535,15 @@ FluPage {
         }
     }
 
-    // 视频播放页/直播页/动态详情页/用户主页打开时，兜底拦截滚轮事件，
-    // 防止其穿透到底层主页滚动视图。
+    // 直播页/动态详情页打开时，兜底拦截滚轮事件，防止其穿透到底层滚动视图。
+    //（视频/用户主页是窗口级牌，由 CardLayer 自己拦滚轮）
     MouseArea {
         anchors.fill: parent
         z: 99
-        enabled: videoVisible || liveVisible || detailVisible || userProfileVisible
+        enabled: liveVisible || detailVisible
         acceptedButtons: Qt.NoButton
         hoverEnabled: true
         onWheel: function(wheel) { wheel.accepted = true }
-    }
-
-    // ===== 用户主页 Overlay（动画/守卫模式与 HomePage userProfileOverlay 一致） =====
-    // z 序：详情 101 < 用户主页 102 < 视频/直播 103。
-    // 从视频打开主页时视频先关闭（openUserProfile 内处理），从主页打开
-    // 视频时视频盖上主页；动态详情保留在主页之下
-    Item {
-        id: userProfileOverlay
-        // 与 detailOverlay/videoOverlay 同几何：Frame 边距 + playerOverlayMargin
-        // 内缩，所有弹出页尺寸统一（单边 margin 覆盖 margins 基数，故写成显式和）
-        anchors.fill: parent
-        anchors.leftMargin: Theme.homeFrameLeftMargin + Theme.playerOverlayMargin
-        anchors.rightMargin: Theme.homeFrameRightMargin + Theme.playerOverlayMargin
-        anchors.bottomMargin: Theme.homeFrameBottomMargin + Theme.playerOverlayMargin
-        anchors.topMargin: Theme.homeFrameTopMargin + Theme.playerOverlayMargin
-        z: 102
-        visible: opacity > 0 || openUserProfileAnim.running || closeUserProfileAnim.running
-        opacity: 0
-
-        property string profileMid: ""
-        property string profileName: ""
-        property string profileFace: ""
-        property int profileVerify: -1
-        property bool _profileCreated: false
-
-        Component {
-            id: userProfileComponent
-            UserProfilePage {
-                anchors.fill: parent
-                mid: userProfileOverlay.profileMid
-                userName: userProfileOverlay.profileName
-                userFace: userProfileOverlay.profileFace
-                userVerify: userProfileOverlay.profileVerify
-            }
-        }
-
-        Item {
-            id: userProfileContainer
-            anchors.fill: parent
-            transform: Translate {
-                id: userProfileTranslate
-                y: 0
-            }
-            MouseArea {
-                anchors.fill: parent
-                z: -1
-                enabled: userProfileLoader.active
-                onClicked: { /* 仅消费事件，不遮挡内部交互 */ }
-            }
-            Loader {
-                id: userProfileLoader
-                anchors.fill: parent
-                // 守卫：切导航栏时 dynamic_page.visible=false 会使 overlay 的
-                // visible 从父级"流动"为 false，若不守卫会立即卸载销毁用户主
-                // 页实例，切回导航时重新加载。userProfileVisible 是逻辑状态，
-                // 不受父级隐藏影响（与 HomePage/SearchPage 同一模式）
-                active: (userProfileOverlay.visible || dynamic_page.userProfileVisible) && userProfileOverlay._profileCreated
-                sourceComponent: userProfileComponent
-            }
-        }
-
-        Timer {
-            id: userProfileDestroyTimer
-            interval: 250
-            repeat: false
-            onTriggered: {
-                if (!userProfileVisible && !openUserProfileAnim.running && !closeUserProfileAnim.running) {
-                    userProfileOverlay._profileCreated = false
-                }
-            }
-        }
-
-        function doOpen() {
-            userProfileDestroyTimer.stop()
-            closeUserProfileAnim.stop()
-            _profileCreated = true
-            openUserProfileAnim.start()
-        }
-
-        function doClose() {
-            openUserProfileAnim.stop()
-            closeUserProfileAnim.stop()
-            userProfileDestroyTimer.start()
-            closeUserProfileAnim.start()
-        }
-
-        ParallelAnimation {
-            id: openUserProfileAnim
-            NumberAnimation {
-                target: userProfileOverlay
-                property: "opacity"
-                from: 0; to: 1; duration: 250
-                easing.type: Easing.OutCubic
-            }
-            NumberAnimation {
-                target: userProfileTranslate
-                property: "y"
-                from: userProfileOverlay.height * 0.15; to: 0
-                duration: 250
-                easing.type: Easing.OutCubic
-            }
-        }
-
-        ParallelAnimation {
-            id: closeUserProfileAnim
-            NumberAnimation {
-                target: userProfileOverlay
-                property: "opacity"
-                from: 1; to: 0; duration: 200
-                easing.type: Easing.InCubic
-            }
-            NumberAnimation {
-                target: userProfileTranslate
-                property: "y"
-                from: 0; to: userProfileOverlay.height * 0.15
-                duration: 200
-                easing.type: Easing.InCubic
-            }
-        }
-    }
-
-    Item {
-        id: videoOverlay
-        // 与 HomePage 的 videoOverlay（fill homeFrame + margins 1）几何
-        // 一致：Frame 边距 + overlayMargin 内缩，播放器不遮 Frame 框线。
-        // 注意 anchors 单边 margin 会覆盖 margins 基数，故写成显式和
-        anchors.fill: parent
-        anchors.leftMargin: Theme.homeFrameLeftMargin + Theme.playerOverlayMargin
-        anchors.rightMargin: Theme.homeFrameRightMargin + Theme.playerOverlayMargin
-        anchors.bottomMargin: Theme.homeFrameBottomMargin + Theme.playerOverlayMargin
-        anchors.topMargin: Theme.homeFrameTopMargin + Theme.playerOverlayMargin
-        z: 103
-        visible: opacity > 0 || openVideoAnim.running || closeVideoAnim.running || switchVideoSeqAnim.running
-        opacity: 0
-
-        property string videoBvid: ""
-        property string videoTitleText: ""
-        // 番剧/电影参数：openBangumiPlayer 赋值、VideoPlayerPage 绑定都依赖这三个属性。
-        // 之前未声明 → 赋值时报 "Cannot assign to non-existent property" 并中断整个函数
-        property bool videoIsBangumi: false
-        property string videoEpId: ""
-        property string videoSeasonId: ""
-        property bool _playerCreated: false
-        property string _pendingSwitchBvid: ""
-        property string _pendingSwitchTitle: ""
-
-        Component {
-            id: videoPlayerComponent
-            VideoPlayerPage {
-                anchors.fill: parent
-                bvid: videoOverlay.videoBvid
-                videoTitle: videoOverlay.videoTitleText
-                // 关键修复：番剧/电影参数必须绑定传入。
-                // 重开时新实例 visible=false，App.bangumiOpenRequested 信号被忽略，
-                // 只能靠这里的绑定；缺失时 isBangumi 恒为 false → 黑屏
-                isBangumi: videoOverlay.videoIsBangumi
-                epId: videoOverlay.videoEpId
-                seasonId: videoOverlay.videoSeasonId
-            }
-        }
-
-        Item {
-            id: videoContainer
-            anchors.fill: parent
-            transform: Translate {
-                id: videoTranslate
-                y: 0
-            }
-
-            MouseArea {
-                anchors.fill: parent
-                z: -1
-                enabled: videoPlayerLoader.active
-                onClicked: { }
-            }
-
-            Loader {
-                id: videoPlayerLoader
-                anchors.fill: parent
-                // 小窗模式守卫：进入小窗时 pageStack 隐藏使 videoOverlay.visible
-                // 从父级"流动"为 false，若不守卫会立即卸载销毁播放页（播放器
-                // 尚未 reparent 出去 → mpv 被终止 → 白屏无声）
-                active: (videoOverlay.visible || App.miniPlayerMode) && videoOverlay._playerCreated
-                sourceComponent: videoPlayerComponent
-            }
-        }
-
-        Timer {
-            id: playerDestroyTimer
-            interval: 250
-            repeat: false
-            onTriggered: {
-                if (!videoVisible && !openVideoAnim.running && !closeVideoAnim.running) {
-                    videoOverlay._playerCreated = false
-                }
-            }
-        }
-
-        function doOpen() {
-            playerDestroyTimer.stop()
-            closeVideoAnim.stop()
-            switchVideoSeqAnim.stop()
-            _playerCreated = true
-            openVideoAnim.start()
-        }
-
-        function doClose() {
-            openVideoAnim.stop()
-            closeVideoAnim.stop()
-            switchVideoSeqAnim.stop()
-            if (videoPlayerLoader.item) {
-                videoPlayerLoader.item.stopPlayer()
-            }
-            playerDestroyTimer.start()
-            closeVideoAnim.start()
-        }
-
-        function doSwitch(bvid, title) {
-            switchVideoSeqAnim.stop()
-            closeVideoAnim.stop()
-            openVideoAnim.stop()
-
-            _pendingSwitchBvid = bvid
-            _pendingSwitchTitle = title
-            _playerCreated = true
-
-            if (videoPlayerLoader.item) {
-                videoPlayerLoader.item.stopPlayer()
-            }
-
-            switchVideoSeqAnim.start()
-        }
-
-        ParallelAnimation {
-            id: openVideoAnim
-            NumberAnimation {
-                target: videoOverlay
-                property: "opacity"
-                from: 0
-                to: 1
-                duration: 250
-                easing.type: Easing.OutCubic
-            }
-            NumberAnimation {
-                target: videoTranslate
-                property: "y"
-                from: videoOverlay.height * 0.15
-                to: 0
-                duration: 250
-                easing.type: Easing.OutCubic
-            }
-        }
-
-        ParallelAnimation {
-            id: closeVideoAnim
-            NumberAnimation {
-                target: videoOverlay
-                property: "opacity"
-                from: 1
-                to: 0
-                duration: 200
-                easing.type: Easing.InCubic
-            }
-            NumberAnimation {
-                target: videoTranslate
-                property: "y"
-                from: 0
-                to: videoOverlay.height * 0.15
-                duration: 200
-                easing.type: Easing.InCubic
-            }
-            onStopped: {
-                if (!videoVisible) {
-                    videoOverlay._playerCreated = false
-                }
-            }
-        }
-
-        SequentialAnimation {
-            id: switchVideoSeqAnim
-
-            // 第一步：旧视频向下滑走 + 淡出
-            ParallelAnimation {
-                NumberAnimation {
-                    target: videoOverlay
-                    property: "opacity"
-                    from: 1
-                    to: 0
-                    duration: 200
-                    easing.type: Easing.InCubic
-                }
-                NumberAnimation {
-                    target: videoTranslate
-                    property: "y"
-                    from: 0
-                    to: videoOverlay.height * 0.3
-                    duration: 200
-                    easing.type: Easing.InCubic
-                }
-            }
-
-            // 第二步：更新数据
-            ScriptAction {
-                script: {
-                    videoOverlay.videoBvid = videoOverlay._pendingSwitchBvid
-                    videoOverlay.videoTitleText = videoOverlay._pendingSwitchTitle
-                }
-            }
-            ParallelAnimation {
-                NumberAnimation {
-                    target: videoOverlay
-                    property: "opacity"
-                    from: 0
-                    to: 1
-                    duration: 250
-                    easing.type: Easing.OutCubic
-                }
-                NumberAnimation {
-                    target: videoTranslate
-                    property: "y"
-                    from: videoOverlay.height * 0.3
-                    to: 0
-                    duration: 250
-                    easing.type: Easing.OutCubic
-                }
-            }
-
-            onStopped: {
-                videoOverlay._pendingSwitchBvid = ""
-                videoOverlay._pendingSwitchTitle = ""
-            }
-        }
     }
 
     // 共享弹幕管理器：放在 DynamicPage 层级，不随 LivePlayerPage 销毁/重建。
@@ -4111,10 +3866,11 @@ FluPage {
                                     hoverEnabled: true
                                     cursorShape: Qt.PointingHandCursor
                                     onClicked: {
-                                        var url = currentDynamic ? String(currentDynamic.topicJump || "") : ""
-                                        if (!url && currentDynamic && currentDynamic.topicId)
-                                            url = "https://www.bilibili.com/v/topic/detail?topic_id=" + currentDynamic.topicId
-                                        if (url) dynamic_page.openDynamicRichLink(url)
+                                        if (!currentDynamic) return
+                                        dynamic_page.openTopicChip(
+                                            currentDynamic.topicName || "",
+                                            currentDynamic.topicJump || "",
+                                            currentDynamic.topicId || "")
                                     }
                                 }
                             }
@@ -4893,27 +4649,6 @@ FluPage {
         }
     }
 
-    Connections {
-        target: App
-        function onVideoOpenRequested(bvid, title) {
-            if (!dynamic_page.visible) return
-            dynamic_page.openVideoPlayer(bvid, title)
-        }
-        function onBangumiOpenRequested(bvid, epId, seasonId, title) {
-            if (!dynamic_page.visible) return
-            dynamic_page.openBangumiPlayer(bvid, epId, seasonId, title)
-        }
-        function onVideoCloseRequested() {
-            dynamic_page.closeVideoPlayer()
-        }
-        function onUserProfileOpenRequested(mid, name, face, verify) {
-            if (!dynamic_page.visible) return
-            dynamic_page.openUserProfile(mid, name, face, verify)
-        }
-        function onUserProfileCloseRequested() {
-            dynamic_page.closeUserProfile()
-        }
-    }
 
     Connections {
         target: Api
@@ -5081,68 +4816,12 @@ FluPage {
         }
     }
 
-    function openVideoPlayer(bvid, title) {
-        if (videoVisible && videoOverlay.videoBvid === bvid) {
-            return
-        }
-
-        var oldBvid = videoOverlay.videoBvid
-        var hasOldVideo = videoVisible && oldBvid !== "" && oldBvid !== bvid
-
-        // 普通视频：清空番剧标记，防止上一次番剧/电影的 isBangumi/epId 残留
-        // 导致本次普通视频被当成番剧加载
-        videoOverlay.videoIsBangumi = false
-        videoOverlay.videoEpId = ""
-        videoOverlay.videoSeasonId = ""
-
-        if (hasOldVideo) {
-            // 切换视频：旧页面先向下滑走，再弹出新页面
-            videoVisible = true
-            videoOverlay.doSwitch(bvid, title)
-        } else {
-            // 首次打开：直接播放打开动画
-            videoOverlay.videoBvid = bvid
-            videoOverlay.videoTitleText = title
-            videoVisible = true
-            videoOverlay.doOpen()
-        }
-    }
-
-    function openBangumiPlayer(bvid, epId, seasonId, title) {
-        var videoBvid = bvid
-        if (!videoBvid || videoBvid.indexOf("bangumi_") === 0) {
-            videoBvid = "bangumi_" + (epId || seasonId)
-        }
-        
-        if (videoVisible && videoOverlay.videoBvid === videoBvid) {
-            return
-        }
-        
-        videoOverlay.videoTitleText = title
-        videoOverlay.videoIsBangumi = true
-        videoOverlay.videoEpId = epId
-        videoOverlay.videoSeasonId = seasonId
-        videoOverlay.videoBvid = videoBvid
-        
-        if (videoVisible && videoOverlay._playerCreated) {
-            videoVisible = true
-            videoOverlay.doSwitch(videoBvid, title, true, epId, seasonId)
-        } else {
-            videoVisible = true
-            videoOverlay.doOpen()
-        }
-    }
-
-    function closeVideoPlayer() {
-        if (!videoVisible) return
-        videoVisible = false
-        videoOverlay.doClose()
-    }
 
     function openLiveRoom(roomId, title, streamer) {
         if (liveVisible && liveOverlay.liveRoomId === roomId) {
             return
         }
+        GlobalState.requestClosePagesOfType("live", "dynamic")
         if (liveVisible && liveOverlay.liveRoomId !== roomId) {
             liveOverlay.doClose()
         }
@@ -5160,27 +4839,4 @@ FluPage {
         liveOverlay.doClose()
     }
 
-    // ===== 用户主页（状态机：详情 101 < 主页 102 < 视频/直播 103） =====
-    // 入口：视频播放页 UP 信息区/评论区头像（先关视频）、动态详情页评论区
-    // 头像（详情保留在主页之下）。关视频后若主页在下方则露出主页
-    function openUserProfile(mid, name, face, verify) {
-        // 若视频/直播打开中，先关闭。顺序必须在 same-mid 去重之前：
-        // 下方已开着同用户主页时，也要关闭视频露出主页，而不是因去重
-        // 提前返回让视频留在原地
-        if (videoVisible) closeVideoPlayer()
-        if (liveVisible) closeLiveRoom()
-        if (userProfileVisible && userProfileOverlay.profileMid === mid) return
-        userProfileOverlay.profileMid = mid
-        userProfileOverlay.profileName = name || ""
-        userProfileOverlay.profileFace = face || ""
-        userProfileOverlay.profileVerify = verify !== undefined ? verify : -1
-        userProfileVisible = true
-        userProfileOverlay.doOpen()
-    }
-
-    function closeUserProfile() {
-        if (!userProfileVisible) return
-        userProfileVisible = false
-        userProfileOverlay.doClose()
-    }
 }

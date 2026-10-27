@@ -212,6 +212,10 @@ set(QML_RESOURCE_FILES
     qml/components/ImagePreviewMenu.qml
     qml/components/CommentRichText.qml
     qml/components/ClampedRichText.qml
+    qml/components/CardLayer.qml
+    qml/components/CardVideo.qml
+    qml/components/CardUser.qml
+    qml/components/CardSearch.qml
     qml/styles/Theme.qml
     qml/assets/icons/play.png
     qml/assets/iconpark.ttf
@@ -330,6 +334,10 @@ qt_add_qml_module(${PROJECT_NAME}
         qml/components/ImagePreviewMenu.qml
         qml/components/CommentRichText.qml
         qml/components/ClampedRichText.qml
+        qml/components/CardLayer.qml
+        qml/components/CardVideo.qml
+        qml/components/CardUser.qml
+        qml/components/CardSearch.qml
         qml/styles/Theme.qml
     RESOURCES
         qml/assets/icons/play.png

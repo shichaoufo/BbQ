@@ -290,6 +290,10 @@ FluWindow {
         currentIndex: 0
 
         onCurrentIndexChanged: {
+            // 切导航栏 = 收掉所有牌（2026-10-27 统一规则）：
+            // 牌堆只服务当前导航页，换页就清台，避免上一页的弹层压在新页面上。
+            cardLayer.closeAll()
+
             // FluNavigationView 的 items 和 footerItems 分别由 nav_list 和 layout_footer 两个 ListView 管理。
             // nav_list 的 model 在 footer 区域是占位用的 FluPaneItemEmpty，不能直接 setCurrentIndex。
             // 这里手动同步两个 ListView 的 currentIndex 来实现高亮。
@@ -338,6 +342,18 @@ FluWindow {
             onActiveChanged: if (active) _wasLoaded = true
             sourceComponent: Component { HistoryPage {} }
         }
+    }
+
+    // ===== 弹层牌堆（窗口级）=====
+    // 视频 / 用户主页 / 搜索结果三种弹层不再分散在各自页面里，而是同住这一个
+    // 宿主：每种只有一张牌，叠放顺序由 GlobalState._cardStack 决定。
+    // 这样"搜索结果里点视频 → 视频里点标签搜索 → 关掉搜索回到视频"才成立
+    //（两种牌必须能互相压）。
+    CardLayer {
+        id: cardLayer
+        anchors.fill: parent
+        anchors.topMargin: app_bar.height
+        anchors.leftMargin: nav_view.navCompactWidth
     }
 
     Item {

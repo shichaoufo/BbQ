@@ -742,6 +742,43 @@ Rectangle {
         App.exitMiniPlayerMode()
     }
 
+    // ===== 被覆盖 / 切走时的"冻结"（暂停但保留实例与进度）=====
+    // 用在两种情况：
+    //   ① 搜索结果页（全局覆盖层）盖到本页上方 → A 打开 B，A 暂停而不是关闭；
+    //   ② 切换导航栏 → 页面冻结，切回来继续，不必重新起播。
+    // 注意：只暂停不卸载，所以同一时刻仍可能有多个 mpv 实例（只有一个在出声）。
+    property bool _suspendedByHost: false
+    // 被覆盖的层数：搜索页 + 用户主页 可能同时压在上面，任一存在都不应出声
+    property int _coverDepth: 0
+
+    // 上层页面压上来 / 撤走（可嵌套计数）
+    function pushCover() {
+        pageRoot._coverDepth += 1
+        pageRoot.suspendPlayback()
+    }
+
+    function popCover() {
+        pageRoot._coverDepth = Math.max(0, pageRoot._coverDepth - 1)
+        if (pageRoot._coverDepth === 0) pageRoot.resumePlayback()
+    }
+
+    function suspendPlayback() {
+        if (!mpvPlayer.hasVideo) return
+        if (mpvPlayer.playing) {
+            _suspendedByHost = true
+            mpvPlayer.pause()
+        }
+    }
+
+    function resumePlayback() {
+        if (!_suspendedByHost) return
+        _suspendedByHost = false
+        if (mpvPlayer.hasVideo && !mpvPlayer.playing) mpvPlayer.play()
+    }
+
+    // 被上层牌压住时的暂停/恢复由 CardVideo 通过 pushCover/popCover 驱动，
+    // 不再监听全局的覆盖信号（overlayCover 那套已随牌堆重构删除）。
+
     // 小窗模式恢复：播放器与弹幕层挂回 playerLayer（videoContainer 的第一个
     // 子项，专用底层容器，叠层由声明位置保证）。任何退出路径（本页按钮/
     // 右键/Esc/窗口关闭/页面销毁）都经 miniPlayerModeChanged 到这里
@@ -1351,6 +1388,9 @@ Rectangle {
         Settings.setBool("video/miniProgress/enabled", pageRoot.miniProgressEnabled)
     }
 
+    // 加载看门狗的重试计数（换视频时清零，最多自动重试一次）
+    property int _loadWatchdogFired: 0
+
     // 退出动画开始前调用：立即停止 mpv 渲染，让 QSG 回到 vsync 模式
     // 避免退出动画被 mpv 的 30fps 渲染节奏拖慢
     function stopPlayer() {
@@ -1366,6 +1406,21 @@ Rectangle {
         pageRoot.danmakuIndex = 0
         pageRoot.lastDanmakuTime = 0
         if (videoDanmakuOverlay) videoDanmakuOverlay.clear()
+    }
+
+    // 真正的"关闭清理"。由 onVisibleChanged(false) 经 hiddenCleanupTimer
+    // 延迟调用，避免可见性抖动把正在加载的播放器杀掉。
+    function hiddenCleanup() {
+        pageRoot.wasClosed = true
+        closePopups()
+        pageRoot.reportFinalProgress()
+        heartbeatTimer.stop()
+        loadWatchdog.stop()
+        mpvPlayer.stop()
+        mpvPlayer.source = ""
+        mpvPlayer.audioSource = ""
+        pageRoot.clearData()
+        pageRoot.danmakuList.clear()
     }
 
     // 统一的上报函数，自动判断番剧/普通视频
@@ -1410,20 +1465,24 @@ Rectangle {
             if (App.miniPlayerMode) return
             pageRoot.wasClosed = true
             closePopups()
-            pageRoot.reportFinalProgress()
-            heartbeatTimer.stop()
-            mpvPlayer.stop()
-            mpvPlayer.source = ""
-            mpvPlayer.audioSource = ""
-            pageRoot.clearData()
-            pageRoot.danmakuList.clear()
-            // 关闭视频时复位 HTTP 连接（等价重启客户端的连接层效果），
-            // 下次打开视频走全新连接，规避 480P 画质降级
+            // 连接层复位保持同步（代价小、且是 480P 降级的规避手段）；
+            // 真正会"杀掉播放器"的清理才延后。
             PlayUrlManager.resetConnectionState()
+            // 只有"真的关掉了"才做销毁式清理：延后 600ms，期间若恢复可见
+            // （父级 overlay 在跑动画、宿主换层）就取消 —— 否则会把正在加载
+            // 的播放器当场杀掉，再可见时只能从头重来。
+            hiddenCleanupTimer.restart()
         } else {
+            hiddenCleanupTimer.stop()
             // 页面从关闭状态重新可见时，重新拉取数据以保证点赞/点踩/收藏等状态最新
             if (pageRoot.wasClosed && pageRoot.bvid !== "") {
                 pageRoot.wasClosed = false
+                // 清理已延后（可能还没跑），这里要主动放开 loadData 的占位守卫，
+                // 否则 loadingBvid 仍等于 bvid，loadData 会被直接 return 掉 → 永久加载中
+                if (mpvPlayer.source === "" && !pageRoot.videoUrlInfo) {
+                    pageRoot.loadingBvid = ""
+                    pageRoot._loadWatchdogFired = 0
+                }
                 loadData()
             } else if (pageRoot.bvid !== "" && pageRoot.aid !== "" && mpvPlayer.source === "") {
                 // 页面重新可见时，如果已有数据但播放器没有源，重新加载播放
@@ -1600,6 +1659,10 @@ Rectangle {
     }
 
     onBvidChanged: {
+        // 换视频即清掉"被覆盖暂停"的标记，避免新视频一加载就被上一次的冻结状态影响
+        pageRoot._suspendedByHost = false
+        // 新视频给一次全新的看门狗额度
+        pageRoot._loadWatchdogFired = 0
         loadData()
     }
 
@@ -1810,6 +1873,49 @@ Rectangle {
         }
     }
 
+    // 加载看门狗：playurl 请求如果在网络层被静默丢弃（被更新的请求取代、
+    // 连接被掐断、回复解析不出东西但没报错），页面会**永久**停在
+    // loadingBvid == bvid 的"加载中"状态 —— loadData 后续全被这个守卫拦掉，
+    // 表现就是"视频页一直转圈，退出重进才正常"。这里超时后自动重试一次。
+    Timer {
+        id: loadWatchdog
+        interval: 15000
+        repeat: false
+        onTriggered: {
+            if (!pageRoot.visible) return
+            if (pageRoot.videoUrlInfo) return
+            if (mpvPlayer.source !== "") return
+            if (pageRoot.loadingBvid === "") return
+            if (pageRoot._loadWatchdogFired >= 1) {
+                console.warn("[VideoLoad] 二次超时，停止自动重试 bvid:", pageRoot.bvid)
+                pageRoot.loadingBvid = ""
+                pageRoot.loadFailed = true
+                pageRoot.loadErrorMsg = "加载超时，请重试"
+                return
+            }
+            pageRoot._loadWatchdogFired += 1
+            console.warn("[VideoLoad] 15s 未拿到播放地址，自动重试一次 bvid:",
+                         pageRoot.bvid, "loadingBvid:", pageRoot.loadingBvid)
+            pageRoot.loadingBvid = ""
+            pageRoot.loadData()
+        }
+    }
+
+    // 可见性抖动的宽限清理：父级 overlay 的 opacity 动画、宿主换层都会让
+    // 本页瞬时 visible=false。以前这里立刻 stopPlayer + clearData +
+    // resetConnectionState，等于把正在加载的播放器当场杀掉，等再次可见只能
+    // 从头重来（"多开几次弹窗后视频打不开"就是这么来的）。
+    // 改成延后执行：期间恢复可见就取消。
+    Timer {
+        id: hiddenCleanupTimer
+        interval: 600
+        repeat: false
+        onTriggered: {
+            if (pageRoot.visible || pageRoot.isMiniWindow || App.miniPlayerMode) return
+            pageRoot.hiddenCleanup()
+        }
+    }
+
     Timer {
         id: playbackRetryTimer
         interval: 2000
@@ -2006,6 +2112,7 @@ Rectangle {
                 // ===== clearData() 之后再：设置 loading 标记 + 启动 timer =====
                 pageRoot.loadingBvid = savedBvid
                 pageRoot._loadingBvid = savedBvid
+                loadWatchdog.restart()
                 pageRoot.loadRetryCount = 0
                 pageRoot.loadErrorMsg = ""
                 pageRoot.loadFailed = false
@@ -2074,6 +2181,7 @@ Rectangle {
                 return
             }
             pageRoot.loadingBvid = bangumiKey
+            loadWatchdog.restart()
             pageRoot.loadRetryCount = 0
             pageRoot.loadErrorMsg = ""
             pageRoot.loadFailed = false
@@ -2115,6 +2223,7 @@ Rectangle {
             return
         }
         pageRoot.loadingBvid = pageRoot.bvid
+        loadWatchdog.restart()
         pageRoot.loadRetryCount = 0
         pageRoot.loadErrorMsg = ""
         pageRoot.loadFailed = false
@@ -2869,6 +2978,8 @@ Rectangle {
             }
         }
         function onPlayUrlReady(info) {
+            loadWatchdog.stop()
+            pageRoot._loadWatchdogFired = 0
             pageRoot.videoUrlInfo = info
             pageRoot.currentQuality = info.qualityName || ""
             pageRoot.currentQualityId = info.qualityId || 0
@@ -3372,6 +3483,14 @@ Rectangle {
                     volume: pageRoot.volume
                     onPlayingChanged: {
                         pageRoot.isPlaying = playing
+                        // 被上层牌压住时（用户主页 / 搜索页在上），无论从哪条路径
+                        // 起播都要立刻压回去。pushCover 若发生在视频还没加载出来的
+                        // 时候，suspendPlayback 会因 hasVideo=false 提前返回，等真正
+                        // 起播时就没人管了 —— 表现是被盖住却一直有声音。
+                        if (playing && pageRoot._coverDepth > 0) {
+                            pageRoot._suspendedByHost = true
+                            mpvPlayer.pause()
+                        }
                         if (videoDanmakuOverlay) {
                             if (playing) videoDanmakuOverlay.resume()
                             else videoDanmakuOverlay.pause()
@@ -5565,8 +5684,9 @@ Rectangle {
                                     anchors.fill: parent
                                     hoverEnabled: true
                                     cursorShape: Qt.PointingHandCursor
-                                    onClicked: Qt.openUrlExternally(
-                                        "https://www.bilibili.com/tag/" + encodeURIComponent(modelData.name || ""))
+                                    // 标签点击 → 客户端自己的搜索结果页（切到搜索页并弹出结果），
+                                    // 不再丢给系统浏览器打开 bilibili.com/tag/
+                                    onClicked: GlobalState.openInAppSearch(modelData.name || "")
                                 }
                             }
                         }
