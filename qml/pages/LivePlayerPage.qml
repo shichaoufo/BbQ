@@ -754,6 +754,8 @@ Rectangle {
         // 只执行第一次，后续调用直接返回（避免 savePlayerSettings 被调 5 次、_loadGeneration 多次递增等问题）
         if (root._stopped) return
         root._stopped = true
+        // 关直播立刻交还电源策略
+        App.setScreenWakeLock(false, "live")
         // 停止弹幕延迟加载定时器：关闭直播时取消未触发的弹幕加载
         danmuLoadTimer.stop()
         // 重置加载标志：快速切换时，上一个房间的 loadStream 可能设了 _loadingInProgress=true
@@ -814,6 +816,8 @@ Rectangle {
     }
 
     Component.onDestruction: {
+        // 兜底释放防息屏锁（App 是全局单例，此处访问安全；不要碰子对象）
+        App.setScreenWakeLock(false, "live")
         // 只保存设置！
         // 其它清理（停 tickTimer、clear 弹幕、disconnectRoom、stop mpv）必须在 stopPlayer() 里先执行，
         // 因为 onDestruction 触发时，子对象（danmakuOverlay、mpvPlayer）可能已经先于 root 被销毁。
@@ -1557,6 +1561,10 @@ Rectangle {
             liveMode: true  // 直播模式：小cache低延迟（10s/16M），覆盖视频默认的大cache配置
             volume: root.volume
             onPlayingChanged: {
+                // 播放期间阻止系统息屏/自动睡眠
+                App.setScreenWakeLock(playing, "live")
+                // 同上：直播也会被 mpv 写成媒体标题
+                if (playing) App.fixAudioSessionIdentity()
                 // 检测异常停止：之前在播放，现在停止了，但还没有视频
                 if (!playing && root._wasPlaying && root._waitingForVideo && !hasVideo) {
                     console.warn("[LivePlayerPage] mpv stopped unexpectedly without video, retrying...")

@@ -392,6 +392,13 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
 # 直接调用 zlib API 时仍需显式链接（-lz）
 target_link_libraries(${PROJECT_NAME} PRIVATE z)
 
+# Windows：音频会话接管需要 COM（IMMDeviceEnumerator / IAudioSessionControl2）。
+# 只需要 ole32（CoCreateInstance/CoInitializeEx）；GUID 已在 AppManager.cpp 内
+# 自行定义——mingw 的 uuid/mmdevapi 库并不导出这些符号。
+if(WIN32)
+    target_link_libraries(${PROJECT_NAME} PRIVATE ole32)
+endif()
+
 # DanmakuCanvas 图集路径使用 QRhi private API（newTexture/uploadTexture），
 # RHI 接口跨后端通用（D3D11/Metal/OpenGL），private 头随标准 Qt 安装提供
 target_link_libraries(${PROJECT_NAME} PRIVATE Qt${QT_VERSION_MAJOR}::GuiPrivate)

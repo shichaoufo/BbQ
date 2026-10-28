@@ -9,6 +9,7 @@
 //（仅有前置声明时 moc 生成的属性元调用代码在元类型系统注册处编译失败）
 #include <QQuickItem>
 #include <QFont>
+#include <QSet>
 
 class AppManager : public QObject
 {
@@ -64,6 +65,19 @@ public:
     // 不用 QML MouseArea 的 cursorShape 实现——叠层顺序/visible 切换时
     // 窗口光标不会随静止鼠标重新求值，会出现残留可见光标。
     Q_INVOKABLE void setPlayerCursorHidden(bool hidden);
+
+    // 播放期间阻止系统息屏 / 自动睡眠（Windows: SetThreadExecutionState）。
+    // owner 用于区分来源（"video" / "live"），内部按 owner 记录：
+    // 只要还有一个 owner 在播就保持唤醒，全部释放后才恢复系统默认电源策略。
+    // 必须在 GUI 线程调用（SetThreadExecutionState 是线程级的）。
+    Q_INVOKABLE void setScreenWakeLock(bool on, const QString &owner);
+
+    // 把本进程的 Windows 音频会话显示名/图标改回客户端自己。
+    // 起因：mpv 的 WASAPI 输出会把会话 DisplayName 设成 media-title（DASH/EDL
+    // 下就是音频流 URL），并把 IconPath 指向不存在的 mpv.exe，于是系统音量
+    // 合成器里显示成一串 URL 加蓝色占位方块。每次开始播放时调用一次即可。
+    Q_INVOKABLE void fixAudioSessionIdentity();
+
     // 主窗口注册（小窗模式窗口变身与系统原生移动都需要主窗口指针）
     Q_INVOKABLE void registerMainWindow(QObject *windowObj);
     // ===== 小窗播放（单窗口变身）=====
@@ -112,6 +126,9 @@ signals:
     void shortLinkResolved(const QString &sourceUrl, const QString &finalUrl);
 
 private:
+    // 正在要求"别息屏"的来源集合（video / live）。空 = 未持有唤醒锁。
+    QSet<QString> m_wakeLockOwners;
+
     static AppManager *s_instance;
     bool m_vulkanEnabled;
     QString m_rendererBackend;

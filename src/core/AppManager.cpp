@@ -16,10 +16,17 @@
 #include <QTextBlock>
 #include <QTextLayout>
 #include <QAbstractTextDocumentLayout>
+#include <QDir>
+#include <QCoreApplication>
+#include <string>
 
 #ifdef Q_OS_WIN
 #include <windows.h>
 #include <dwmapi.h>
+// 音频会话接管（音量合成器里的显示名/图标），见 fixAudioSessionIdentity()
+#include <objbase.h>
+#include <mmdeviceapi.h>
+#include <audiopolicy.h>
 // flushWindowSystemEvents：setWindowState 后 Qt 几何变更事件仍在窗口系统
 // 事件队列中未派发，需 flush 后 geometry() 才反映还原后的普通态几何
 #include <qpa/qwindowsysteminterface.h>
@@ -57,6 +64,169 @@ void AppManager::setRecommendScrollY(qreal y)
         return;
     m_recommendScrollY = y;
     emit recommendScrollYChanged();
+}
+
+void AppManager::setScreenWakeLock(bool on, const QString &owner)
+{
+#ifdef Q_OS_WIN
+    if (owner.isEmpty()) return;
+
+    const bool wasActive = !m_wakeLockOwners.isEmpty();
+    if (on) {
+        m_wakeLockOwners.insert(owner);
+    } else {
+        m_wakeLockOwners.remove(owner);
+    }
+    const bool nowActive = !m_wakeLockOwners.isEmpty();
+    if (wasActive == nowActive) return;  // 状态没变，不重复调系统 API
+
+    if (nowActive) {
+        // ES_CONTINUOUS        ：本次设置一直有效，直到下次调用清除
+        // ES_SYSTEM_REQUIRED   ：阻止系统自动睡眠/休眠
+        // ES_DISPLAY_REQUIRED  ：阻止关闭显示器（息屏）
+        // 只影响本线程（GUI 主线程），不会改用户的电源计划。
+        SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED);
+        qWarning() << "[AppManager] screen wake lock acquired by:" << m_wakeLockOwners;
+    } else {
+        // 只传 ES_CONTINUOUS 表示清除之前的请求，交还系统默认电源策略
+        SetThreadExecutionState(ES_CONTINUOUS);
+        qWarning() << "[AppManager] screen wake lock released";
+    }
+#else
+    // 非 Windows 平台暂不处理（Linux 可用 org.freedesktop.ScreenSaver.Inhibit，
+    // 需要额外的 D-Bus 依赖，当前只在 Windows 上验证）
+    Q_UNUSED(on)
+    Q_UNUSED(owner)
+#endif
+}
+
+#ifdef Q_OS_WIN
+// mingw 的 libuuid/libmmdevapi 并不导出这几个 GUID 符号（链接期会 undefined
+// reference to IID_IAudioSessionControl2 等），所以按 SDK 里的值自己定义一份，
+// 不再引用头文件里的 extern 常量。
+static const CLSID kClsidMMDeviceEnumerator =
+    {0xbcde0395, 0xe52f, 0x467c, {0x8e, 0x3d, 0xc4, 0x57, 0x92, 0x91, 0x69, 0x2e}};
+static const IID kIID_IMMDeviceEnumerator =
+    {0xa95664d2, 0x9614, 0x4f35, {0xa7, 0x46, 0xde, 0x8d, 0xb6, 0x36, 0x17, 0xe6}};
+static const IID kIID_IAudioSessionManager2 =
+    {0x77aa99a0, 0x1bd6, 0x484f, {0x8b, 0xc7, 0x2c, 0x65, 0x4c, 0x9a, 0x9b, 0x6f}};
+static const IID kIID_IAudioSessionControl2 =
+    {0xbfb7ff88, 0x7239, 0x4fc9, {0x8f, 0xa2, 0x07, 0xc9, 0x50, 0xbe, 0x9c, 0x6d}};
+
+// 枚举本进程的所有渲染音频会话，把显示名与图标改写为客户端自己的。
+// 全部失败都静默返回：最坏情况只是维持 mpv 写的那份名字。
+static void applyAudioSessionIdentity()
+{
+    const DWORD pid = GetCurrentProcessId();
+    const QString exePath = QDir::toNativeSeparators(QCoreApplication::applicationFilePath());
+    // IconPath 用 "<exe>,<index>" 形式，index 取 0（app.rc 里的 IDI_ICON1）
+    const std::wstring iconPath = (exePath + QStringLiteral(",0")).toStdWString();
+    const std::wstring displayName = L"BbQ";
+
+    IMMDeviceEnumerator *enumerator = nullptr;
+    if (FAILED(CoCreateInstance(kClsidMMDeviceEnumerator, nullptr, CLSCTX_ALL,
+                                kIID_IMMDeviceEnumerator,
+                                reinterpret_cast<void **>(&enumerator))) || !enumerator) {
+        return;
+    }
+
+    IMMDevice *device = nullptr;
+    if (FAILED(enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &device)) || !device) {
+        enumerator->Release();
+        return;
+    }
+
+    IAudioSessionManager2 *manager = nullptr;
+    if (FAILED(device->Activate(kIID_IAudioSessionManager2, CLSCTX_ALL, nullptr,
+                                reinterpret_cast<void **>(&manager))) || !manager) {
+        device->Release();
+        enumerator->Release();
+        return;
+    }
+
+    IAudioSessionEnumerator *sessions = nullptr;
+    if (FAILED(manager->GetSessionEnumerator(&sessions)) || !sessions) {
+        manager->Release();
+        device->Release();
+        enumerator->Release();
+        return;
+    }
+
+    int count = 0;
+    if (SUCCEEDED(sessions->GetCount(&count))) {
+        for (int i = 0; i < count; ++i) {
+            IAudioSessionControl *ctrl = nullptr;
+            if (FAILED(sessions->GetSession(i, &ctrl)) || !ctrl) continue;
+
+            DWORD sessionPid = 0;
+            IAudioSessionControl2 *ctrl2 = nullptr;
+            if (SUCCEEDED(ctrl->QueryInterface(kIID_IAudioSessionControl2,
+                                               reinterpret_cast<void **>(&ctrl2))) && ctrl2) {
+                ctrl2->GetProcessId(&sessionPid);
+                ctrl2->Release();
+            }
+
+            // 只改自己的会话：音量合成器里其它程序的条目不能碰
+            if (sessionPid == pid) {
+                // 回读比对：mpv 会在 AO 初始化后把它自己那份 media-title /
+                // mpv.exe 图标写进来，所以每次都检查，不一致才改回去。
+                LPOLESTR curName = nullptr;
+                if (SUCCEEDED(ctrl->GetDisplayName(&curName))) {
+                    const bool need = !curName || wcscmp(curName, displayName.c_str()) != 0;
+                    CoTaskMemFree(curName);
+                    if (need) {
+                        const HRESULT hrSet = ctrl->SetDisplayName(displayName.c_str(), nullptr);
+                        if (FAILED(hrSet)) {
+                            qWarning() << "[AppManager] SetDisplayName failed, hr=0x"
+                                       + QString::number(quint32(hrSet), 16);
+                        }
+                    }
+                }
+
+                LPOLESTR curIcon = nullptr;
+                if (SUCCEEDED(ctrl->GetIconPath(&curIcon))) {
+                    const bool need = !curIcon || _wcsicmp(curIcon, iconPath.c_str()) != 0;
+                    // 只报一次：轮询间隔 1.5s，成功的话不刷屏
+                    static bool iconReported = false;
+                    if (need) {
+                        const HRESULT hrSet = ctrl->SetIconPath(iconPath.c_str(), nullptr);
+                        if (FAILED(hrSet) && !iconReported) {
+                            iconReported = true;
+                            qWarning() << "[AppManager] SetIconPath failed, hr=0x"
+                                       + QString::number(quint32(hrSet), 16)
+                                       << "path=" << QString::fromStdWString(iconPath);
+                        }
+                    } else if (!iconReported) {
+                        iconReported = true;
+                        // 系统读回的值和我们设的一致：说明 SetIconPath 被接受，
+                        // 若界面仍显示方块，那是 Win11 音量合成器不采信会话图标。
+                        qWarning() << "[AppManager] icon path accepted:" << QString::fromStdWString(iconPath);
+                    }
+                    CoTaskMemFree(curIcon);
+                }
+            }
+            ctrl->Release();
+        }
+    }
+
+    sessions->Release();
+    manager->Release();
+    device->Release();
+    enumerator->Release();
+}
+#endif
+
+void AppManager::fixAudioSessionIdentity()
+{
+#ifdef Q_OS_WIN
+    // 名字的源头已在 mpv 侧解决：force-media-title 固定为 "BbQ"，mpv 写进
+    // Windows 音频会话的就是这个名字，不需要再周期性纠正。
+    // 这里只做一次：压掉 mpv 可能追加的 " - mpv" 后缀，并顺带尝试设置图标
+    //（Win11 音量合成器不采信会话图标，设不上也不影响播放）。
+    const HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    applyAudioSessionIdentity();
+    if (hr == S_OK) CoUninitialize();
+#endif
 }
 
 void AppManager::setPlayerCursorHidden(bool hidden)

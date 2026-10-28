@@ -1420,6 +1420,8 @@ Rectangle {
     // 退出动画开始前调用：立即停止 mpv 渲染，让 QSG 回到 vsync 模式
     // 避免退出动画被 mpv 的 30fps 渲染节奏拖慢
     function stopPlayer() {
+        // 关闭播放器时立刻交还电源策略，别让电脑保持"永不熄屏"
+        App.setScreenWakeLock(false, "video")
         closePopups()
         savePlayerSettings()
         pageRoot.reportFinalProgress()
@@ -1665,6 +1667,9 @@ Rectangle {
     }
 
     Component.onDestruction: {
+        // 兜底释放防息屏锁：页面被直接销毁时不一定走 stopPlayer，
+        // 漏掉这里会让电脑一直不熄屏（比不防息屏更糟）
+        App.setScreenWakeLock(false, "video")
         closePopups()
         // 小窗模式下被销毁（外部代码直接关页面的兜底路径）：退出小窗模式，
         // 恢复主窗口几何与常规 UI。播放器/迷你 UI 层随本页子树一并销毁
@@ -3510,6 +3515,12 @@ Rectangle {
                     volume: pageRoot.volume
                     onPlayingChanged: {
                         pageRoot.isPlaying = playing
+                        // 播放期间阻止系统息屏/自动睡眠（暂停、结束、关闭都会走到
+                        // playing=false，从而自动释放）
+                        App.setScreenWakeLock(playing, "video")
+                        // 开始播放时把 Windows 音频会话的显示名/图标改回客户端自己
+                        //（mpv 会把它写成 media-title，DASH 下就是一串音频流 URL）
+                        if (playing) App.fixAudioSessionIdentity()
                         // 被上层牌压住时（用户主页 / 搜索页在上），无论从哪条路径
                         // 起播都要立刻压回去。pushCover 若发生在视频还没加载出来的
                         // 时候，suspendPlayback 会因 hasVideo=false 提前返回，等真正
