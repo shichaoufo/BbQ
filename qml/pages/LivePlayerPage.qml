@@ -116,6 +116,18 @@ Rectangle {
     property int maxEofRetries: 5        // 断流重连上限，超过则判定直播已断开并显示错误提示
     property string _eofRoomId: ""       // 发起断流重连时的房间号，期间切换房间则取消重连
 
+    // ===== 断流重连两段式 =====
+    // 第 1~3 次断流：用**当前 URL** 原地重开（不重新请求 playurl，省一次 HTTPS，
+    //               覆盖瞬时抖动、连接被 CDN 重置这类"流还在、只是本地断了"）；
+    // 第 4 次起    ：重新请求 playurl + 换候选（覆盖 URL 过期、CDN 节点故障、
+    //               主播断流重推导致旧 session 失效）。
+    // 计数只在"连续播放满 6 秒"后才清零（见 stablePlayTimer）：坏节点常能出
+    // 几秒画面又断，一出画面就清零会让它永远停在原地重开阶段升不上去。
+    property int _sameUrlRetries: 0
+    property int maxSameUrlRetries: 3
+    property bool _pendingSameUrlReload: false  // 本次重连走"原地重开"还是"重取地址"
+    property bool _playedOnce: false            // 本次加载是否出过画面（区分中途断流/首次加载失败）
+
     // 实际播放的视频参数（来自 mpv，用于验证当前流的真实画质）
     property int actualWidth: 0
     property int actualHeight: 0
@@ -494,6 +506,62 @@ Rectangle {
         }
     }
 
+    // 断流重连调度（两段式）。reason 只用于日志区分来源（eof / error）。
+    function scheduleDisconnectRetry(reason) {
+        if (root._stopped || root.roomId === "" || root._loadingInProgress) return
+        // 去重：同一次断流 mpv 可能先报 error 再报 EOF（或反过来）。
+        // 第一次信号已经把重连排进 eofReconnectTimer；定时器还在跑就说明
+        // 这次断流已安排过，直接忽略。定时器触发（重连已执行）后再断才是新的一次。
+        if (eofReconnectTimer.running) return
+
+        root._eofRetryCount++
+        if (root._eofRetryCount > root.maxEofRetries) {
+            console.warn("[LivePlayerPage] disconnect retries exhausted, reason:", reason)
+            root.handleLoadFailure("直播连接已断开，请点击重新加载")
+            return
+        }
+        root._eofRoomId = root.roomId
+
+        var sameUrl = root._sameUrlRetries < root.maxSameUrlRetries
+        if (sameUrl) root._sameUrlRetries++
+        root._pendingSameUrlReload = sameUrl
+
+        var interval
+        if (sameUrl) {
+            // 原地重开很便宜：1s / 1.5s / 2s，尽快恢复
+            interval = 1000 + 500 * (root._sameUrlRetries - 1)
+        } else {
+            // 重取地址：退避拉长，避免把风控/限流打得更多
+            interval = Math.min(2000 * Math.pow(2, root._eofRetryCount - root.maxSameUrlRetries - 1), 10000)
+        }
+
+        console.warn("[LivePlayerPage] disconnect (" + reason + "), attempt", root._eofRetryCount,
+                     sameUrl ? "SAME-URL" : "RELOAD-PLAYURL", "in", interval, "ms")
+        eofReconnectTimer.interval = interval
+        eofReconnectTimer.restart()
+    }
+
+    // 快路径：不重新请求 playurl，直接把当前地址再交给 mpv。
+    // 注意不能写 mpvPlayer.source = root.streamUrl —— setSource 对相同值会直接
+    // return（避免 QML 绑定重复触发），所以改用 mpvPlayer.reload()。
+    function reloadSameSource() {
+        if (!root.visible) return
+        if (root.streamUrl === "") {
+            root.loadStream()
+            return
+        }
+        console.warn("[LivePlayerPage] reconnecting with same url, same-url attempt", root._sameUrlRetries)
+        root.loadFailed = false
+        root.loadErrorMsg = ""
+        root._waitingForVideo = true
+        root._wasPlaying = false
+        root._loadStartTime = Date.now()
+        mpvPlayer.reload()
+        loadTimeoutTimer.start()
+        videoInfoTimer.start()
+        delayedPlayTimer.start()
+    }
+
     function loadStream() {
         if (!root.roomId || root.roomId === "") return
         if (root._loadingInProgress) {
@@ -523,6 +591,14 @@ Rectangle {
         root.watchedShowText = ""
         root._waitingForVideo = false
         root._wasPlaying = false
+        // 注意：这里**不清零** _sameUrlRetries / _eofRetryCount。
+        // 它们表达的是"这一轮断流已经重试了几次"，只在三种情况下归零：
+        // 连续播稳 6 秒（stablePlayTimer）、切房间、用户换清晰度。
+        // 若在这里清零，第 4 次断流刚升级到"重取地址"，第 5 次又会退回
+        // "原地重开 3 次"，永远升不上去。
+        root._pendingSameUrlReload = false
+        root._playedOnce = false
+        stablePlayTimer.stop()
         // setSource("") 内部会调 stop() + stopRenderTimer()，无需额外调 mpvPlayer.stop()
         mpvPlayer.source = ""
         loadTimeoutTimer.stop()
@@ -601,7 +677,11 @@ Rectangle {
         root.loadRetryCount = 0
         root._loadingInProgress = false
         root._eofRetryCount = 0
+        root._sameUrlRetries = 0
+        root._pendingSameUrlReload = false
+        root._playedOnce = false
         eofReconnectTimer.stop()
+        stablePlayTimer.stop()
         loadTimeoutTimer.stop()
         delayedPlayTimer.stop()
         videoInfoTimer.stop()
@@ -722,8 +802,12 @@ Rectangle {
         root._fullReloadAttempted = false
         root._loadingInProgress = false
         root._eofRetryCount = 0  // 关闭播放器，取消未触发的断流重连
+        root._sameUrlRetries = 0
+        root._pendingSameUrlReload = false
+        root._playedOnce = false
         root._loadGeneration++  // 递增代次，使所有 pending 的异步 API 响应（streamInfo/danmuInfo）作废
         eofReconnectTimer.stop()
+        stablePlayTimer.stop()
         loadTimeoutTimer.stop()
         delayedPlayTimer.stop()
         videoInfoTimer.stop()
@@ -1483,10 +1567,18 @@ Rectangle {
                         root.tryNextCandidate()
                     }
                 }
+                // 一旦掉线就停"稳定播放"计时，避免把刚断的流算成稳定
+                if (!playing) stablePlayTimer.stop()
                 root._wasPlaying = playing
             }
             onErrorOccurred: {
                 console.warn("[LivePlayerPage] mpv error:", error)
+                // 出过画面又报错 = 播放中途断流，走两段式重连；
+                // 从未出过画面属于首次加载失败，仍按"换候选 → 完整重载"处理。
+                if (root._playedOnce) {
+                    root.scheduleDisconnectRetry("error")
+                    return
+                }
                 root.loadRetryCount++
                 if (root.loadRetryCount >= root.maxLoadRetries) {
                     root.handleLoadFailure(error)
@@ -1495,28 +1587,23 @@ Rectangle {
                 }
             }
             onLiveStreamEof: {
-                // 直播中途断流（主播推流中断）：延迟自动重连，间隔 2s 起指数递增（上限 10s）
-                // 已在关闭/切房/加载流程中则交给现有重试机制，不重复处理
-                if (root._stopped || root.roomId === "" || root._loadingInProgress) return
-                root._eofRetryCount++
-                if (root._eofRetryCount > root.maxEofRetries) {
-                    console.warn("[LivePlayerPage] live stream EOF reconnect attempts exhausted")
-                    root.handleLoadFailure("直播连接已断开，请点击重新加载")
-                    return
-                }
-                console.warn("[LivePlayerPage] live stream EOF, scheduling reconnect, attempt:", root._eofRetryCount)
-                root._eofRoomId = root.roomId
-                eofReconnectTimer.interval = Math.min(2000 * Math.pow(2, root._eofRetryCount - 1), 10000)
-                eofReconnectTimer.restart()
+                // 直播中途断流（主播推流中断 / CDN 掐连接）。两段式重连见
+                // scheduleDisconnectRetry：前 3 次原地重开同一 URL，第 4 次起重取地址。
+                root.scheduleDisconnectRetry("eof")
             }
             onHasVideoChanged: {
                 if (hasVideo) {
                     // 视频加载成功
                     root._waitingForVideo = false
                     root.loadRetryCount = 0
-                    root._eofRetryCount = 0  // 断流重连成功，重置 EOF 计数
+                    root._playedOnce = true
+                    // 这里**不再**立刻清零 _eofRetryCount / _sameUrlRetries：
+                    // 坏节点常常能出几秒画面又断，一出画面就清零会让它永远停在
+                    // "原地重开"阶段、永远升不到"重取地址"。改由 stablePlayTimer
+                    // 在连续播放满 6 秒后清零。
                     eofReconnectTimer.stop()
                     loadTimeoutTimer.stop()
+                    stablePlayTimer.restart()
                     // 确保视频自动播放（处理 hasVideo: true 但 playing: false 的情况）
                     if (!playing) {
                         mpvPlayer.play()
@@ -2183,6 +2270,10 @@ Rectangle {
                                     root.currentQuality = modelData.desc
                                     root.currentQn = modelData.qn
                                     root.qualityChanged(modelData.desc)
+                                    // 换清晰度拿到的是全新地址：断流计数归零，
+                                    // 让新流重新享有"前 3 次原地重开"的快路径
+                                    root._sameUrlRetries = 0
+                                    root._eofRetryCount = 0
                                     root.loadStream()
                                 }
                             }
@@ -2312,8 +2403,9 @@ Rectangle {
     // 不必等定时器下一个节拍
     onLiveStartTimeChanged: root.liveDurationText = root.formatLiveDuration(root.liveStartTime)
 
-    // 直播断流自动重连定时器：mpv 报 EOF（主播推流中断导致服务器侧终止流）后，
-    // 延迟重新调 loadStream 拉取新流地址；间隔由 onLiveStreamEof 指数递增设置
+    // 直播断流重连定时器。触发时按 scheduleDisconnectRetry 预先决定的策略执行：
+    //   _pendingSameUrlReload=true  → 原地重开当前 URL（快路径，前 3 次）
+    //   _pendingSameUrlReload=false → loadStream() 重新请求 playurl + 换候选（第 4 次起）
     Timer {
         id: eofReconnectTimer
         interval: 2000
@@ -2321,9 +2413,35 @@ Rectangle {
         onTriggered: {
             // 房间已切换/播放器已关闭，取消本次重连
             if (root._stopped || root.roomId === "" || root.roomId !== root._eofRoomId) return
-            console.warn("[LivePlayerPage] live stream EOF, reconnecting... attempt:", root._eofRetryCount)
-            root._fullReloadAttempted = false  // 每次 EOF 重连视为新一轮尝试，恢复完整重载兜底
+            if (root._pendingSameUrlReload) {
+                root._pendingSameUrlReload = false
+                root.reloadSameSource()
+                return
+            }
+            console.warn("[LivePlayerPage] re-fetching playurl, attempt:", root._eofRetryCount)
+            root._fullReloadAttempted = false  // 重取视为新一轮尝试，恢复完整重载兜底
             root.loadStream()
+        }
+    }
+
+    // 稳定播放计时：连续播满 6 秒才认为断流重连真的成功，此时才清零断流计数。
+    // 目的：坏节点能出几秒画面但反复断，若一出画面就清零，计数永远停在
+    // 1~3，永远升不到"重新请求 playurl 换节点"那一段。
+    Timer {
+        id: stablePlayTimer
+        interval: 6000
+        repeat: false
+        onTriggered: {
+            if (!mpvPlayer.hasVideo) return
+            // 缓冲中（playing=false）不算数，延后一轮再判，
+            // 否则恰好在缓冲时触发就永远等不到下一次清零机会
+            if (!mpvPlayer.playing) { stablePlayTimer.restart(); return }
+            if (root._eofRetryCount !== 0 || root._sameUrlRetries !== 0) {
+                console.warn("[LivePlayerPage] playback stable, reset disconnect counters",
+                             "eof:", root._eofRetryCount, "sameUrl:", root._sameUrlRetries)
+            }
+            root._eofRetryCount = 0
+            root._sameUrlRetries = 0
         }
     }
 
