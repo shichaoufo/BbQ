@@ -117,11 +117,17 @@ bool WbiSigner::fetchKeysSync()
             }
         }
     } else {
-        qDebug() << "[WbiSigner] fetchKeysSync failed/error:" << reply->error() << reply->errorString();
+        qWarning() << "[WbiSigner] fetchKeysSync failed/error:" << reply->error() << reply->errorString();
     }
 
     reply->deleteLater();
-    qDebug() << "[WbiSigner] fetchKeysSync result:" << success;
+    if (success) {
+        qDebug() << "[WbiSigner] fetchKeysSync result: true (keys cached)";
+    } else {
+        // 拿不到 img_key/sub_key：请求会退化为未签名（B 站可能降清晰度/限流），
+        // 必须写进日志，别让它静默发生
+        qWarning() << "[WbiSigner] fetchKeysSync result: false, requests will be UNSIGNED";
+    }
     return success;
 }
 
@@ -137,7 +143,7 @@ QString WbiSigner::signParams(const QString& params)
     qDebug() << "[WbiSigner] signParams called, mixinKey empty:" << m_mixinKey.isEmpty();
     if (m_mixinKey.isEmpty()) {
         if (!fetchKeysSync()) {
-            qDebug() << "[WbiSigner] signParams returning unsigned params";
+            qWarning() << "[WbiSigner] signParams returning UNSIGNED params (signing unavailable)";
             return params;
         }
     }

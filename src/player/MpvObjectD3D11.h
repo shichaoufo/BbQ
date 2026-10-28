@@ -179,6 +179,10 @@ private:
     bool m_edlFallbackTried = false;
     bool m_pendingAudioAdd = false;
     bool m_playing = false;
+    // mpv_initialize 是否已完成：cache/网络类选项在 initialize 前后必须用
+    // 不同 API（option vs property），且 liveMode 的 QML 绑定一定晚于构造，
+    // 所以 applyCacheOptions() 会被调用两次，需要靠它区分阶段。
+    bool m_mpvInitialized = false;
     bool m_desiredPlaying = true;  // 加载新文件后是否自动播放
     int m_position = 0;
     // positionChanged 信号节流：time-pos 以视频帧率上报（30fps 视频即

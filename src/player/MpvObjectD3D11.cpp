@@ -108,7 +108,7 @@ MpvObjectD3D11::MpvObjectD3D11(QQuickItem *parent)
 
 MpvObjectD3D11::~MpvObjectD3D11()
 {
-    qWarning() << "[MpvObjectD3D11] destructor called";
+    qDebug() << "[MpvObjectD3D11] destructor called";
 
     QElapsedTimer totalTimer;
     totalTimer.start();
@@ -131,23 +131,28 @@ MpvObjectD3D11::~MpvObjectD3D11()
     // 3. Lock the render mutex to wait for the render thread to finish any
     //    in-flight updatePaintNode/renderMpv call. After this returns we know
     //    the render thread is not using our resources anymore.
-    qWarning() << "[MpvObjectD3D11] acquiring render mutex for sync cleanup";
+    qDebug() << "[MpvObjectD3D11] acquiring render mutex for sync cleanup";
     {
         QElapsedTimer t;
         t.start();
         QMutexLocker locker(&m_renderMutex);
-        qWarning() << "[MpvObjectD3D11] render mutex acquired in" << t.elapsed() << "ms";
+        const qint64 mutexMs = t.elapsed();
+        if (mutexMs > 100) {
+            qWarning() << "[MpvObjectD3D11] render mutex wait SLOW:" << mutexMs << "ms";
+        } else {
+            qDebug() << "[MpvObjectD3D11] render mutex acquired in" << mutexMs << "ms";
+        }
     }
-    qWarning() << "[MpvObjectD3D11] render thread is out of updatePaintNode";
+    qDebug() << "[MpvObjectD3D11] render thread is out of updatePaintNode";
 
     // 4. 检查窗口是否仍然有效
     // 使用 QPointer::isNull() 来检查底层的 QQuickWindow 是否已被销毁
     bool windowAlive = m_window && !m_window.isNull();
-    qWarning() << "[MpvObjectD3D11] window alive:" << windowAlive;
+    qDebug() << "[MpvObjectD3D11] window alive:" << windowAlive;
 
     if (windowAlive) {
         // 窗口仍然存活 - 通过 scheduleRenderJob 在渲染线程上安全释放 GPU 资源
-        qWarning() << "[MpvObjectD3D11] scheduling cleanup job on render thread";
+        qDebug() << "[MpvObjectD3D11] scheduling cleanup job on render thread";
         struct CleanupJob : public QRunnable {
             mpv_handle *mpv;
             mpv_render_context *mpvRender;
@@ -164,11 +169,11 @@ MpvObjectD3D11::~MpvObjectD3D11()
             void run() override {
                 QElapsedTimer t;
                 t.start();
-                qWarning() << "[MpvObjectD3D11] cleanup job: freeing render context";
+                qDebug() << "[MpvObjectD3D11] cleanup job: freeing render context";
                 if (mpvRender) mpv_render_context_free(mpvRender);
-                qWarning() << "[MpvObjectD3D11] cleanup job: terminating mpv";
+                qDebug() << "[MpvObjectD3D11] cleanup job: terminating mpv";
                 if (mpv) mpv_terminate_destroy(mpv);
-                qWarning() << "[MpvObjectD3D11] cleanup job: freeing textures";
+                qDebug() << "[MpvObjectD3D11] cleanup job: freeing textures";
                 // createTextureFromRhiTexture() transfers QRhiTexture ownership
                 // to the returned QSGTexture. Deleting the QSGTexture will also
                 // delete the underlying QRhiTexture, so we must NOT delete
@@ -180,7 +185,14 @@ MpvObjectD3D11::~MpvObjectD3D11()
                     if (set.d3d11Tex) set.d3d11Tex->Release();
                 }
                 if (device) device->Release();
-                qWarning() << "[MpvObjectD3D11] cleanup job done in" << t.elapsed() << "ms";
+                const qint64 cleanupMs = t.elapsed();
+                // 正常应在几十毫秒内；超过 200ms 说明渲染线程被卡住，
+                // 这种情况仍要留痕（用户感知是"关视频时界面顿一下"）
+                if (cleanupMs > 200) {
+                    qWarning() << "[MpvObjectD3D11] cleanup job SLOW:" << cleanupMs << "ms";
+                } else {
+                    qDebug() << "[MpvObjectD3D11] cleanup job done in" << cleanupMs << "ms";
+                }
             }
         };
         auto *job = new CleanupJob(m_mpv, m_mpvRender, m_d3d11Device,
@@ -205,9 +217,9 @@ MpvObjectD3D11::~MpvObjectD3D11()
         // 情况2（兜底）：item 从未进入过场景（指针非空），scheduleRenderJob 会
         //   被静默丢弃，只能直接释放。
         if (m_fullCleanupScheduled) {
-            qWarning() << "[MpvObjectD3D11] full cleanup already scheduled on render thread, skip direct release";
+            qDebug() << "[MpvObjectD3D11] full cleanup already scheduled on render thread, skip direct release";
         } else {
-            qWarning() << "[MpvObjectD3D11] window already destroyed, releasing directly";
+            qDebug() << "[MpvObjectD3D11] window already destroyed, releasing directly";
         }
         QElapsedTimer t;
         t.start();
@@ -221,7 +233,7 @@ MpvObjectD3D11::~MpvObjectD3D11()
         // D3D11va 驱动在极端场景下可能在 Release() 内抛访问冲突，
         // 这会直接把 Qt Creator 的 gdb 后端带崩（主程序本身不会崩）。
         if (m_mpvRender) {
-            qWarning() << "[MpvObjectD3D11] freeing mpv_render_context";
+            qDebug() << "[MpvObjectD3D11] freeing mpv_render_context";
 #ifdef _MSC_VER
             __try {
                 mpv_render_context_free(m_mpvRender);
@@ -231,10 +243,10 @@ MpvObjectD3D11::~MpvObjectD3D11()
 #else
             mpv_render_context_free(m_mpvRender);
 #endif
-            qWarning() << "[MpvObjectD3D11] mpv_render_context freed";
+            qDebug() << "[MpvObjectD3D11] mpv_render_context freed";
         }
         if (m_mpv) {
-            qWarning() << "[MpvObjectD3D11] terminating mpv";
+            qDebug() << "[MpvObjectD3D11] terminating mpv";
 #ifdef _MSC_VER
             __try {
                 mpv_terminate_destroy(m_mpv);
@@ -244,11 +256,11 @@ MpvObjectD3D11::~MpvObjectD3D11()
 #else
             mpv_terminate_destroy(m_mpv);
 #endif
-            qWarning() << "[MpvObjectD3D11] mpv terminated";
+            qDebug() << "[MpvObjectD3D11] mpv terminated";
         }
         // 纹理先于 device 释放，避免 GPU 驱动持有 device 时访问纹理
         if (m_d3d11Texture) {
-            qWarning() << "[MpvObjectD3D11] releasing D3D11 texture";
+            qDebug() << "[MpvObjectD3D11] releasing D3D11 texture";
 #ifdef _MSC_VER
             __try { m_d3d11Texture->Release(); }
             __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -346,6 +358,9 @@ void MpvObjectD3D11::initMpv()
         m_mpv = nullptr;
         return;
     }
+    // 之后 applyCacheOptions() 若再被调用（liveMode 绑定赋值时），
+    // 必须走 mpv_set_property_string 而不是 option
+    m_mpvInitialized = true;
 
     applyHttpHeaders();
 
@@ -383,40 +398,85 @@ void MpvObjectD3D11::initMpv()
     // 关注 [ao] 前缀的行（音频输出初始化/失败/重开）和
     // [demux/audio] 行（音频流缓存/欠载），以及 audio-add 的结果。
     // mpv_msg 按行送达，逐行原样透传即可
-    mpv_set_option_string(m_mpv, "msg-level", "all=warn,cplayer=info,ao=debug,demuxer=debug,cache=debug");
+    // 只保留 warn 及以上。原先开了 cplayer=info + ao/demuxer/cache=debug，
+    // 每次打开视频/直播都会刷上百行（Set property / Codec list / select track /
+    // Trying demuxers / demuxer / cache / ao），实测占日志行数 82%，把真正有用的
+    // 错误全挤掉了。排障需要时可临时改成
+    // "all=warn,cplayer=info,ao=debug,demuxer=debug,cache=debug"。
+    mpv_set_option_string(m_mpv, "msg-level", "all=warn");
     mpv_request_log_messages(m_mpv, "v");
+
+    // Windows 音量合成器里的应用名：mpv 的 WASAPI 输出在 AO 初始化后会把
+    // media-title 写进音频会话（ao_wasapi.c 的 AOCONTROL_UPDATE_STREAM_TITLE
+    // → SetDisplayName），而我们的流是 DASH 直链/EDL 拼接，没有标题元数据，
+    // media-title 就退化成音频流 URL（形如 xxx-1-30280.m4s?...）。
+    // 这里把媒体标题钉死成客户端名，让 mpv 从一开始就写对，避免"先显示 URL
+    // 再被纠回来"的闪变。注意：必须限制在本程序的 libmpv 实例内，不影响其它程序。
+    mpv_set_option_string(m_mpv, "force-media-title", "BbQ");
 }
 
 void MpvObjectD3D11::applyCacheOptions()
 {
-    // cache 选项在 mpv_initialize 前用 mpv_set_option_string 设置；
-    // initialize 后改 liveMode 不会再生效（cache-secs 等是启动期选项），
-    // 但直播/视频页是不同的 MpvObject 实例，构造时 m_liveMode 已被 QML 绑定赋值，
-    // 故此处按当前 m_liveMode 一次性应用即可。
+    // cache / 网络类选项在 mpv_initialize 前后的设置方式不同：
+    //   之前：mpv_set_option_string（启动期选项）
+    //   之后：mpv_set_property_string（运行时属性）；其中 `cache` 自 mpv 0.23
+    //         起已没有对应属性，只能跳过。
+    //
+    // 为什么以前直播档没生效：QML 的 `liveMode: true` 是普通属性绑定，赋值一定
+    // 发生在构造函数（initMpv → mpv_initialize）之后，于是 setLiveMode 里的
+    // 这次 applyCacheOptions() 全部落在"已初始化"阶段，option 设置静默失败，
+    // 直播页一直沿用点播档（45s/96M）。这里显式支持两阶段，直播档才真正生效。
     if (!m_mpv) return;
+
+    auto setOpt = [this](const char *name, const char *value) {
+        if (m_mpvInitialized) {
+            if (strcmp(name, "cache") == 0) return;  // 启动期开关，运行期无属性
+            if (mpv_set_property_string(m_mpv, name, value) < 0) {
+                qWarning() << "[MpvObjectD3D11] failed to set" << name << "=" << value
+                           << "after initialize";
+            }
+        } else {
+            mpv_set_option_string(m_mpv, name, value);
+        }
+    };
+
+    // 网络层：与 cache 分档无关，直播/点播都适用；只在 initialize 前设置一次
+    // （stream-lavf-o 是 demuxer 启动期选项）。
+    if (!m_mpvInitialized) {
+        // "半死连接"（TCP 还在、服务器不再回数据）靠它暴露：默认没有读超时，
+        // mpv 会一直挂着，既不出 EOF 也不报错，应用层的两段式重连根本没机会触发。
+        mpv_set_option_string(m_mpv, "network-timeout", "12");
+        // FFmpeg 层自动续连：吸收瞬时抖动（连接被重置/读超时），省掉一次
+        // "重新请求 playurl + 重建 demuxer"。真断流、URL 过期仍由应用层处理。
+        mpv_set_option_string(m_mpv, "stream-lavf-o",
+                              "reconnect=1,reconnect_streamed=1,"
+                              "reconnect_on_network_error=1,reconnect_delay_max=3");
+    }
+
     if (m_liveMode) {
-        // 直播：小 cache 低延迟，避免延迟累积（原配置）
-        mpv_set_option_string(m_mpv, "cache", "yes");
-        mpv_set_option_string(m_mpv, "cache-secs", "10");
-        mpv_set_option_string(m_mpv, "demuxer-max-bytes", "16M");
-        mpv_set_option_string(m_mpv, "demuxer-max-back-bytes", "8M");
-        mpv_set_option_string(m_mpv, "demuxer-readahead-secs", "10");
-        mpv_set_option_string(m_mpv, "vf", "");
+        // 直播：小 cache 低延迟，避免延迟随播放时长累积
+        setOpt("cache", "yes");
+        setOpt("cache-secs", "10");
+        setOpt("demuxer-max-bytes", "16M");
+        // 直播不需要回看：回看缓存直接为 0（对齐 PiliPlus，省 8M 内存）
+        setOpt("demuxer-max-back-bytes", "0");
+        setOpt("demuxer-readahead-secs", "10");
+        // 前向缓存恢复到 cache-secs 的 2/3 才继续播，减少"刚缓过来又卡"的抖动
+        setOpt("demuxer-hysteresis-secs", "6.667");
+        setOpt("vf", "");
     } else {
         // 视频点播：大 cache 抗网络抖动，避免 CDN 断流时 demuxer 缓存耗尽停住
         //
         // 注意 DASH 是**两路独立 demuxer**：视频（-30077/-30080）与音频
         // （-30280）各一条 HTTP 连接、各一份缓存，CDN 掐其中一路时另一路照跑。
         // 视频码率通常是音频的 10-20 倍，同样秒数吃掉的数据量完全不同，
-        // 所以"视频先断"是常态 —— 表现就是本次要修的"画面停住、声音还在"。
-        // 这里把前向缓存从 30s/64M 提到 45s/96M：断流瞬间多留 15s 余量，
-        // 配合 QML 侧的画面看门狗（检测到冻结自动换 CDN 续播）即可自愈。
-        mpv_set_option_string(m_mpv, "cache", "yes");
-        mpv_set_option_string(m_mpv, "cache-secs", "45");
-        mpv_set_option_string(m_mpv, "demuxer-max-bytes", "96M");
-        mpv_set_option_string(m_mpv, "demuxer-max-back-bytes", "24M");
-        mpv_set_option_string(m_mpv, "demuxer-readahead-secs", "45");
-        mpv_set_option_string(m_mpv, "vf", "amf_frc");
+        // 所以"视频先断"是常态。
+        setOpt("cache", "yes");
+        setOpt("cache-secs", "45");
+        setOpt("demuxer-max-bytes", "96M");
+        setOpt("demuxer-max-back-bytes", "24M");
+        setOpt("demuxer-readahead-secs", "45");
+        setOpt("vf", "amf_frc");
     }
 }
 
@@ -429,8 +489,9 @@ void MpvObjectD3D11::setLiveMode(bool liveMode)
 {
     if (m_liveMode == liveMode) return;
     m_liveMode = liveMode;
-    // 重新应用 cache 配置（仅 initialize 前有效；initialize 后此调用不会改变已生效的 cache，
-    // 但保留调用以支持未来扩展，且 QML 绑定赋值发生在构造期 initMpv 之前/之后均安全）
+    // 重新应用 cache 配置。QML 的 liveMode 绑定一定晚于构造（=mpv_initialize），
+    // 所以这里实际走的是"已初始化"路径：除启动期开关 cache 外，其余选项都用
+    // mpv_set_property_string 生效（见 applyCacheOptions 的两阶段说明）。
     applyCacheOptions();
     emit liveModeChanged();
 }
@@ -1263,7 +1324,7 @@ void MpvObjectD3D11::onMpvEvents()
                 }
             } else if (strcmp(prop->name, "hwdec-current") == 0 && prop->format == MPV_FORMAT_STRING) {
                 char *hw = *static_cast<char**>(prop->data);
-                qWarning() << "[MpvObjectD3D11] hwdec-current:" << (hw ? QString::fromUtf8(hw) : QString("none"));
+                qDebug() << "[MpvObjectD3D11] hwdec-current:" << (hw ? QString::fromUtf8(hw) : QString("none"));
             } else if (strcmp(prop->name, "aid") == 0 && prop->format == MPV_FORMAT_FLAG) {
                 // 音频轨选择状态：中途变 no = 音频轨被取消选择（无声的常见根因）
                 bool aidOn = *static_cast<int*>(prop->data) != 0;

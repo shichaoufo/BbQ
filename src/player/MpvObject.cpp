@@ -229,7 +229,7 @@ public:
         MpvObject *item = m_itemSlot ? m_itemSlot->load(std::memory_order_acquire) : nullptr;
         // [DIAG] 崩溃定位用：记录 renderer 析构时刻 item 是否还活着。
         // 若崩溃日志里**没有**这条，说明崩在打开路径而非析构路径。
-        qWarning() << "[DIAG][MpvRenderer] dtor itemAlive=" << (item != nullptr);
+        qDebug() << "[DIAG][MpvRenderer] dtor itemAlive=" << (item != nullptr);
         if (!item) {
             qWarning() << "[MpvRenderer] destroyed after MpvObject teardown;"
                        << "(mpv resources already released by ~MpvObject)";
@@ -333,7 +333,7 @@ public:
         // [DIAG] 崩溃定位用：真机崩溃恒定发生在"打开页面 + visible=true"，
         // 这条日志确认是否真的进到了 FBO 创建、以及 item/core 是否还活着。
         // 若**没有**这条日志而崩了，说明崩在更早（场景图 sync / GL 上下文）。
-        qWarning() << "[DIAG][MpvRenderer] createFbo enter size=" << size
+        qDebug() << "[DIAG][MpvRenderer] createFbo enter size=" << size
                    << "itemAlive=" << (item != nullptr)
                    << "core=" << (item && item->m_mpv ? "alive" : "null")
                    << "shuttingDown=" << (item
@@ -596,7 +596,7 @@ MpvObject::~MpvObject()
     // [DIAG] 崩溃定位用：记录析构时刻 mpv 资源状态。
     // 判读：崩溃日志里若**没有**这条，说明 item 一直存活 ⇒ 问题在打开路径；
     // 若有，且紧邻崩溃 ⇒ 是析构时序问题。
-    qWarning() << "[DIAG][MpvObject] item dtor enter"
+    qDebug() << "[DIAG][MpvObject] item dtor enter"
                << "core=" << (m_mpv ? "alive" : "null")
                << "renderCtx=" << (m_mpvRender.load(std::memory_order_acquire)
                                        ? "alive" : "null");
@@ -850,8 +850,12 @@ void MpvObject::initMpv()
         // 与 D3D11 版一致：把 mpv 内部 c 日志接入 qWarning。重点关注
         // [ao] 前缀行（音频输出初始化/失败/重开）、[demux/audio] 行（缓存
         // 欠载）、[cplayer] 行。无 GUI 的 CI 上这行是唯一的排障信息源。
-        mpv_set_option_string(m_mpv, "msg-level",
-                             "all=warn,cplayer=info,ao=debug,demuxer=debug,cache=debug");
+        // 与 D3D11 版一致：只保留 warn 及以上，避免每次加载刷上百行
+        // info/debug（曾占日志行数 8 成以上）。
+        mpv_set_option_string(m_mpv, "msg-level", "all=warn");
+        // 与 D3D11 版一致：把媒体标题钉成客户端名，让 WASAPI 音频会话从一
+        // 开始就写 BbQ，而不是 DASH 音频流 URL（详见 D3D11 版注释）
+        mpv_set_option_string(m_mpv, "force-media-title", "BbQ");
     }
 
     // 硬解：auto-safe 是跨平台取值，会自动挑选当前平台可用的硬解后端
@@ -904,7 +908,7 @@ void MpvObject::initMpv()
     // [DIAG] 崩溃定位用：确认崩在 mpv_initialize 之前还是之后。
     // 若日志里出现"mpv_initialize entering"但**没有**紧随其后的
     // "mpv_initialize done"，说明崩在 mpv 初始化期间（locale/hwdec/脚本）。
-    qWarning() << "[DIAG][MpvObject] mpv_initialize entering";
+    qDebug() << "[DIAG][MpvObject] mpv_initialize entering";
     if (mpv_initialize(m_mpv) < 0) {
         qWarning() << "[MpvObject] failed to initialize mpv";
         emit errorOccurred("Failed to initialize mpv");
@@ -912,7 +916,7 @@ void MpvObject::initMpv()
         m_mpv = nullptr;
         return;
     }
-    qWarning() << "[DIAG][MpvObject] mpv_initialize done";
+    qDebug() << "[DIAG][MpvObject] mpv_initialize done";
     m_mpvInitialized = true;
 
     applyHttpHeaders();
@@ -977,7 +981,8 @@ void MpvObject::applyCacheOptions()
         // 直播：小cache 低延迟，避免延迟随播放时长累积
         cacheSecs = "10";
         maxBytes = "16M";
-        maxBackBytes = "8M";
+        // 直播不需要回看：回看缓存为 0（对齐 PiliPlus，省内存）
+        maxBackBytes = "0";
         readaheadSecs = "10";
     } else {
         // 视频点播：大cache 抗网络抖动，避免 CDN 短暂断流时 demuxer 缓存
@@ -987,6 +992,19 @@ void MpvObject::applyCacheOptions()
         maxBytes = "64M";
         maxBackBytes = "16M";
         readaheadSecs = "30";
+    }
+
+    // 网络层：与 cache 分档无关，直播/点播都适用；只在 initialize 前设置一次
+    // （stream-lavf-o 是 demuxer 启动期选项）。
+    if (!m_mpvInitialized) {
+        // "半死连接"（TCP 还在、服务器不再回数据）靠它暴露：默认没有读超时，
+        // 会一直挂着，既不出 EOF 也不报错，应用层重连根本没机会触发。
+        mpv_set_option_string(m_mpv, "network-timeout", "12");
+        // FFmpeg 层自动续连：吸收瞬时抖动，省掉一次重取 playurl。
+        // 真断流、URL 过期仍交给应用层。
+        mpv_set_option_string(m_mpv, "stream-lavf-o",
+                              "reconnect=1,reconnect_streamed=1,"
+                              "reconnect_on_network_error=1,reconnect_delay_max=3");
     }
 
     struct CacheOption { const char *name; const char *value; };
@@ -1015,6 +1033,15 @@ void MpvObject::applyCacheOptions()
             }
         } else {
             mpv_set_option_string(m_mpv, opt.name, opt.value);
+        }
+    }
+
+    if (m_liveMode) {
+        // 前向缓存恢复到 cache-secs 的 2/3 才继续播，减少"刚缓过来又卡"的抖动
+        if (m_mpvInitialized) {
+            mpv_set_property_string(m_mpv, "demuxer-hysteresis-secs", "6.667");
+        } else {
+            mpv_set_option_string(m_mpv, "demuxer-hysteresis-secs", "6.667");
         }
     }
 
@@ -1139,7 +1166,7 @@ QQuickFramebufferObject::Renderer *MpvObject::createRenderer() const
     // [DIAG] 崩溃定位用：createRenderer 由 Qt 在渲染线程、场景图 sync 阶段
     // 调用（GUI 线程被阻塞时）。若崩溃发生在本对象进入场景期间，这条日志
     // 应该紧邻崩溃出现。
-    qWarning() << "[DIAG][MpvObject] createRenderer enter"
+    qDebug() << "[DIAG][MpvObject] createRenderer enter"
                << "core=" << (m_mpv ? "alive" : "null");
     // 传**内部原子的地址**（不是 this）：renderer 与本对象在不同线程
     // 生死，必须靠原子握手而不是裸指针/QPointer（见 ~MpvRenderer）。
@@ -1157,7 +1184,7 @@ void MpvObject::setSource(const QString &source)
 {
     // [DIAG] 崩溃定位用：真机日志显示崩溃恒定紧随 loadData/visible=true，
     // 这条日志用来确认崩溃发生在设source 之前还是之后。
-    qWarning() << "[DIAG][MpvObject] setSource enter:" << source;
+    qDebug() << "[DIAG][MpvObject] setSource enter:" << source;
     if (m_source == source) return;
     m_source = source;
     m_edlFallbackTried = false;
@@ -1501,7 +1528,7 @@ QString MpvObject::playbackMediaUrl() const
 void MpvObject::loadFile(const QString &file)
 {
     // [DIAG] 崩溃定位用：真正把媒体喂给 mpv 的入口。
-    qWarning() << "[DIAG][MpvObject] loadFile enter:" << file;
+    qDebug() << "[DIAG][MpvObject] loadFile enter:" << file;
     if (!m_mpv || file.isEmpty()) return;
 
     qDebug() << "[MpvObject] loadFile:" << file;

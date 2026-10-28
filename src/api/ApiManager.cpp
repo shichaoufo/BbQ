@@ -1650,8 +1650,25 @@ void ApiManager::setLivePage(int page)
 void ApiManager::getLiveStreamInfo(const QString &roomId, int qn, const QString &platform)
 {
     // 获取直播流地址，使用 web 接口，返回 HLS/FLV 播放地址
-    QString url = QString("https://api.live.bilibili.com/xlive/web-room/v2/index/getRoomPlayInfo?room_id=%1&protocol=0,1&format=0,1,2&codec=0,1&qn=%2&platform=%3&ptype=8&dolby=5&panorama=1")
-                      .arg(roomId).arg(qn).arg(platform);
+    //
+    // 参数与 PiliPlus 对齐，并加 WBI 签名：不签名时服务端可能降清晰度或限流。
+    // WBI 签名内部按 key 排序计算 w_rid，参数顺序无关；签名计算会剔除
+    // 感叹号/引号/括号/星号，直播这几个值都是数字与逗号，不受影响。
+    QString params = QString("room_id=%1&protocol=0,1&format=0,1,2&codec=0,1"
+                             "&qn=%2&platform=%3&ptype=8&dolby=5&panorama=1"
+                             "&web_location=444.8")
+                         .arg(roomId).arg(qn).arg(platform);
+    // 签名失败（拉不到 nav 的 img_key/sub_key）时 signParams 会原样返回，
+    // 自动退化为未签名请求，不会比改动前更差。
+    QString signedParams = WbiSigner::instance()->signParams(params);
+    // 用 qWarning 而不是 qDebug：日志处理器只把 WARN 及以上写进 BbQ.log
+    // （见 main.cpp biliQtMessageHandler），qDebug 在 GUI 启动时不可见。
+    // 只打尾部（wts/w_rid 在末尾），够确认签没签上，又不至于把签名串全刷进日志。
+    qWarning() << "[ApiManager] live playurl qn=" << qn
+               << "signed=" << signedParams.contains(QStringLiteral("w_rid="))
+               << "tail=" << signedParams.right(110);
+    QString url = "https://api.live.bilibili.com/xlive/web-room/v2/index/getRoomPlayInfo?"
+                  + signedParams;
 
     QUrl qurl(url);
     QNetworkRequest request(qurl);
