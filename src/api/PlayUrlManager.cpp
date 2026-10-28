@@ -1929,7 +1929,7 @@ void PlayUrlManager::getPlayerDetail(const QString &aid, const QString &cid, con
 void PlayUrlManager::getPlayerDetailImpl(const QString &aid, const QString &cid, const QString &bvid, bool asGuest,
                                          bool useLegacyEndpoint, const QVariantList &fallbackViewPoints)
 {
-    qWarning() << "[PlayUrlManager] getPlayerDetail aid:" << aid << "cid:" << cid << "bvid:" << bvid
+    qDebug() << "[PlayUrlManager] getPlayerDetail aid:" << aid << "cid:" << cid << "bvid:" << bvid
              << "asGuest:" << asGuest << "legacy:" << useLegacyEndpoint;
 
     QString params = bvid.isEmpty()
@@ -2163,7 +2163,7 @@ void PlayUrlManager::getPlayerDetailImpl(const QString &aid, const QString &cid,
         }
         detail["viewPoints"] = viewPointsList;
         if (!viewPointsList.isEmpty())
-            qWarning() << "[PlayUrlManager] chapters from player detail:" << viewPointsList.size();
+            qDebug() << "[PlayUrlManager] chapters from player detail:" << viewPointsList.size();
 
         // 解析字幕轨列表（data.subtitle.subtitles[]）。
         // 注意：这里的字幕**不是权威列表**——它只在提供 subtitle_url 上有用，
@@ -2175,7 +2175,7 @@ void PlayUrlManager::getPlayerDetailImpl(const QString &aid, const QString &cid,
         if (dataObj.contains("subtitle")) {
             // 过滤基准的就绪状态。若 checked=false 说明 view 响应还没到（或没
             // 返回 subtitle 字段），此时不过滤——这行日志用于定位"顺序问题"
-            qWarning() << "[PlayUrlManager] subtitle filter state, checked:" << m_videoSubtitleChecked
+            qDebug() << "[PlayUrlManager] subtitle filter state, checked:" << m_videoSubtitleChecked
                        << "listSize:" << m_videoSubtitleList.size()
                        << "bvid:" << m_videoSubtitleBvid << "curBvid:" << bvid;
             const QJsonObject subtitleObj = dataObj.value("subtitle").toObject();
@@ -2214,7 +2214,7 @@ void PlayUrlManager::getPlayerDetailImpl(const QString &aid, const QString &cid,
                         }
                     }
                     if (!found) {
-                        qWarning() << "[PlayUrlManager] subtitle dropped (not in view list):"
+                        qDebug() << "[PlayUrlManager] subtitle dropped (not in view list):"
                                    << "id=" << subId
                                    << "lan=" << o.value("lan").toString()
                                    << "type=" << o.value("type").toInt()
@@ -2240,14 +2240,14 @@ void PlayUrlManager::getPlayerDetailImpl(const QString &aid, const QString &cid,
                 // 诊断日志：字幕串视频的故障极难定位（服务端会对异常请求返回
                 // 毫不相干的占位字幕），打出 id/type/URL 便于与 view 接口的
                 // subtitle.list[].id 比对。URL 截断到 80 字符（含 auth_key）
-                qWarning() << "[PlayUrlManager] subtitle item:"
+                qDebug() << "[PlayUrlManager] subtitle item:"
                            << "id=" << subId
                            << "lan=" << o.value("lan").toString()
                            << "type=" << o.value("type").toInt()
                            << "ai_status=" << o.value("ai_status").toInt()
                            << "url=" << subUrl.left(80);
             }
-            qWarning() << "[PlayUrlManager] subtitles from player detail:" << subtitleList.size();
+            qDebug() << "[PlayUrlManager] subtitles from player detail:" << subtitleList.size();
         }
         // view 说有字幕、这里却一条都没（join 后为空）→ 说明 player 接口被
         // 降级了（只给 AI 占位轨或空），调度重试
@@ -2276,7 +2276,7 @@ void PlayUrlManager::getPlayerDetailImpl(const QString &aid, const QString &cid,
             requestSubtitleListViaLegacy(aid, cid, bvid);
         }
 
-        qWarning() << "[PlayUrlManager] playerDetail:" << "lastPlayTime=" << lastPlayTime
+        qDebug() << "[PlayUrlManager] playerDetail:" << "lastPlayTime=" << lastPlayTime
                  << "lastPlayCid=" << lastPlayCid;
 
         // 游客态短路（2026-10-17 优化）：last_play_time 只对带登录 Cookie 的
@@ -2298,7 +2298,7 @@ void PlayUrlManager::getPlayerDetailImpl(const QString &aid, const QString &cid,
         // 浏览器风格头，被连带风控的概率低）；viewPoints 一并传递，避免降级
         // emit 把 QML 侧章节覆盖为空。legacy 路径自身除外，防止循环重试
         if (lastPlayTime == 0 && !useLegacyEndpoint) {
-            qWarning() << "[PlayUrlManager] no progress (guest-degraded?), trying legacy /x/player/v2 with cookies";
+            qDebug() << "[PlayUrlManager] no progress (guest-degraded?), trying legacy /x/player/v2 with cookies";
             getPlayerDetailImpl(aid, cid, bvid, false, true, viewPointsList);
             reply->deleteLater();
             return;
@@ -2310,7 +2310,7 @@ void PlayUrlManager::getPlayerDetailImpl(const QString &aid, const QString &cid,
         // 页同源，登录态数据最可靠）。history/cursor 不会再回调
         // getPlayerDetailImpl，链路在此终结，无循环风险
         if (lastPlayTime == 0 && useLegacyEndpoint) {
-            qWarning() << "[PlayUrlManager] legacy /x/player/v2 still no progress, falling back to history/cursor";
+            qDebug() << "[PlayUrlManager] legacy /x/player/v2 still no progress, falling back to history/cursor";
             getHistoryProgress(aid, cid, viewPointsList);
             reply->deleteLater();
             return;
@@ -2428,7 +2428,7 @@ void PlayUrlManager::requestSubtitleListViaLegacy(const QString &aid, const QStr
                         }
                     }
                     if (!found) {
-                        qWarning() << "[PlayUrlManager] subtitle dropped (legacy fallback, not in view list):"
+                        qDebug() << "[PlayUrlManager] subtitle dropped (legacy fallback, not in view list):"
                                    << "id=" << subId
                                    << "lan=" << o.value("lan").toString()
                                    << "type=" << o.value("type").toInt()
@@ -2450,7 +2450,7 @@ void PlayUrlManager::requestSubtitleListViaLegacy(const QString &aid, const QStr
                 sm["isAi"] = isAi;
                 subtitleList.append(sm);
                 // 诊断日志同主链路：用于核对 id/type 是否属于当前视频
-                qWarning() << "[PlayUrlManager] subtitle item (legacy fallback):"
+                qDebug() << "[PlayUrlManager] subtitle item (legacy fallback):"
                            << "id=" << subId
                            << "lan=" << o.value("lan").toString()
                            << "type=" << o.value("type").toInt()
@@ -2458,7 +2458,7 @@ void PlayUrlManager::requestSubtitleListViaLegacy(const QString &aid, const QStr
                            << "url=" << subUrl.left(80);
             }
         }
-        qWarning() << "[PlayUrlManager] subtitles via legacy fallback:" << subtitleList.size();
+        qDebug() << "[PlayUrlManager] subtitles via legacy fallback:" << subtitleList.size();
         if (!subtitleList.isEmpty()) {
             m_subtitleRetryAttempt = 0;
             m_subtitleResolved = true;
@@ -2546,7 +2546,7 @@ static const int maxHistoryPages = 2;
 void PlayUrlManager::getHistoryProgress(const QString &aid, const QString &cid,
                                         const QVariantList &viewPoints)
 {
-    qWarning() << "[PlayUrlManager] getHistoryProgress fallback aid:" << aid << "cid:" << cid;
+    qDebug() << "[PlayUrlManager] getHistoryProgress fallback aid:" << aid << "cid:" << cid;
     fetchHistoryCursorPage(aid, cid, viewPoints, 0, 0, 1);
 }
 
@@ -2573,7 +2573,7 @@ void PlayUrlManager::fetchHistoryCursorPage(const QString &aid, const QString &c
         request.setRawHeader("Cookie", cookies.toUtf8());
     }
 
-    qWarning() << "[PlayUrlManager] history/cursor page" << page << "request:" << params
+    qDebug() << "[PlayUrlManager] history/cursor page" << page << "request:" << params
              << "cookieLen:" << cookies.size();
 
     // 一次性 QNAM：每页请求新建网络管理器，用完连同 reply 一起销毁，
@@ -2664,7 +2664,7 @@ void PlayUrlManager::fetchHistoryCursorPage(const QString &aid, const QString &c
                 qint64 lastPlayTime = static_cast<qint64>(progress) * 1000;
                 detail["lastPlayTime"] = lastPlayTime;
                 detail["lastPlayCid"] = cid;
-                qWarning() << "[PlayUrlManager] history/cursor FOUND match at page" << page
+                qDebug() << "[PlayUrlManager] history/cursor FOUND match at page" << page
                          << "progress=" << progress << "duration=" << duration
                          << "lastPlayTime=" << lastPlayTime;
                 found = true;
@@ -2683,14 +2683,14 @@ void PlayUrlManager::fetchHistoryCursorPage(const QString &aid, const QString &c
         qint64 nextMax = cursor["max"].toVariant().toLongLong();
         qint64 nextViewAt = cursor["view_at"].toVariant().toLongLong();
         if (page < maxHistoryPages && !list.isEmpty() && nextMax > 0) {
-            qWarning() << "[PlayUrlManager] history/cursor not in page" << page
+            qDebug() << "[PlayUrlManager] history/cursor not in page" << page
                      << "(" << list.size() << "items ), fetching page" << page + 1;
             reply->deleteLater();
             fetchHistoryCursorPage(aid, cid, viewPoints, nextMax, nextViewAt, page + 1);
             return;
         }
 
-        qWarning() << "[PlayUrlManager] history/cursor result: not found in" << page << "page(s), lastPlayTime=0";
+        qDebug() << "[PlayUrlManager] history/cursor result: not found in" << page << "page(s), lastPlayTime=0";
         emit playerDetailReady(detail);
         reply->deleteLater();
     });
@@ -4460,8 +4460,8 @@ void PlayUrlManager::getSeasonPlayUrl(const QString &cid, int quality,
              << "epId:" << epId
              << "bvid:" << bvid << "aid:" << aid
              << "hasCached:" << m_hasCachedResult << "cachedCid:" << m_cachedCid;
-    // [DIAG] 诊断电影/番剧无法加载：入口决策点（release 下 qDebug 不可见，用 qWarning）
-    qWarning() << "[DIAG][getSeasonPlayUrl] enter cid:" << cid << "epId:" << epId
+    // [DIAG] 诊断电影/番剧无法加载：入口决策点（release 下 qDebug 不可见，用 qDebug）
+    qDebug() << "[DIAG][getSeasonPlayUrl] enter cid:" << cid << "epId:" << epId
                << "quality:" << quality << "forceMax:" << forceMaxQuality
                << "bvid:" << bvid << "seasonId:" << seasonId
                << "hasCached:" << m_hasCachedResult << "cachedCid:" << m_cachedCid;
@@ -5700,10 +5700,10 @@ void PlayUrlManager::parseSeasonDetail(const QJsonObject &dataObj, VideoDetail &
         QJsonArray episodes = dataObj["episodes"].toArray();
         qDebug() << "[PlayUrlManager] parseSeasonDetail episodes count:" << episodes.size();
         // [DIAG] 电影无法播放排查：打印前 3 个 ep 的关键字段（release_date/long_title 为空会导致下方"已上线"判断失败）
-        qWarning() << "[DIAG][parseSeasonDetail] episodes:" << episodes.size();
+        qDebug() << "[DIAG][parseSeasonDetail] episodes:" << episodes.size();
         for (int i = 0; i < episodes.size() && i < 3; i++) {
             QJsonObject ep = episodes[i].toObject();
-            qWarning() << "[DIAG][parseSeasonDetail] ep[" << i << "] id:" << ep["id"].toVariant().toLongLong()
+            qDebug() << "[DIAG][parseSeasonDetail] ep[" << i << "] id:" << ep["id"].toVariant().toLongLong()
                        << "cid:" << ep["cid"].toVariant().toLongLong()
                        << "long_title:" << ep["long_title"].toString()
                        << "release_date:" << ep["release_date"].toString();
@@ -5765,7 +5765,7 @@ void PlayUrlManager::parseSeasonDetail(const QJsonObject &dataObj, VideoDetail &
             detail.cid = QString::number(ep["cid"].toVariant().toLongLong());
             detail.aid = QString::number(ep["aid"].toVariant().toLongLong());
             detail.bvid = ep["bvid"].toString();
-            qWarning() << "[DIAG][parseSeasonDetail] fallback ep[0], cid:" << detail.cid
+            qDebug() << "[DIAG][parseSeasonDetail] fallback ep[0], cid:" << detail.cid
                        << "epId:" << detail.epId << "bvid:" << detail.bvid;
         }
     } else if (dataObj.contains("sections")) {
@@ -5779,7 +5779,7 @@ void PlayUrlManager::parseSeasonDetail(const QJsonObject &dataObj, VideoDetail &
                 detail.cid = QString::number(ep["cid"].toVariant().toLongLong());
                 detail.aid = QString::number(ep["aid"].toVariant().toLongLong());
                 detail.bvid = ep["bvid"].toString();
-                qWarning() << "[DIAG][parseSeasonDetail] from sections[" << s << "] cid:" << detail.cid
+                qDebug() << "[DIAG][parseSeasonDetail] from sections[" << s << "] cid:" << detail.cid
                            << "epId:" << detail.epId << "bvid:" << detail.bvid;
                 break;
             }

@@ -225,7 +225,7 @@ DanmakuCanvas::~DanmakuCanvas()
 {
     // 先退订统一帧心跳：订阅表持有本对象谓词，析构后不得再被 tick 调用
     FramePacer::instance()->unsubscribe(this);
-    qWarning() << "[DanmakuCanvas] destructor: pool=" << m_pool.size()
+    qDebug() << "[DanmakuCanvas] destructor: pool=" << m_pool.size()
                << "pendingFree=" << m_pendingFreeSlots.size()
                << "atlas=" << !!m_atlasTex.load();
 
@@ -602,7 +602,7 @@ void DanmakuCanvas::itemChange(ItemChange change, const ItemChangeData &data)
             //  - 节点一律不删：整棵节点树由 Qt 经 cleanup(itemNodeInstance) 移交
             //    旧窗口渲染线程延迟删除，texNode setOwnsTexture(false) 不碰纹理。
             QQuickWindow *oldWin = m_connWindow;
-            qWarning() << "[DanmakuCanvas] leaving scene: pool=" << m_pool.size()
+            qDebug() << "[DanmakuCanvas] leaving scene: pool=" << m_pool.size()
                        << "live=" << m_live.size() << "atlas=" << !!m_atlasTex.load()
                        << "connWin=" << !!oldWin;
             if (oldWin && (!m_pool.isEmpty() || m_atlasTex)) {
