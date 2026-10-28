@@ -273,7 +273,12 @@ FluPage {
         id: liveOverlay
         // 与视频播放页同几何：Frame 内缩 playerOverlayMargin，所有弹出页尺寸统一
         x: liveFrame.x + Theme.playerOverlayMargin
-        y: open ? liveFrame.y + Theme.playerOverlayMargin : liveFrame.y + liveFrame.height
+        // 位移幅度与其它弹层一致（打开从下方 15% 浮入，关闭沉下 15% 淡出）。
+        // 原来关闭时是滑到 liveFrame 底部外侧（整整一个面板高度），距离是别的
+        // 弹层的 6 倍多，同样时长下看着"嗖"一下就没了 —— 只改时长不够，距离也
+        // 要对齐才真的同速。
+        y: open ? liveFrame.y + Theme.playerOverlayMargin
+                : liveFrame.y + Theme.playerOverlayMargin + height * 0.15
         width: liveFrame.width - Theme.playerOverlayMargin * 2
         height: liveFrame.height - Theme.playerOverlayMargin * 2
         z: 30
@@ -341,17 +346,26 @@ FluPage {
             }
         }
 
+        // 开/关动画参数与其它弹层严格对齐（DynamicPage / HistoryPage /
+        // SearchResultPage 里的 liveOverlay，以及 CardVideo/CardUser/CardSearch）：
+        //   打开：250ms Easing.OutCubic
+        //   关闭：200ms Easing.InCubic
+        // 原来这里两处共用一组 Behavior 常量：opacity 用 animationFast(150ms)
+        // 且关闭时仍是 OutCubic（起步最快的那段），于是"啪"一下就没影了；而位移
+        // 用 animationNormal(250ms) 又比淡出晚 100ms 才结束（已经看不见了还在动）。
+        // Behavior 只有一套参数，所以用 open 区分开/关——属性变化触发动画时，
+        // open 已经是新值，duration/easing 能取到正确的一组。
         Behavior on y {
             NumberAnimation {
-                duration: Theme.animationNormal
-                easing.type: Easing.OutCubic
+                duration: liveOverlay.open ? Theme.animationNormal : 200
+                easing.type: liveOverlay.open ? Easing.OutCubic : Easing.InCubic
             }
         }
 
         Behavior on opacity {
             NumberAnimation {
-                duration: Theme.animationFast
-                easing.type: Easing.OutCubic
+                duration: liveOverlay.open ? Theme.animationNormal : 200
+                easing.type: liveOverlay.open ? Easing.OutCubic : Easing.InCubic
             }
         }
     }
