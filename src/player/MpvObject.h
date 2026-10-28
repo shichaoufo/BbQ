@@ -65,6 +65,10 @@ public:
     Q_INVOKABLE void play();
     Q_INVOKABLE void pause();
     Q_INVOKABLE void stop();
+    // 用**当前** m_source/m_audioSource 重新 loadfile，不经过 setSource。
+    // 直播断流重连的快路径：同一 URL 再拉一次（省掉重新请求 playurl），
+    // 而 setSource 对相同值会直接 return，绕不过去，所以单独开这个入口。
+    Q_INVOKABLE void reload();
     Q_INVOKABLE void seek(int position);
     Q_INVOKABLE void updatePosition();
     // 获取实际播放的视频参数（宽、高、codec、fps、bitrate 等），用于验证当前流的真实画质
@@ -105,6 +109,9 @@ signals:
     // 触发空降助手片段查询（见 VideoPlayerPage.qml onFileLoaded）。
     // 该信号在 Linux 版曾缺失，导致 QML 组件链加载失败（首页白屏）。
     void fileLoaded();
+    // 音轨在播放途中消失（DASH 音频流断流/解码失败），视频轨还活着。
+    // 与 MpvObjectD3D11 同语义：QML 据此走"从当前位置重开"的重试。
+    void audioLost();
     void errorOccurred(const QString &error);
     // 直播流自然结束（EOF）：主播推流中断/断流。仅 liveMode 下发出，
     // QML 层据此触发自动重连（视频点播的 EOF 无此语义）
@@ -129,6 +136,8 @@ private:
     // 依据与顺序保证说明见 MpvObject.cpp 中 ~MpvObject 的长注释。
     void applyHttpHeaders();
     void loadFile(const QString &file);
+    // 真正交给 mpv 的 URL：音视频都在时用 EDL 拼成一个媒体（对齐 PiliPlus）
+    QString playbackMediaUrl() const;
     void startRenderTimer();
     void stopRenderTimer();
     // 根据 m_liveMode 应用 cache 配置：直播=小cache 低延迟，视频=大cache 抗抖动。
@@ -167,6 +176,14 @@ private:
     mpv_handle *m_mpv = nullptr;
 
     QString m_source;
+    // source 赋值后推迟一个事件循环再 loadfile（等 audioSource 落地后用 EDL 拼流）
+    bool m_loadQueued = false;
+    bool m_hasAudio = false;
+    bool m_ignoreAudioLoss = false;
+    // EDL 兜底（与 D3D11 实现一致）：EDL 打不开时退回纯视频 + audio-add
+    bool m_lastLoadWasEdl = false;
+    bool m_edlFallbackTried = false;
+    bool m_pendingAudioAdd = false;
     QString m_audioSource;
     bool m_playing = false;
     bool m_desiredPlaying = true;  // 加载新文件后是否自动播放

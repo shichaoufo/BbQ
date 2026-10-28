@@ -72,6 +72,10 @@ public:
     Q_INVOKABLE void play();
     Q_INVOKABLE void pause();
     Q_INVOKABLE void stop();
+    // 用**当前** m_source/m_audioSource 重新 loadfile，不经过 setSource。
+    // 直播断流重连的快路径：同一 URL 再拉一次（省掉重新请求 playurl），
+    // 而 setSource 对相同值会直接 return，绕不过去，所以单独开这个入口。
+    Q_INVOKABLE void reload();
     Q_INVOKABLE void seek(int position);
     Q_INVOKABLE void updatePosition();
     Q_INVOKABLE QVariantMap getVideoInfo();
@@ -108,6 +112,11 @@ signals:
     void liveModeChanged();
     void fileLoaded();
     void errorOccurred(const QString &error);
+    // 音轨在播放途中消失（DASH 音频流断流/解码失败），视频轨还活着。
+    // 旧实现用 audio-add 外挂音轨，音轨死掉 mpv 只会静音继续、不产生
+    // END_FILE/ERROR，用户看到的就是"画面正常、声音没了"。QML 侧据此
+    // 走与播放错误相同的"从当前位置重开"重试。
+    void audioLost();
     // 直播流自然结束（EOF）：主播推流中断/断流。仅 liveMode 下发出，
     // QML 层据此触发自动重连（视频点播的 EOF 无此语义）
     void liveStreamEof();
@@ -128,6 +137,9 @@ private:
     void destroyMpv();
     void applyHttpHeaders();
     void loadFile(const QString &file);
+    // 真正交给 mpv 的 URL：音视频都在时用 EDL 把两条流拼成一个媒体
+    //（对齐 PiliPlus），否则就是 m_source 本身。
+    QString playbackMediaUrl() const;
     void startRenderTimer();
     void stopRenderTimer();
     // 秒 → SRT 时间码 "HH:MM:SS,mmm"（bcc JSON 转 SRT 用）
@@ -153,6 +165,19 @@ private:
 
     QString m_source;
     QString m_audioSource;
+    // source 赋值后推迟一个事件循环再 loadfile：QML 里 DASH 是
+    // "source=视频; audioSource=音频" 紧挨着两行，推迟后才能一次性把
+    // EDL（视频+音频）交给 mpv，而不是先加载视频再补音轨。
+    bool m_loadQueued = false;
+    // 当前媒体是否有音轨（audio-params 存在）；从有到无 = 音轨丢了
+    bool m_hasAudio = false;
+    // 装载/停止过程中音轨消失是正常的（换文件会先 stop），不要误报 audioLost
+    bool m_ignoreAudioLoss = false;
+    // EDL 兜底：万一 EDL 打不开（老 libmpv / 解析失败），退回"纯视频 + audio-add"，
+    // 保证不会因为换了装载方式而整段播不了。每个 source 只试一次。
+    bool m_lastLoadWasEdl = false;
+    bool m_edlFallbackTried = false;
+    bool m_pendingAudioAdd = false;
     bool m_playing = false;
     bool m_desiredPlaying = true;  // 加载新文件后是否自动播放
     int m_position = 0;

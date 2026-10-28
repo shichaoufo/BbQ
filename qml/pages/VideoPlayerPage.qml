@@ -92,6 +92,9 @@ Rectangle {
     property bool wasClosed: false
     property string loadingBvid: ""
     property int playbackRetryCount: 0
+    // 音轨丢失单独计数：它在"重开成功"后不会像 playbackRetryCount 那样在
+    // fileLoaded 里清零，否则流本身一直坏会变成每 2 秒无限重开。
+    property int _audioLossRetries: 0
     property int _savedPositionBeforeRetry: 0
     property bool _retryingPlayback: false
     // 画面卡死看门狗状态（见文件后部 videoStallWatchdog 的长注释）
@@ -1391,6 +1394,29 @@ Rectangle {
     // 加载看门狗的重试计数（换视频时清零，最多自动重试一次）
     property int _loadWatchdogFired: 0
 
+    // 音轨在播放途中消失（DASH 音频流断流 / AAC 解码失败）。
+    // 视频轨还活着，mpv 不会产生 END_FILE/ERROR，旧实现就只剩画面没声音。
+    // 这里复用"播放错误"那条重开路径：从当前位置续播 + 轮换备选 CDN。
+    function handleAudioLost() {
+        if (pageRoot.wasClosed || pageRoot.bvid === "") return
+        if (pageRoot._retryingPlayback) return
+        var pos = mpvPlayer.position
+        var dur = mpvPlayer.duration
+        // 还没起来、或已经播到结尾（正常结束）都不算丢失
+        if (pos <= 0 || dur <= 0 || pos >= dur - 5000) return
+        if (pageRoot._audioLossRetries >= 5) {
+            pageRoot.loadFailed = true
+            console.warn("[VideoPlayerPage] audio lost, retry limit reached, giving up")
+            return
+        }
+        pageRoot._audioLossRetries += 1
+        pageRoot._savedPositionBeforeRetry = pos
+        pageRoot._retryingPlayback = true
+        console.warn("[VideoPlayerPage] audio track lost at", pos, "ms, reopening at same position, attempt",
+                     pageRoot._audioLossRetries)
+        playbackRetryTimer.start()
+    }
+
     // 退出动画开始前调用：立即停止 mpv 渲染，让 QSG 回到 vsync 模式
     // 避免退出动画被 mpv 的 30fps 渲染节奏拖慢
     function stopPlayer() {
@@ -1727,6 +1753,7 @@ Rectangle {
         pageRoot._lastReportedProgress = -1
         pageRoot._pendingSeek = 0
         pageRoot.playbackRetryCount = 0
+        pageRoot._audioLossRetries = 0
         pageRoot._retryingPlayback = false
         pageRoot._savedPositionBeforeRetry = 0
         // 画面看门狗复位（换视频后重新计数，否则沿用上一个视频的冻结计数）
@@ -3536,6 +3563,7 @@ Rectangle {
                             videoInfoTimer.restart()
                         }
                     }
+                    onAudioLost: pageRoot.handleAudioLost()
                     onFileLoaded: {
                         // 文件加载成功后重置播放级重试状态
                         if (pageRoot._retryingPlayback) {

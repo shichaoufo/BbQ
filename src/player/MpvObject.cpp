@@ -48,6 +48,7 @@
 #include <QOpenGLFunctions>
 #include <QVariantMap>
 #include <QElapsedTimer>
+#include <QTimer>
 #include <QRunnable>
 // 字幕下载与解析：一次性 QNAM + bcc JSON
 #include <QNetworkAccessManager>
@@ -928,6 +929,8 @@ void MpvObject::initMpv()
     mpv_observe_property(m_mpv, 0, "pause", MPV_FORMAT_FLAG);
     mpv_observe_property(m_mpv, 0, "speed", MPV_FORMAT_DOUBLE);
     mpv_observe_property(m_mpv, 0, "video-params", MPV_FORMAT_NODE);
+    // 音轨消失检测（见 audioLost）
+    mpv_observe_property(m_mpv, 0, "audio-params", MPV_FORMAT_NODE);
     mpv_observe_property(m_mpv, 0, "seekable", MPV_FORMAT_FLAG);
     mpv_observe_property(m_mpv, 0, "hwdec-current", MPV_FORMAT_STRING);
     // 容器帧率：FramePacer 自适应心跳的输入（≥50fps 内容按需升档节奏）。
@@ -1157,13 +1160,23 @@ void MpvObject::setSource(const QString &source)
     qWarning() << "[DIAG][MpvObject] setSource enter:" << source;
     if (m_source == source) return;
     m_source = source;
+    m_edlFallbackTried = false;
+    m_pendingAudioAdd = false;
     emit sourceChanged();
     if (source.isEmpty()) {
+        m_loadQueued = false;
         stopRenderTimer();
         stop();
     } else {
-        loadFile(source);
         startRenderTimer();
+        // 推迟一轮事件循环：QML 给 DASH 是紧挨着设 source / audioSource，
+        // 推迟后才能一次把 video+audio 的 EDL 交给 mpv（与 D3D11 实现一致）
+        m_loadQueued = true;
+        QTimer::singleShot(0, this, [this]() {
+            if (!m_loadQueued || m_source.isEmpty()) return;
+            m_loadQueued = false;
+            loadFile(playbackMediaUrl());
+        });
     }
 }
 
@@ -1283,9 +1296,23 @@ void MpvObject::pause()
     setPlaying(false);
 }
 
+void MpvObject::reload()
+{
+    if (!m_mpv || m_source.isEmpty()) return;
+    // 丢弃 setSource 里还在排队的那次 loadfile，避免重连时连开两次
+    m_loadQueued = false;
+    m_desiredPlaying = true;
+    // loadFile 内部会先 stop 再 loadfile replace，等价于"重新打开当前源"，
+    // 但不会重建实例、不会换 URL、也不会重新签名。
+    loadFile(playbackMediaUrl());
+}
+
 void MpvObject::stop()
 {
     if (!m_mpv) return;
+    m_ignoreAudioLoss = true;
+    m_hasAudio = false;
+    m_loadQueued = false;
     // 使用异步命令，避免同步 set_property 在网络流卡住时阻塞主线程
     const char *pauseCmd[] = {"set", "pause", "yes", nullptr};
     mpv_command_async(m_mpv, 0, pauseCmd);
@@ -1448,6 +1475,29 @@ void MpvObject::updatePosition()
     }
 }
 
+QString MpvObject::playbackMediaUrl() const
+{
+    if (m_source.isEmpty()) return QString();
+    if (m_audioSource.isEmpty()) return m_source;
+
+    // 与 PiliPlus 一致：video/audio 两条 DASH 流用 EDL 拼成"一个文件的两条流"，
+    // 共用一条时间轴与一个 demuxer。任何一路断流/解码失败都会作为媒体错误
+    // 暴露（走 END_FILE/ERROR 的重试），而不是像 audio-add 外挂音轨那样
+    // 静默地只剩视频（"画面正常、声音消失"）。
+    // 每段语法：%<字节数>%<URL>（长度是字节数，URL 含非 ASCII 时按字符数会错位）
+    const QByteArray v = m_source.toUtf8();
+    const QByteArray a = m_audioSource.toUtf8();
+    QByteArray edl("edl://!no_chapters;%");
+    edl += QByteArray::number(v.size());
+    edl += '%';
+    edl += v;
+    edl += ";!new_stream;!no_chapters;%";
+    edl += QByteArray::number(a.size());
+    edl += '%';
+    edl += a;
+    return QString::fromUtf8(edl);
+}
+
 void MpvObject::loadFile(const QString &file)
 {
     // [DIAG] 崩溃定位用：真正把媒体喂给 mpv 的入口。
@@ -1457,8 +1507,16 @@ void MpvObject::loadFile(const QString &file)
     qDebug() << "[MpvObject] loadFile:" << file;
     applyHttpHeaders();
     
+    m_lastLoadWasEdl = file.startsWith(QStringLiteral("edl://"));
+    if (m_lastLoadWasEdl) {
+        qWarning() << "[MpvObject] load EDL(video+audio), url bytes:" << file.size();
+    }
+
     // 加载新文件时，默认设置为播放状态
     m_desiredPlaying = true;
+    // 装载期间音轨消失是正常的，等 FILE_LOADED 之后再开始监视
+    m_ignoreAudioLoss = true;
+    m_hasAudio = false;
 
     // 加载新文件前先停止当前播放，避免 mpv 在 stop/loadfile 之间状态混乱
     const char *stopCmd[] = {"stop", nullptr};
@@ -1501,7 +1559,11 @@ QVariantMap MpvObject::getVideoInfo()
     info["audioBitrate"] = readDouble("audio-bitrate");
     info["audioCodec"] = readString("audio-codec");
     // 当前播放 URL（可用于核对请求的 qn）
-    info["path"] = readString("path");
+    // DASH 下我们交给 mpv 的是内部拼的 edl://（video+audio 双流），
+    // 信息面板里还是显示真实的视频流地址，别把 EDL 串糊上去
+    QString mediaPath = readString("path");
+    if (mediaPath.startsWith(QStringLiteral("edl://"))) mediaPath = m_source;
+    info["path"] = mediaPath;
     return info;
 }
 
@@ -1521,7 +1583,22 @@ void MpvObject::onMpvEvents()
         switch (event->event_id) {
         case MPV_EVENT_PROPERTY_CHANGE: {
             mpv_event_property *prop = static_cast<mpv_event_property*>(event->data);
-            if (!prop || !prop->data) break;
+            if (!prop) break;
+            // 属性不可用（format=NONE, data=nullptr）：音轨消失就在这里报
+            if (!prop->data) {
+                if (strcmp(prop->name, "audio-params") == 0 && m_hasAudio) {
+                    m_hasAudio = false;
+                    // 直播不发这个信号：直播是单流（HLS/FLV），音视频捆在一起，
+                    // 音轨消失必然伴随整条流结束，已经由 liveStreamEof +
+                    // tryNextCandidate 的重连路径处理；在这里再报一次会让两套
+                    // 重试互相打架，切码率时也容易误报。
+                    if (!m_ignoreAudioLoss && !m_liveMode) {
+                        qWarning() << "[MpvObject] audio track lost while playing, notify QML";
+                        emit audioLost();
+                    }
+                }
+                break;
+            }
 
             if (strcmp(prop->name, "time-pos") == 0 && prop->format == MPV_FORMAT_DOUBLE) {
                 double pos = *static_cast<double*>(prop->data);
@@ -1579,6 +1656,9 @@ void MpvObject::onMpvEvents()
                     m_hasVideo = hasVideo;
                     emit hasVideoChanged();
                 }
+            } else if (strcmp(prop->name, "audio-params") == 0) {
+                // 有音轨 = 属性节点存在；从有到无的分支在上面（data==nullptr）
+                if (prop->format == MPV_FORMAT_NODE) m_hasAudio = true;
             } else if (strcmp(prop->name, "seekable") == 0 && prop->format == MPV_FORMAT_FLAG) {
                 bool seekable = *static_cast<int*>(prop->data) != 0;
                 if (m_seekable != seekable) {
@@ -1684,11 +1764,14 @@ void MpvObject::onMpvEvents()
             mpv_free(vfmt);
             mpv_free(vcodec);
             mpv_free(hwcur);
-            if (!m_audioSource.isEmpty()) {
+            // 正常路径音轨已在 EDL 里；只有 EDL 兜底退回纯视频时才 audio-add
+            if (m_pendingAudioAdd && !m_audioSource.isEmpty()) {
+                m_pendingAudioAdd = false;
                 QByteArray audioData = m_audioSource.toUtf8();
                 const char *cmd[] = {"audio-add", audioData.constData(), nullptr};
                 mpv_command_async(m_mpv, 0, cmd);
             }
+            m_ignoreAudioLoss = false;
             // 使用 m_desiredPlaying 而不是 m_playing，因为 loadFile 可能已将 m_playing 重置为 false
             if (m_desiredPlaying) {
                 const char *cmd[] = {"set", "pause", "no", nullptr};
@@ -1702,6 +1785,14 @@ void MpvObject::onMpvEvents()
             if (ef && ef->reason == MPV_END_FILE_REASON_ERROR) {
                 QString err = QString::fromUtf8(mpv_error_string(ef->error));
                 qWarning() << "[MpvObject] playback error:" << err;
+                // EDL 打不开：退回纯视频 + audio-add（不打扰 QML 的重试）
+                if (m_lastLoadWasEdl && !m_edlFallbackTried && !m_source.isEmpty()) {
+                    m_edlFallbackTried = true;
+                    m_pendingAudioAdd = !m_audioSource.isEmpty();
+                    qWarning() << "[MpvObject] EDL failed, fallback to plain video + audio-add";
+                    loadFile(m_source);
+                    break;
+                }
                 emit errorOccurred(err);
             } else if (ef && ef->reason == MPV_END_FILE_REASON_EOF && m_liveMode) {
                 // 直播流自然结束：通常是主播推流中断（网络不稳）导致服务器侧终止流。
