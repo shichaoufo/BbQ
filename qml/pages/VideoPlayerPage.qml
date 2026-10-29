@@ -320,7 +320,7 @@ Rectangle {
     // 分段章节（view_points）：[{title, from, to}]，from/to 单位秒；无章节为空数组
     property var viewPoints: []
     // 可用字幕轨：[{lang, title, url, isAi}]，来自 playurl 响应的 data.language。
-    // 空数组表示该视频没有字幕，顶部控制栏的字幕按钮随之隐藏。
+    // 空数组表示该视频没有字幕，设置抽屉里的"字幕"下拉随之置灰。
     // B站字幕是外挂文件（subtitle_lang），由 mpv 的 sub-add 加载、libmpv 渲染
     property var subtitleTracks: []
     // 当前选中的字幕轨索引；-1 = 关闭字幕
@@ -913,6 +913,69 @@ Rectangle {
         return n + "粉丝"
     }
 
+    // 切换视频编码：设置抽屉的「视频解码格式」下拉调用。
+    // 换编码要重新取 playurl（服务器按 encode 下发不同的流），所以先记下
+    // 当前进度再重新请求，由 playUrlReady 走既有的续播逻辑。
+    function switchCodec(code) {
+        if (code === pageRoot.currentCodec) return
+        pageRoot.currentCodec = code
+        Settings.setInt("videoCodec", code)
+        if (pageRoot.aid === "" || pageRoot.cid === "") return
+        pageRoot._savedPosition = mpvPlayer.position
+        pageRoot._switchingStream = true
+        heartbeatTimer.stop()
+        // 番剧走 PGC 专用接口，普通视频走 UGC 接口
+        if (pageRoot.isBangumi && pageRoot.epId) {
+            // 用户显式切换编码 → 按传入 exact qn 发请求（forceMaxQuality=false），
+            // 若 Only-FLV 下服务器拿不到 exact encode 会回退真实 quality，
+            // playUrlReady 会校正显示
+            PlayUrlManager.getSeasonPlayUrl(
+                pageRoot.cid, pageRoot.currentQualityId,
+                pageRoot.epId, pageRoot.seasonType,
+                pageRoot.bvid, pageRoot.aid,
+                false /* forceMaxQuality */,
+                pageRoot.seasonId || "")
+        } else {
+            PlayUrlManager.getPlayUrl(pageRoot.aid, pageRoot.cid, pageRoot.currentQualityId)
+        }
+    }
+
+    // 选择字幕轨：index = -1 关闭字幕（保留已加载的轨道、不重新下载，
+    // 只是让 mpv 不渲染），>=0 为 subtitleTracks 的下标
+    function selectSubtitle(index) {
+        if (index < 0) {
+            pageRoot.currentSubtitleIndex = -1
+            mpvPlayer.setSubtitleVisible(false)
+            return
+        }
+        var t = pageRoot.subtitleTracks[index]
+        if (!t) return
+        pageRoot.currentSubtitleIndex = index
+        // 诊断日志：字幕串视频时靠它核对 URL 归属
+        //（服务端对异常请求会返回毫不相干的占位字幕）
+        console.log("[VideoPlayerPage] subtitle picked:",
+                    "index=" + index,
+                    "title=" + (t.title || ""),
+                    "url=" + String(t.url).substring(0, 80))
+        // sub-add 带 select 标志，加载即切到该轨并显示；
+        // title 仅用于 mpv 内部标识轨道
+        mpvPlayer.addSubtitleTrack(t.url, t.title || t.lang || "")
+    }
+
+    // 设置抽屉「字幕」下拉的候选：第 0 项固定是"关闭字幕"，
+    // 其余按 subtitleTracks 顺序；没字幕时只有一个"关闭字幕"且控件禁用
+    function subtitleComboLabels() {
+        var arr = ["关闭字幕"]
+        var tracks = pageRoot.subtitleTracks
+        for (var i = 0; i < tracks.length; ++i) {
+            var t = tracks[i] || {}
+            var name = t.title || t.lang || ""
+            if (name === "") name = "字幕 " + (i + 1)
+            arr.push(name)
+        }
+        return arr
+    }
+
     // ============================================================
     // 评论区图片排布（参照 PiliPlus ImageGridView._calcGridInfo）
     // 与 CommentPanel.qml 中的同名函数保持一致，改动请两边同步。
@@ -1198,12 +1261,12 @@ Rectangle {
     property int lastDanmakuTime: 0
     property int _lastTickTime: -1
 
-    // 简介面板几何：从右侧滑入，宽度正好盖住右侧栏（评论 / 推荐 / 投稿）
+    // 抽屉面板几何（视频简介 / 播放设置共用）：从右侧滑入，宽度正好盖住右侧栏
     //   · 宽度 = 右侧栏宽 + 「页面右边缘 → 窗口右边缘」的空隙，等于从评论区左边缘
     //     一直到窗口右边，视觉上不多不少压住评论区
     //   · 高度与纵向位置 = 视频页本身的范围（不是整窗），面板顶不会高过卡片顶
     // 全部用 mapToItem 实时量，所以换分辨率、改系统缩放、拖窗口都能跟着变。
-    function applyDescSheetGeometry() {
+    function applyDrawerGeometry() {
         var win = pageRoot.Window
         if (!win || win.width <= 0 || win.height <= 0) return
 
@@ -1214,16 +1277,21 @@ Rectangle {
         // 空白上，看不出接缝，但能保证评论区左边缘一定被压住。
         var panelLeft = rightPanel.mapToItem(null, 0, 0).x
         var w = Math.round(win.width - panelLeft) + 6
-        descSheet.size = w
-        if (descSheet.opened) {
-            descSheet.width = w
-            descSheet.height = pageRoot.height
-            descSheet.y = pageTop
+        var sheets = [descSheet, settingsSheet]
+        for (var i = 0; i < sheets.length; ++i) {
+            var s = sheets[i]
+            if (!s) continue
+            s.size = w
+            if (s.opened) {
+                s.width = w
+                s.height = pageRoot.height
+                s.y = pageTop
+            }
         }
     }
 
     function openDescSheet() {
-        applyDescSheetGeometry()
+        applyDrawerGeometry()
         // FluSheet 的 Right 分支会把 height 绑到整窗高、y 归 0；随后再改成
         // "贴住视频页"的范围（enter 动画只动 x，不会覆盖 y/height）
         descSheet.open(FluSheetType.Right)
@@ -1231,34 +1299,43 @@ Rectangle {
         descSheet.y = pageRoot.mapToItem(null, 0, 0).y
     }
 
+    function openSettingsSheet() {
+        // 先收掉其它浮层，否则菜单的关闭动画会和抽屉的滑入叠在一起
+        closePopups()
+        applyDrawerGeometry()
+        // 抽屉是常驻实例，下拉框不会自己跟着状态变：每次打开同步一次
+        settingsSheet.syncCombos()
+        settingsSheet.open(FluSheetType.Right)
+        settingsSheet.height = pageRoot.height
+        settingsSheet.y = pageRoot.mapToItem(null, 0, 0).y
+    }
+
     function closePopups() {
         if (volumePopup.opened) volumePopup.close()
-        if (danmakuPopup.opened) danmakuPopup.close()
-        // 顶部右侧三键组（字幕/编解码）与左上章节菜单二选一：同时开会互相重叠。
-        // 编解码 2026-10-16 从底部迁到顶部后与字幕相邻，必须纳入互斥
+        // 章节菜单与顶部设置抽屉二选一：同时开会互相重叠。
         // 本函数由各菜单的 onAboutToShow 调用，此刻自身 opened 仍为 false，
-        // 所以 close() 只会影响另一个菜单，不会把自己关掉
+        // 所以 close() 只会影响另一个，不会把自己关掉
         if (chapterMenu.opened) chapterMenu.close()
-        if (subtitleMenu.opened) subtitleMenu.close()
-        if (codecMenu.opened) codecMenu.close()
-        // 简介面板挂在窗口 overlay 上，不受本页裁剪；页面隐藏/停止播放时
+        // 抽屉挂在窗口 overlay 上，不受本页裁剪；页面隐藏/停止播放时
         // 必须主动关闭，否则会留在屏幕上盖住新页面
-        if (descSheet.opened) descSheet.close()
+        //（存在性判断：根对象初始化期间 id 可能还没创建）
+        if (descSheet && descSheet.opened) descSheet.close()
+        if (settingsSheet && settingsSheet.opened) settingsSheet.close()
     }
 
     // 自动隐藏豁免：鼠标悬停在控制栏区域内，或任一弹出面板/菜单
-    //（音量、弹幕设置、倍速/编码/清晰度菜单，含面板内的下拉框）打开时，
+    //（音量、播放设置抽屉、倍速/清晰度菜单，含面板内的下拉框）打开时，
     // 控制栏与鼠标指针均不进入自动隐藏
     function controlOverlayActive() {
         return controlBarHover.hovered
             // 顶部渐变阴影/章节键悬停（仅控制栏可见期间豁免：阴影已隐藏时
             // 该区域按普通播放区处理，鼠标静止后照常隐藏指针）。
-            // 字幕键也在同一块阴影里，一并被覆盖
+            // 设置键也在同一块阴影里，一并被覆盖
             || (pageRoot.controlsVisible && topShadowHover.hovered)
             || chapterMenu.opened          // 章节选择菜单打开时不隐藏
-            || subtitleMenu.opened         // 字幕选择菜单打开时不隐藏
-            || volumePopup.opened || danmakuPopup.opened
-            || speedMenu.opened || codecMenu.opened || qualityMenu.opened
+            || settingsSheet.opened        // 播放设置抽屉打开时不隐藏
+            || volumePopup.opened
+            || speedMenu.opened || qualityMenu.opened
             || danmakuInput.activeFocus     // 弹幕输入中不隐藏（失焦即恢复倒计时）
             || colorPickerDialogOpen()       // 取色对话框为模态（挂窗口 Overlay），
                                              // 鼠标事件到不了播放区，必须豁免隐藏
@@ -1522,10 +1599,17 @@ Rectangle {
         }
     }
 
-    // 窗口尺寸/缩放变化：面板若开着，按新尺寸重算宽度与位置
-    // 加 descSheet 存在性判断：根对象的 width/height 在子项创建之前就可能变化
-    onWidthChanged: if (descSheet && descSheet.opened) applyDescSheetGeometry()
-    onHeightChanged: if (descSheet && descSheet.opened) applyDescSheetGeometry()
+    // 窗口尺寸/缩放变化：抽屉若开着，按新尺寸重算宽度与位置
+    // 加存在性判断：根对象的 width/height 在子项创建之前就可能变化，
+    // 此时 id 还是 undefined，直接取 .opened 会抛引用错误
+    onWidthChanged: {
+        if (descSheet && descSheet.opened) applyDrawerGeometry()
+        else if (settingsSheet && settingsSheet.opened) applyDrawerGeometry()
+    }
+    onHeightChanged: {
+        if (descSheet && descSheet.opened) applyDrawerGeometry()
+        else if (settingsSheet && settingsSheet.opened) applyDrawerGeometry()
+    }
 
     onVisibleChanged: {
         if (!visible) {
@@ -1822,7 +1906,7 @@ Rectangle {
         pageRoot._stallLastPos = -1
         // 字幕状态复位：换视频必须清空字幕轨，否则切到"无字幕"的新视频时，
         // 新视频发出的空列表会被 onSubtitleListReady 的"空列表不覆盖非空"
-        // 守卫拦下，导致**残留上一个视频的字幕按钮**（点进去是别人的字幕）
+        // 守卫拦下，导致**残留上一个视频的字幕轨**（选的是别人的字幕）
         pageRoot.subtitleTracks = []
         pageRoot.currentSubtitleIndex = -1
         // 重置番剧相关属性（保留番剧状态用于后续加载）
@@ -2648,7 +2732,7 @@ Rectangle {
     Connections {
         target: PlayUrlManager
         // 字幕轨列表来自 /x/player/wbi/v2（与章节 view_points 同接口），
-        // 不在 playurl 响应里。空列表 = 该视频无字幕，顶部字幕按钮随之隐藏
+        // 不在 playurl 响应里。空列表 = 该视频无字幕，设置抽屉的字幕下拉置灰
         function onSubtitleListReady(list) {
             var incoming = list || []
             console.log("[VideoPlayerPage] onSubtitleListReady, count:", incoming.length)
@@ -3865,9 +3949,9 @@ Rectangle {
                     id: videoInfoPanel
                     anchors.right: parent.right
                     anchors.top: parent.top
-                    // topMargin 56 = 顶部控制栏 48 + 8 间距：2026-10-16 播放
-                    // 信息按钮迁到顶部右侧后，面板若还贴着顶边（原 12）会
-                    // 盖住右上角三个按钮（面板 z=100 在上层），且关不掉
+                    // topMargin 56 = 顶部控制栏 48 + 8 间距：右上角挂着设置键，
+                    // 面板若还贴着顶边（原 12）会盖住它（面板 z=100 在上层），
+                    // 而且面板本身关不掉
                     anchors.rightMargin: Theme.spacingMedium
                     anchors.topMargin: 56
                     width: infoColumn.implicitWidth + 24
@@ -4228,8 +4312,8 @@ Rectangle {
                         }
                     }
                     // 顶部栏常驻，阴影只是按钮的背景，始终显示：
-                    // 2026-10-16 起右侧挂三个按钮——字幕、编解码、播放信息，
-                    // 后两个从底部控制栏迁入，与有无章节/字幕无关，所以不再
+                    // 右上角 2026-10-29 起只留一个设置键（字幕/编解码/播放信息/
+                    // 弹幕设置都收进设置抽屉），与有无章节/字幕无关，所以不再
                     // 按 viewPoints/subtitleTracks 条件隐藏整条阴影
 
                     // 顶部渐变阴影+章节键悬停检测（被动监听，不与章节键
@@ -4243,7 +4327,9 @@ Rectangle {
                         anchors.left: parent.left
                         anchors.leftMargin: Theme.spacingMedium
                         anchors.top: parent.top
-                        anchors.topMargin: 2
+                        // 上间距取与左边距相同的值：按钮在渐变条里垂直居中偏上，
+                        // 之前 2px 显得贴着顶边
+                        anchors.topMargin: Theme.spacingMedium
                         enabled: pageRoot.controlsVisible
                         // 无章节时整个隐藏（不是 disable）：FluMenuBar 占宽度，
                         // 只是 disable 会把位置留给一个点不动的空按钮
@@ -4288,167 +4374,24 @@ Rectangle {
                         }
                     }
 
-                    // 顶部右侧三键组（2026-10-16 定稿）：
-                    //   字幕 → 编解码 → 播放信息（从左到右）
-                    // 字幕在最左、播放信息在最右，与 B站官方播放器一致：
-                    // 左上角留给章节/返回等导航性质的操作，右上角放
-                    // "当前播放内容"的开关。编解码与播放信息原先在底部
-                    // 控制栏右侧，与清晰度/倍速/音量挤在一行，迁到顶部后
-                    // 底部一行更宽松，顶部位置也本就充裕
-                    FluMenuBar {
-                        id: subtitleMenuBar
-                        // 锚到编解码按钮左侧（间距 8，与底部按钮间距一致），
-                        // 不再直接锚 parent.right——右边还有两个按钮
-                        anchors.right: codecMenu.left
-                        anchors.rightMargin: 8
-                        anchors.top: parent.top
-                        anchors.topMargin: 2
-                        enabled: pageRoot.controlsVisible
-                        visible: pageRoot.subtitleTracks.length > 0
-                        delegate: FluMenuBarItem {
-                            id: subMbItem
-                            textColor: "#FFFFFF"
-                            // 覆写背景：与章节键同一套理由（FluTheme.itemHoverColor
-                            // 在黑色控制栏上不可见），改为 15%/25% 白
-                            background: Rectangle {
-                                implicitWidth: 30
-                                implicitHeight: 30
-                                radius: 3
-                                color: subMbItem.pressed ? "#40FFFFFF"
-                                                         : (subMbItem.highlighted ? "#26FFFFFF" : "transparent")
-                            }
-                        }
-                        FluMenu {
-                            id: subtitleMenu
-                            // 标题显示当前选中项，未选中时给一个中性词。
-                            // 与章节菜单一样靠字符数截断，不用 elide（FluMenu title
-                            // 是纯文本属性）
-                            title: {
-                                if (pageRoot.currentSubtitleIndex < 0) return "字幕"
-                                var t = pageRoot.subtitleTracks[pageRoot.currentSubtitleIndex]
-                                var name = t ? (t.title || t.lang || "") : ""
-                                if (name.length > 16) name = name.substring(0, 15) + "…"
-                                return name || "字幕"
-                            }
-                            onAboutToShow: closePopups()
-                            width: 240
-
-                            // 关闭字幕：保留已加载的轨道（不重新下载），
-                            // 只是让 mpv 不渲染
-                            FluMenuItem {
-                                text: "关闭字幕"
-                                onTriggered: {
-                                    pageRoot.currentSubtitleIndex = -1
-                                    mpvPlayer.setSubtitleVisible(false)
-                                }
-                            }
-                            Repeater {
-                                model: pageRoot.subtitleTracks
-                                FluMenuItem {
-                                    text: {
-                                        var n = modelData.title || modelData.lang || ""
-                                        if (n.length > 20) n = n.substring(0, 19) + "…"
-                                        return n
-                                    }
-                                    onTriggered: {
-                                        pageRoot.currentSubtitleIndex = index
-                                        // 诊断日志：字幕串视频时靠它核对 URL 归属
-                                        //（服务端对异常请求会返回毫不相干的占位字幕）
-                                        console.log("[VideoPlayerPage] subtitle picked:",
-                                                    "index=" + index,
-                                                    "title=" + (modelData.title || ""),
-                                                    "url=" + String(modelData.url).substring(0, 80))
-                                        // sub-add 带 select 标志，加载即切到该轨并显示；
-                                        // title 仅用于 mpv 内部标识轨道
-                                        mpvPlayer.addSubtitleTrack(modelData.url, modelData.title || modelData.lang || "")
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // 编解码选择（2026-10-16 从底部控制栏右侧迁入）。
-                    // 锚在播放信息左侧，构成「字幕 → 编解码 → 播放信息」
-                    FluMenuBar {
-                        id: codecMenu
-                        anchors.right: videoInfoBtn.left
-                        anchors.rightMargin: 8
-                        anchors.top: parent.top
-                        anchors.topMargin: 2
-                        enabled: pageRoot.controlsVisible
-                        delegate: FluMenuBarItem {
-    id: mbItem
-    textColor: "#FFFFFF"
-    // 覆写背景：原版悬停色 FluTheme.itemHoverColor（6% 白）在黑色
-    // 控制栏上不可见，改为与 FluIconButton 一致的 15%/25% 白。
-    // 注意：原组件内部的 control id 外部不可见，须用自身 id 引用
-    background: Rectangle {
-        implicitWidth: 30
-        implicitHeight: 30
-        radius: 3
-        color: mbItem.pressed ? "#40FFFFFF"
-                              : (mbItem.highlighted ? "#26FFFFFF" : "transparent")
-    }
-}
-                        FluMenu {
-                            title: pageRoot.currentCodecName
-                            onAboutToShow: closePopups()
-                            Repeater {
-                                model: pageRoot.codecOptions
-                                FluMenuItem {
-                                    text: modelData.name
-                                    onTriggered: {
-                                        var c = modelData.value
-                                        if (c !== pageRoot.currentCodec) {
-                                            pageRoot.currentCodec = c
-                                            Settings.setInt("videoCodec", c)
-                                            if (pageRoot.aid !== "" && pageRoot.cid !== "") {
-                                                pageRoot._savedPosition = mpvPlayer.position
-                                                pageRoot._switchingStream = true
-                                                heartbeatTimer.stop()
-                                                // 【关键修复】番剧模式下走 PGC 专用接口；普通视频走 UGC 接口
-                                                if (pageRoot.isBangumi && pageRoot.epId) {
-                                                    // 用户显式切换编码 → 按传入 exact qn 发请求（forceMaxQuality=false），
-                                                    // 若 Only-FLV 下服务器拿不到 exact encode 会回退真实 quality，playUrlReady 会校正显示
-                                                    PlayUrlManager.getSeasonPlayUrl(
-                                                        pageRoot.cid, pageRoot.currentQualityId,
-                                                        pageRoot.epId, pageRoot.seasonType,
-                                                        pageRoot.bvid, pageRoot.aid,
-                                                        false /* forceMaxQuality */,
-                                                        pageRoot.seasonId || "")
-                                                } else {
-                                                    PlayUrlManager.getPlayUrl(pageRoot.aid, pageRoot.cid, pageRoot.currentQualityId)
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // 播放信息开关（2026-10-16 从底部控制栏右侧迁入，三键组最右）。
-                    // 面板本身是 videoContainer 的 videoInfoPanel（锚右上），
-                    // 已把 topMargin 调到控制栏下方，不会遮住这三个按钮
+                    // 顶部右侧设置键（2026-10-29）：
+                    // 字幕 / 编解码 / 视频信息 / 弹幕设置四个入口原先分散在顶部与
+                    // 底部两处，现在合并成一个设置键（顶替原播放信息键的位置），
+                    // 点开为右侧设置抽屉，控制栏上不再单独占位
                     FluIconButton {
-                        id: videoInfoBtn
+                        id: settingsBtn
                         anchors.right: parent.right
                         anchors.rightMargin: Theme.spacingMedium
                         anchors.top: parent.top
-                        anchors.topMargin: 2
+                        // 与右边距取同一个值，和左侧章节键保持同一水平线
+                        anchors.topMargin: Theme.spacingMedium
                         enabled: pageRoot.controlsVisible
-                        iconSource: FluentIcons.Info
+                        iconSource: FluentIcons.Settings
                         iconSize: 16
                         iconColor: "#FFFFFF"
                         hoverColor: "#26FFFFFF"
                         pressedColor: "#40FFFFFF"
-                        onClicked: {
-                            closePopups()
-                            if (mpvPlayer.hasVideo) {
-                                videoInfoTimer.restart()
-                            }
-                            pageRoot.showVideoInfo = !pageRoot.showVideoInfo
-                        }
+                        onClicked: pageRoot.openSettingsSheet()
                     }
                 }
 
@@ -4737,9 +4680,9 @@ Rectangle {
 
                             Item { Layout.fillWidth: true }
 
-                            // 右侧：从右到左依次为全屏、小窗、弹幕设置、音量、倍速、清晰度。
-                            // 编解码与播放信息已于 2026-10-16 迁到顶部控制栏右侧
-                            // （顺序 字幕→编解码→播放信息），底部一行不再那么挤
+                            // 右侧：从右到左依次为全屏、小窗、音量、倍速、清晰度。
+                            // 弹幕设置 2026-10-29 与字幕/编解码/播放信息一起收进
+                            // 顶部设置抽屉，底部一行只剩播放控制
                             RowLayout {
                                 layoutDirection: Qt.RightToLeft
                                 spacing: 8
@@ -4770,23 +4713,6 @@ Rectangle {
                                         closePopups()
                                         if (pageRoot.isMiniWindow) pageRoot.exitMiniWindow()
                                         else pageRoot.enterMiniWindow()
-                                    }
-                                }
-
-                                // 播放信息按钮已迁到顶部控制栏右侧（2026-10-16）：
-                                // 与编解码、字幕并列，顺序 字幕→编解码→播放信息
-
-                                FluIconButton {
-                                    id: danmakuBtn
-                                    iconSource: FluentIcons.Subtitles
-                                    iconSize: 16
-                                    iconColor: "#FFFFFF"
-                                    hoverColor: "#26FFFFFF"
-                                    pressedColor: "#40FFFFFF"
-                                    onClicked: {
-                                        var wasOpen = danmakuPopup.opened
-                                        closePopups()
-                                        if (!wasOpen) danmakuPopup.open()
                                     }
                                 }
 
@@ -4987,279 +4913,6 @@ Rectangle {
                                     }
                                     onPressed: updateVolume(mouse)
                                     onPositionChanged: updateVolume(mouse)
-                                }
-                            }
-                        }
-                    }
-
-                    // 弹幕设置弹出面板
-                    Popup {
-                        id: danmakuPopup
-                        parent: danmakuBtn
-                        width: 280
-                        height: contentItem.implicitHeight + topPadding + bottomPadding
-                        x: parent.width - width
-                        y: -height - 10
-                        modal: false
-                        closePolicy: Popup.CloseOnEscape
-                        padding: 16
-                        background: Rectangle {
-                            radius: 5
-                            color: "#2B2B2B"
-                        }
-
-                        contentItem: ColumnLayout {
-                            width: parent.width - parent.leftPadding - parent.rightPadding
-                            spacing: 16
-
-                            FluText {
-                                text: "弹幕设置"
-                                font: FluTextStyle.Subtitle
-                                color: "#FFFFFF"
-                            }
-
-                            // 弹幕开关
-                            RowLayout {
-                                Layout.fillWidth: true
-                                spacing: 8
-
-                                FluText {
-                                    text: "显示弹幕"
-                                    font: FluTextStyle.Body
-                                    color: "#FFFFFF"
-                                }
-
-                                Item { Layout.fillWidth: true }
-
-                                FluToggleSwitch {
-                                    checked: pageRoot.danmakuEnabled
-                                    clickListener: function() { pageRoot.danmakuEnabled = !pageRoot.danmakuEnabled }
-                                    normalColor: "#323232"
-                                    hoverColor: "#3E3E3E"
-                                    borderNormalColor: "#A1A1A1"
-                                    dotNormalColor: "#D0D0D0"
-                                    dotCheckColor: "#000000"
-                                }
-                            }
-
-                            // 空降助手开关：自动跳过社区标注的恰饭/片头等片段。
-                            // bsb.conf 缺失或本会话被自动禁用时整体隐藏（功能不存在）
-                            RowLayout {
-                                Layout.fillWidth: true
-                                spacing: 8
-                                visible: SponsorBlockManager.available
-
-                                FluText {
-                                    text: "空降助手（跳过恰饭）"
-                                    font: FluTextStyle.Body
-                                    color: "#FFFFFF"
-                                }
-
-                                Item { Layout.fillWidth: true }
-
-                                FluToggleSwitch {
-                                    checked: pageRoot.sponsorEnabled
-                                    clickListener: function() {
-                                        pageRoot.sponsorEnabled = !pageRoot.sponsorEnabled
-                                        savePlayerSettings()
-                                    }
-                                    normalColor: "#323232"
-                                    hoverColor: "#3E3E3E"
-                                    borderNormalColor: "#A1A1A1"
-                                    dotNormalColor: "#D0D0D0"
-                                    dotCheckColor: "#000000"
-                                }
-                            }
-
-                            // 常驻 mini 进度条开关：控制栏隐藏后底部显示
-                            // 无滑块进度细条（含章节刻度与空降色块）
-                            RowLayout {
-                                Layout.fillWidth: true
-                                spacing: 8
-
-                                FluText {
-                                    text: "常驻进度条"
-                                    font: FluTextStyle.Body
-                                    color: "#FFFFFF"
-                                }
-
-                                Item { Layout.fillWidth: true }
-
-                                FluToggleSwitch {
-                                    checked: pageRoot.miniProgressEnabled
-                                    clickListener: function() {
-                                        pageRoot.miniProgressEnabled = !pageRoot.miniProgressEnabled
-                                        savePlayerSettings()
-                                    }
-                                    normalColor: "#323232"
-                                    hoverColor: "#3E3E3E"
-                                    borderNormalColor: "#A1A1A1"
-                                    dotNormalColor: "#D0D0D0"
-                                    dotCheckColor: "#000000"
-                                }
-                            }
-
-                            // 弹幕帧率限制（高刷屏节流档位；60Hz 屏不节流，禁用）
-                            RowLayout {
-                                Layout.fillWidth: true
-                                spacing: 8
-
-                                FluText {
-                                    text: "弹幕帧率限制"
-                                    font: FluTextStyle.Body
-                                    color: "#FFFFFF"
-                                    opacity: danmakuFpsCombo.enabled ? 1.0 : 0.4
-                                }
-
-                                Item { Layout.fillWidth: true }
-
-                                FluComboBox {
-                                    id: danmakuFpsCombo
-                                    // 候选档位：严格低于当前屏幕刷新率的档位才有意义——
-                                    // 等于刷新率的档位与"不限制"功能等价（vsync 钳制渲染
-                                    // 上限即刷新率），一并过滤避免出现冗余选项。0 = 不限制
-                                    readonly property var optionValues: {
-                                        var refresh = pageRoot.screenRefreshRate
-                                        var vals = [60, 100, 120, 144].filter(
-                                            function(r) { return r < refresh - 1 })
-                                        vals.push(0)
-                                        return vals
-                                    }
-                                    // 60Hz 屏（≤63Hz）：本就不节流，禁用控件
-                                    enabled: pageRoot.screenRefreshRate > 63
-                                    model: optionValues.map(
-                                        function(v) { return v === 0 ? "不限制" : v + " fps" })
-                                    // 初始/换屏后同步选中项：保存值不在候选内
-                                    //（如 144 档换到 120Hz 屏）时回退到 60
-                                    function syncIndex() {
-                                        var idx = optionValues.indexOf(pageRoot.danmakuFpsLimit)
-                                        if (idx < 0)
-                                            idx = optionValues.indexOf(60)
-                                        currentIndex = idx >= 0 ? idx : 0
-                                    }
-                                    Component.onCompleted: syncIndex()
-                                    onOptionValuesChanged: syncIndex()
-                                    // 只响应真实用户选择（activated），模型重建
-                                    // 引起的 currentIndex 变化不写设置
-                                    onActivated: function(index) {
-                                        pageRoot.danmakuFpsLimit = optionValues[index]
-                                        FramePacer.setTargetRate(pageRoot.danmakuFpsLimit)
-                                        savePlayerSettings()
-                                    }
-                                }
-                            }
-
-                            // 弹幕描边样式（对齐 B 站三档）
-                            RowLayout {
-                                Layout.fillWidth: true
-                                spacing: 8
-
-                                FluText {
-                                    text: "描边样式"
-                                    font: FluTextStyle.Body
-                                    color: "#FFFFFF"
-                                }
-
-                                Item { Layout.fillWidth: true }
-
-                                FluComboBox {
-                                    model: ["描边", "重墨", "45°投影"]
-                                    currentIndex: pageRoot.danmakuOutlineStyle
-                                    onActivated: function(index) {
-                                        pageRoot.danmakuOutlineStyle = index
-                                        savePlayerSettings()
-                                    }
-                                }
-                            }
-
-                            // 弹幕大小
-                            ColumnLayout {
-                                Layout.fillWidth: true
-                                spacing: 6
-
-                                FluText {
-                                    text: "弹幕大小"
-                                    font: FluTextStyle.Body
-                                    color: "#FFFFFF"
-                                }
-
-                                FluSlider {
-                                    Layout.fillWidth: true
-                                    from: 0.5
-                                    to: 2.0
-                                    stepSize: 0.1
-                                    value: pageRoot.danmakuSize
-                                    text: value.toFixed(1) + "x"
-                                    onValueChanged: pageRoot.danmakuSize = value
-                                }
-                            }
-
-                            // 不透明度
-                            ColumnLayout {
-                                Layout.fillWidth: true
-                                spacing: 6
-
-                                FluText {
-                                    text: "不透明度"
-                                    font: FluTextStyle.Body
-                                    color: "#FFFFFF"
-                                }
-
-                                FluSlider {
-                                    Layout.fillWidth: true
-                                    from: 0.1
-                                    to: 1.0
-                                    stepSize: 0.05
-                                    value: pageRoot.danmakuOpacity
-                                    text: Math.round(value * 100) + "%"
-                                    onValueChanged: pageRoot.danmakuOpacity = value
-                                }
-                            }
-
-                            // 显示范围
-                            ColumnLayout {
-                                Layout.fillWidth: true
-                                spacing: 6
-
-                                FluText {
-                                    text: "显示范围"
-                                    font: FluTextStyle.Body
-                                    color: "#FFFFFF"
-                                }
-
-                                FluRadioButtons {
-                                    id: danmakuRangeGroup
-                                    orientation: Qt.Horizontal
-                                    currentIndex: pageRoot.danmakuRangeIndex
-                                    onCurrentIndexChanged: pageRoot.danmakuRangeIndex = currentIndex
-
-                                    FluRadioButton { text: "1/4屏"; textColor: "#FFFFFF" }
-                                    FluRadioButton { text: "半屏"; textColor: "#FFFFFF" }
-                                    FluRadioButton { text: "3/4屏"; textColor: "#FFFFFF" }
-                                    FluRadioButton { text: "全屏"; textColor: "#FFFFFF" }
-                                }
-                            }
-
-                            // 弹幕速度
-                            ColumnLayout {
-                                Layout.fillWidth: true
-                                spacing: 6
-
-                                FluText {
-                                    text: "弹幕速度"
-                                    font: FluTextStyle.Body
-                                    color: "#FFFFFF"
-                                }
-
-                                FluRadioButtons {
-                                    id: danmakuSpeedGroup
-                                    orientation: Qt.Horizontal
-                                    currentIndex: pageRoot.danmakuSpeedIndex
-                                    onCurrentIndexChanged: pageRoot.danmakuSpeedIndex = currentIndex
-
-                                    FluRadioButton { text: "慢"; textColor: "#FFFFFF" }
-                                    FluRadioButton { text: "中"; textColor: "#FFFFFF" }
-                                    FluRadioButton { text: "快"; textColor: "#FFFFFF" }
                                 }
                             }
                         }
@@ -7692,6 +7345,428 @@ Rectangle {
                 wrapMode: TextEdit.Wrap
                 font: FluTextStyle.Body
             }
+        }
+    }
+
+    // ===== 播放设置面板（右侧抽屉）=====
+    // 与视频简介同一个抽屉模型（同样的位置、宽度、圆角与阴影），把原先分散的
+    // 四个入口收进来：字幕、编解码、播放信息、弹幕设置。控制栏上不再单独占位，
+    // 只留顶部一个设置键。
+    // 分组照 B站官方设置面板：弹幕一组，播放行为/轨选择一组，视频信息单独一组。
+    FluSheet {
+        id: settingsSheet
+        title: "设置"
+        // Right 模式下 size 表示宽度，由 applyDrawerGeometry() 在 open 前算好
+        size: 320
+
+        // 下拉框是常驻实例：切视频、切编码、拿到新的字幕列表后不会自己跟着变，
+        // 每次打开抽屉时统一同步一次
+        function syncCombos() {
+            subtitleCombo.syncIndex()
+            codecCombo.syncIndex()
+        }
+
+        // 背景与视频简介抽屉完全一致：只圆左侧两角（右边缘贴着窗口边，
+        // 右上/右下若也圆会露出下面的遮罩），阴影半径跟着圆角走
+        background: Rectangle {
+            radius: Theme.radiusMedium
+            topLeftRadius: Theme.radiusMedium
+            bottomLeftRadius: Theme.radiusMedium
+            topRightRadius: 0
+            bottomRightRadius: 0
+            border.width: 1
+            border.color: FluTheme.dark
+                          ? (Window.active ? Qt.rgba(55/255, 55/255, 55/255, 1)
+                                           : Qt.rgba(45/255, 45/255, 45/255, 1))
+                          : Qt.rgba(226/255, 229/255, 234/255, 1)
+            color: FluTheme.dark
+                   ? (Window.active ? Qt.rgba(38/255, 44/255, 54/255, 1)
+                                    : Qt.rgba(39/255, 39/255, 39/255, 1))
+                   : Qt.rgba(251/255, 251/255, 253/255, 1)
+            FluShadow { radius: Theme.radiusMedium }
+        }
+
+        Flickable {
+            id: settingsFlick
+            anchors.fill: parent
+            anchors.leftMargin: 16
+            anchors.rightMargin: 8
+            anchors.topMargin: 6
+            anchors.bottomMargin: 16
+            clip: true
+            boundsBehavior: Flickable.StopAtBounds
+            contentWidth: width
+            contentHeight: settingsCol.implicitHeight
+            ScrollBar.vertical: FluScrollBar { policy: ScrollBar.AsNeeded }
+
+            ColumnLayout {
+                id: settingsCol
+                width: settingsFlick.width - 12
+                spacing: 12
+
+                // ---------- 弹幕 ----------
+                FluText {
+                    text: "弹幕"
+                    font: FluTextStyle.Subtitle
+                    color: FluTheme.fontPrimaryColor
+                }
+
+                Rectangle {
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 1
+                    color: FluTheme.dividerColor
+                }
+
+                // 弹幕总开关
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 12
+
+                    FluText {
+                        text: "显示弹幕"
+                        font: FluTextStyle.Body
+                        color: FluTheme.fontPrimaryColor
+                        Layout.fillWidth: true
+                        wrapMode: Text.Wrap
+                    }
+
+                    FluToggleSwitch {
+                        checked: pageRoot.danmakuEnabled
+                        clickListener: function() { pageRoot.danmakuEnabled = !pageRoot.danmakuEnabled }
+                    }
+                }
+
+                // 弹幕帧率限制（高刷屏节流档位；60Hz 屏不节流，禁用）
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 12
+
+                    FluText {
+                        text: "弹幕帧率限制"
+                        font: FluTextStyle.Body
+                        color: FluTheme.fontPrimaryColor
+                        Layout.fillWidth: true
+                        wrapMode: Text.Wrap
+                        opacity: danmakuFpsCombo.enabled ? 1.0 : 0.4
+                    }
+
+                    FluComboBox {
+                        id: danmakuFpsCombo
+                        Layout.preferredWidth: 132
+                        // 候选档位：严格低于当前屏幕刷新率的档位才有意义——
+                        // 等于刷新率的档位与"不限制"功能等价（vsync 钳制渲染上限
+                        // 即刷新率），一并过滤避免出现冗余选项。0 = 不限制
+                        readonly property var optionValues: {
+                            var refresh = pageRoot.screenRefreshRate
+                            var vals = [60, 100, 120, 144].filter(
+                                function(r) { return r < refresh - 1 })
+                            vals.push(0)
+                            return vals
+                        }
+                        // 60Hz 屏（≤63Hz）：本就不节流，禁用控件
+                        enabled: pageRoot.screenRefreshRate > 63
+                        model: optionValues.map(
+                            function(v) { return v === 0 ? "不限制" : v + " fps" })
+                        // 初始/换屏后同步选中项：保存值不在候选内
+                        //（如 144 档换到 120Hz 屏）时回退到 60
+                        function syncIndex() {
+                            var idx = optionValues.indexOf(pageRoot.danmakuFpsLimit)
+                            if (idx < 0)
+                                idx = optionValues.indexOf(60)
+                            currentIndex = idx >= 0 ? idx : 0
+                        }
+                        Component.onCompleted: syncIndex()
+                        onOptionValuesChanged: syncIndex()
+                        // 只响应真实用户选择（activated），模型重建引起的
+                        // currentIndex 变化不写设置
+                        onActivated: function(index) {
+                            pageRoot.danmakuFpsLimit = optionValues[index]
+                            FramePacer.setTargetRate(pageRoot.danmakuFpsLimit)
+                            savePlayerSettings()
+                        }
+                    }
+                }
+
+                // 弹幕描边样式（对齐 B 站三档）
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 12
+
+                    FluText {
+                        text: "描边样式"
+                        font: FluTextStyle.Body
+                        color: FluTheme.fontPrimaryColor
+                        Layout.fillWidth: true
+                        wrapMode: Text.Wrap
+                    }
+
+                    FluComboBox {
+                        Layout.preferredWidth: 132
+                        model: ["描边", "重墨", "45°投影"]
+                        currentIndex: pageRoot.danmakuOutlineStyle
+                        onActivated: function(index) {
+                            pageRoot.danmakuOutlineStyle = index
+                            savePlayerSettings()
+                        }
+                    }
+                }
+
+                // 弹幕大小
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    spacing: 4
+
+                    FluText {
+                        text: "弹幕大小"
+                        font: FluTextStyle.Body
+                        color: FluTheme.fontPrimaryColor
+                    }
+
+                    FluSlider {
+                        Layout.fillWidth: true
+                        from: 0.5
+                        to: 2.0
+                        stepSize: 0.1
+                        value: pageRoot.danmakuSize
+                        text: value.toFixed(1) + "x"
+                        onValueChanged: pageRoot.danmakuSize = value
+                    }
+                }
+
+                // 不透明度
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    spacing: 4
+
+                    FluText {
+                        text: "不透明度"
+                        font: FluTextStyle.Body
+                        color: FluTheme.fontPrimaryColor
+                    }
+
+                    FluSlider {
+                        Layout.fillWidth: true
+                        from: 0.1
+                        to: 1.0
+                        stepSize: 0.05
+                        value: pageRoot.danmakuOpacity
+                        text: Math.round(value * 100) + "%"
+                        onValueChanged: pageRoot.danmakuOpacity = value
+                    }
+                }
+
+                // 显示范围
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    spacing: 4
+
+                    FluText {
+                        text: "显示范围"
+                        font: FluTextStyle.Body
+                        color: FluTheme.fontPrimaryColor
+                    }
+
+                    FluRadioButtons {
+                        orientation: Qt.Horizontal
+                        currentIndex: pageRoot.danmakuRangeIndex
+                        onCurrentIndexChanged: pageRoot.danmakuRangeIndex = currentIndex
+
+                        FluRadioButton { text: "1/4屏" }
+                        FluRadioButton { text: "半屏" }
+                        FluRadioButton { text: "3/4屏" }
+                        FluRadioButton { text: "全屏" }
+                    }
+                }
+
+                // 弹幕速度
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    spacing: 4
+
+                    FluText {
+                        text: "弹幕速度"
+                        font: FluTextStyle.Body
+                        color: FluTheme.fontPrimaryColor
+                    }
+
+                    FluRadioButtons {
+                        orientation: Qt.Horizontal
+                        currentIndex: pageRoot.danmakuSpeedIndex
+                        onCurrentIndexChanged: pageRoot.danmakuSpeedIndex = currentIndex
+
+                        FluRadioButton { text: "慢" }
+                        FluRadioButton { text: "中" }
+                        FluRadioButton { text: "快" }
+                    }
+                }
+
+                Rectangle {
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 1
+                    color: FluTheme.dividerColor
+                }
+
+                // ---------- 播放行为 / 轨选择 ----------
+                // 空降助手开关：自动跳过社区标注的恰饭/片头等片段。
+                // bsb.conf 缺失或本会话被自动禁用时整体隐藏（功能不存在）
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 12
+                    visible: SponsorBlockManager.available
+
+                    FluText {
+                        text: "空降助手（跳过恰饭）"
+                        font: FluTextStyle.Body
+                        color: FluTheme.fontPrimaryColor
+                        Layout.fillWidth: true
+                        wrapMode: Text.Wrap
+                    }
+
+                    FluToggleSwitch {
+                        checked: pageRoot.sponsorEnabled
+                        clickListener: function() {
+                            pageRoot.sponsorEnabled = !pageRoot.sponsorEnabled
+                            savePlayerSettings()
+                        }
+                    }
+                }
+
+                // 常驻 mini 进度条开关：控制栏隐藏后底部显示无滑块进度细条
+                //（含章节刻度与空降色块）
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 12
+
+                    FluText {
+                        text: "常驻进度条"
+                        font: FluTextStyle.Body
+                        color: FluTheme.fontPrimaryColor
+                        Layout.fillWidth: true
+                        wrapMode: Text.Wrap
+                    }
+
+                    FluToggleSwitch {
+                        checked: pageRoot.miniProgressEnabled
+                        clickListener: function() {
+                            pageRoot.miniProgressEnabled = !pageRoot.miniProgressEnabled
+                            savePlayerSettings()
+                        }
+                    }
+                }
+
+                // 字幕轨选择。没有字幕时只剩"关闭字幕"一项并置灰：
+                // 控件位置保持不变，避免抽屉内容随视频上下跳
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 12
+
+                    FluText {
+                        text: "字幕"
+                        font: FluTextStyle.Body
+                        color: FluTheme.fontPrimaryColor
+                        Layout.fillWidth: true
+                        wrapMode: Text.Wrap
+                    }
+
+                    FluComboBox {
+                        id: subtitleCombo
+                        Layout.preferredWidth: 132
+                        model: pageRoot.subtitleComboLabels()
+                        enabled: pageRoot.subtitleTracks.length > 0
+                        // 0 = 关闭字幕，n = subtitleTracks[n-1]
+                        function syncIndex() {
+                            var idx = pageRoot.currentSubtitleIndex + 1
+                            if (idx < 0 || idx >= model.length) idx = 0
+                            currentIndex = idx
+                        }
+                        Component.onCompleted: syncIndex()
+                        onActivated: function(index) { pageRoot.selectSubtitle(index - 1) }
+                    }
+                }
+
+                // 视频解码格式（换编码要重新取 playurl，逻辑在 switchCodec 里）
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 12
+
+                    FluText {
+                        text: "视频解码格式"
+                        font: FluTextStyle.Body
+                        color: FluTheme.fontPrimaryColor
+                        Layout.fillWidth: true
+                        wrapMode: Text.Wrap
+                    }
+
+                    FluComboBox {
+                        id: codecCombo
+                        Layout.preferredWidth: 132
+                        model: pageRoot.codecOptions.map(function(o) { return o.name })
+                        function syncIndex() {
+                            var opts = pageRoot.codecOptions
+                            for (var i = 0; i < opts.length; ++i) {
+                                if (opts[i].value === pageRoot.currentCodec) {
+                                    currentIndex = i
+                                    return
+                                }
+                            }
+                            currentIndex = 0
+                        }
+                        Component.onCompleted: syncIndex()
+                        onActivated: function(index) {
+                            pageRoot.switchCodec(pageRoot.codecOptions[index].value)
+                        }
+                    }
+                }
+
+                Rectangle {
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 1
+                    color: FluTheme.dividerColor
+                }
+
+                // ---------- 视频信息 ----------
+                // 打开后播放器左下角叠加实时解码信息（分辨率/编码/码率等）
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 12
+
+                    FluText {
+                        text: "视频信息"
+                        font: FluTextStyle.Body
+                        color: FluTheme.fontPrimaryColor
+                        Layout.fillWidth: true
+                        wrapMode: Text.Wrap
+                    }
+
+                    FluToggleSwitch {
+                        checked: pageRoot.showVideoInfo
+                        clickListener: function() {
+                            // 面板里的数值靠 videoInfoTimer 异步读，开关打开时
+                            // 先触发一次刷新，避免刚打开是空白
+                            if (mpvPlayer.hasVideo) {
+                                videoInfoTimer.restart()
+                            }
+                            pageRoot.showVideoInfo = !pageRoot.showVideoInfo
+                        }
+                    }
+                }
+
+                // 底部留白：最后一项贴着窗口下沿会显得很挤
+                Item {
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 8
+                }
+            }
+        }
+    }
+
+    // 字幕轨是异步拉到的（换视频时还会先清空），抽屉里的「字幕」下拉要跟着
+    // 重新对齐。不挂在 ComboBox 的 onModelChanged 上：不同 Qt 版本对 model 的
+    // NOTIFY 支持不一致，直接听页面属性最稳
+    Connections {
+        target: pageRoot
+        function onSubtitleTracksChanged() {
+            if (settingsSheet) settingsSheet.syncCombos()
         }
     }
 }
