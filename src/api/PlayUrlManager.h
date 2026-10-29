@@ -34,6 +34,13 @@ public:
         QList<QString> audioBackupUrls;  // 音频备选URL列表
         QList<QString> flvBackupUrls;    // FLV备选URL列表
         int qualityId;
+        // 码率（bps）。dash.audio 每项都带 bandwidth，用来生成"64K/132K/192K"
+        // 之外的兜底标签，也用于"自动"档按实际码率挑最高，而不是只比 id
+        int bandwidth = 0;
+        // 实际选中的音频档位 id（30216/30232/30280/30250/30251）。
+        // qualityId 是视频清晰度，两者不能共用一个字段：QML 的"选择音质"
+        // 下拉要显示真正生效的档位，而不是用户的偏好值
+        int audioId = 0;
         QString qualityName;
         QString codec;
         QString mimeType;
@@ -279,6 +286,14 @@ signals:
     // 清晰度列表已更新
     void qualityListReady(const QVariantList &list);
 
+    // 可选音质列表（来自本次 playurl 的 dash.audio），每项 {id, label}。
+    // **只含视频真实提供的档位，不带"自动"**——自动只是"没选过/选的档位
+    // 不存在"时的兜底规则，实际生效的档位由 playUrlReady 的 audioId 带回，
+    // QML 下拉按它显示当前音质。列表为空（FLV 单流 / 番剧）时 QML 整行隐藏。
+    // B 站 playurl 没有独立的音质参数——所有音质都在 dash.audio 里，
+    // 所以切音质不需要重新请求接口，直接用缓存里的音频 URL 换轨
+    void audioQualityListReady(const QVariantList &list);
+
     // 视频信息已获取（包含cid，可用于加载弹幕等）
     void videoInfoReady(const QString &aid, const QString &bvid, const QString &cid, const QString &title);
 
@@ -411,6 +426,10 @@ public:
     // 从缓存中切换清晰度（使用已获取的完整流列表）
     Q_INVOKABLE void switchQualityFromCache(int quality);
 
+    // 从缓存中切换音质：只换音频轨，视频轨按 videoQualityId 从缓存里挑回来。
+    // audioId = 0 表示"自动"（按设置优先，没有则取最高码率）
+    Q_INVOKABLE void switchAudioQualityFromCache(int audioId, int videoQualityId);
+
     // 清理缓存和状态（在切换视频前调用）
     Q_INVOKABLE void clearCache();
 
@@ -498,6 +517,18 @@ private:
     QVariantMap videoCardToMap(const VideoCardInfo &video) const;
     QVariantMap playUrlInfoToMap(const PlayUrlInfo &info) const;
     QVariantMap videoUrlResultToMap(const VideoUrlResult &result) const;
+
+    // ===== 音质选择 =====
+    // 音质档位标签：30216→64K、30232→132K、30280→192K、
+    // 30250→杜比全景声、30251→Hi-Res 无损；未知 id 用码率兜底
+    static QString audioQualityLabel(int id, int bandwidth);
+    // 按偏好挑一条音频流：preferredId>0 且存在则用它，否则回落"最高码率"。
+    // preferredId<=0 时读 AppSettings 的 videoAudioQuality（0=自动）
+    static PlayUrlInfo pickAudioStream(const QList<PlayUrlInfo> &audios, int preferredId);
+    // 把本次 dash.audio 的档位整理成 QVariantList 并发信号
+    void emitAudioQualityList(const QList<PlayUrlInfo> &audios);
+    // 从缓存应用（切清晰度 / 切音质共用）：audioId=0 表示按设置自动挑
+    void applyFromCache(int videoQualityId, int audioId);
     QVariantMap qualityInfoToMap(const QualityInfo &info) const;
 
     QNetworkAccessManager *m_networkManager;

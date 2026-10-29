@@ -835,6 +835,19 @@ Rectangle {
         return "AVC"
     }
 
+    // 音质选项：来自本次 playurl 的 dash.audio（PlayUrlManager 每解析一次就发
+    // 一次 audioQualityListReady）。**不含"自动"**——自动只是客户端的兜底
+    // 规则（没选过 / 选的档位不存在时按码率取最高），下拉框要直接显示当前
+    // 实际生效的档位，用户才知道自己听到的是什么。
+    // B 站 playurl 没有"音质"请求参数——所有档位都在 dash.audio 里一次给全，
+    // 所以切音质不需要重新请求接口，直接换音频 URL（见 switchAudio）
+    property var audioQualityOptions: []
+    // 用户选定的音质 id（0=没选过，按自动规则走），与 AppSettings 的
+    // videoAudioQuality 同步；仅用于"优先选哪档"，不用于显示
+    property int audioQualityId: Settings.getInt("videoAudioQuality", 0)
+    // 当前实际生效的音质 id（由 playUrlReady 的 audioId 带回来），下拉框显示它
+    property int currentAudioId: 0
+
     // 视频信息浮层
     property bool showVideoInfo: false
     property int actualWidth: 0
@@ -938,6 +951,23 @@ Rectangle {
         } else {
             PlayUrlManager.getPlayUrl(pageRoot.aid, pageRoot.cid, pageRoot.currentQualityId)
         }
+    }
+
+    // 切换音质：dash.audio 里已经把全部档位都给了，所以不用重新请求接口，
+    // 直接让 PlayUrlManager 从缓存里换一条音频 URL 重发 playUrlReady。
+    // 视频轨按当前清晰度从缓存里挑回来，续播走 _switchingStream 那套
+    function switchAudio(audioId) {
+        if (pageRoot.aid === "" || pageRoot.cid === "") return
+        // 先落偏好（即使正好等于当前生效档位，也要记下来，否则下次换视频
+        // 会退回上一次的偏好）
+        pageRoot.audioQualityId = audioId
+        Settings.setInt("videoAudioQuality", audioId)
+        // 当前已经是这一档：不必重载播放器
+        if (audioId === pageRoot.currentAudioId) return
+        pageRoot._savedPosition = mpvPlayer.position
+        pageRoot._switchingStream = true
+        heartbeatTimer.stop()
+        PlayUrlManager.switchAudioQualityFromCache(audioId, pageRoot.currentQualityId)
     }
 
     // 选择字幕轨：index = -1 关闭字幕（保留已加载的轨道、不重新下载，
@@ -3160,6 +3190,9 @@ Rectangle {
             pageRoot.videoUrlInfo = info
             pageRoot.currentQuality = info.qualityName || ""
             pageRoot.currentQualityId = info.qualityId || 0
+            // 实际生效的音频档位：下拉框按它选中，用户才能看到"现在是多少 K"
+            pageRoot.currentAudioId = info.audioId || 0
+            if (audioQualityCombo) audioQualityCombo.syncIndex()
             pageRoot.videoDuration = info.duration || 0
             // 新流准备就绪，重置播放级重试状态
             pageRoot.playbackRetryCount = 0
@@ -3369,6 +3402,11 @@ Rectangle {
         }
         function onQualityListReady(list) {
             pageRoot.qualityList = list
+        }
+        // 音质档位（来自本次 playurl 的 dash.audio，只含视频真实提供的档位）
+        function onAudioQualityListReady(list) {
+            pageRoot.audioQualityOptions = list || []
+            if (audioQualityCombo) audioQualityCombo.syncIndex()
         }
     }
 
@@ -7332,6 +7370,7 @@ Rectangle {
         function syncCombos() {
             subtitleCombo.syncIndex()
             codecCombo.syncIndex()
+            audioQualityCombo.syncIndex()
         }
 
         // 背景与视频简介抽屉完全一致：只圆左侧两角（右边缘贴着窗口边，
@@ -7359,7 +7398,8 @@ Rectangle {
             anchors.fill: parent
             anchors.leftMargin: 16
             anchors.rightMargin: 8
-            anchors.topMargin: 6
+            // 顶部留 12：第一条是分组分隔线，贴着头部的标题会显得粘在一起
+            anchors.topMargin: 12
             anchors.bottomMargin: 16
             clip: true
             boundsBehavior: Flickable.StopAtBounds
@@ -7373,16 +7413,18 @@ Rectangle {
                 spacing: 12
 
                 // ---------- 弹幕 ----------
-                FluText {
-                    text: "弹幕"
-                    font: FluTextStyle.Subtitle
-                    color: FluTheme.fontPrimaryColor
-                }
-
+                // 分隔线放在分组标题**上方**：标题与它下面的各设置项属于同一组，
+                // 线只负责和上一组隔开。原来线在标题下面，等于把标题孤立出去
                 Rectangle {
                     Layout.fillWidth: true
                     Layout.preferredHeight: 1
                     color: FluTheme.dividerColor
+                }
+
+                FluText {
+                    text: "弹幕"
+                    font: FluTextStyle.Subtitle
+                    color: FluTheme.fontPrimaryColor
                 }
 
                 // 弹幕总开关
@@ -7682,6 +7724,48 @@ Rectangle {
                         Component.onCompleted: syncIndex()
                         onActivated: function(index) {
                             pageRoot.switchCodec(pageRoot.codecOptions[index].value)
+                        }
+                    }
+                }
+
+                // 选择音质（档位来自 playurl 的 dash.audio，全部是视频真实提供的档位，
+                // 不含"自动"；下拉显示的是当前实际生效的那一档）
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 12
+                    // 没有 dash.audio（番剧 FLV 单流 / 该视频只有一条音轨）时整行隐藏，
+                    // 别留一个空下拉
+                    visible: pageRoot.audioQualityOptions.length > 0
+
+                    FluText {
+                        text: "选择音质"
+                        font: FluTextStyle.Body
+                        color: FluTheme.fontPrimaryColor
+                        Layout.fillWidth: true
+                        wrapMode: Text.Wrap
+                    }
+
+                    FluComboBox {
+                        id: audioQualityCombo
+                        Layout.preferredWidth: 132
+                        model: pageRoot.audioQualityOptions.map(function(o) { return o.label })
+                        // 按**实际生效**的档位选中，而不是用户偏好：选了 132K 但
+                        // 视频没有这档时会自动回落，这里要如实显示回落后的档位
+                        function syncIndex() {
+                            var opts = pageRoot.audioQualityOptions
+                            for (var i = 0; i < opts.length; ++i) {
+                                if (opts[i].id === pageRoot.currentAudioId) {
+                                    currentIndex = i
+                                    return
+                                }
+                            }
+                            currentIndex = -1
+                        }
+                        Component.onCompleted: syncIndex()
+                        onActivated: function(index) {
+                            var opt = pageRoot.audioQualityOptions[index]
+                            if (!opt) return
+                            pageRoot.switchAudio(opt.id)
                         }
                     }
                 }

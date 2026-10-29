@@ -668,6 +668,7 @@ void PlayUrlManager::parsePlayUrlData(const QByteArray &data, int quality, const
                 info.audioUrl = handleUrl(baseAudioUrl, audioBackupUrls);
                 
                 info.qualityId = audio["id"].toInt();
+                info.bandwidth = audio["bandwidth"].toInt();
                 info.codec = audio["codecs"].toString();
                 info.mimeType = audio["mimeType"].toString();
 
@@ -837,16 +838,11 @@ void PlayUrlManager::parsePlayUrlData(const QByteArray &data, int quality, const
             }
         }
 
-        // 获取对应的音频 URL
+        // 获取对应的音频 URL（用户选了具体音质就用它，否则按码率挑最高）
         if (!result.dashAudioUrls.isEmpty()) {
-            // 按优先级选择音频：最高码率优先
-            QList<PlayUrlInfo> sortedAudios = result.dashAudioUrls;
-            // 音频流的 id 越大通常码率越高（30280 > 30232 > 30216）
-            std::sort(sortedAudios.begin(), sortedAudios.end(),
-                      [](const PlayUrlInfo &a, const PlayUrlInfo &b) {
-                          return a.qualityId > b.qualityId;
-                      });
-            playInfo.audioUrl = sortedAudios.first().audioUrl;
+            const PlayUrlInfo audio = pickAudioStream(result.dashAudioUrls, 0);
+            playInfo.audioUrl = audio.audioUrl;
+            playInfo.audioId = audio.qualityId;
         }
         
         qDebug() << "[PlayUrlManager] selected stream qualityId:" << playInfo.qualityId 
@@ -864,13 +860,19 @@ void PlayUrlManager::parsePlayUrlData(const QByteArray &data, int quality, const
     // 保存用户请求的清晰度，供 onPlayUrlLoaded 使用
     result.requestedQuality = quality;
 
+    // 把本次 dash.audio 的档位告诉 QML（设置面板的"选择音质"下拉）。
+    // 没有 dash（FLV 单流 / 番剧）时也发，列表为空，QML 把整行隐藏
+    emitAudioQualityList(result.dashAudioUrls);
+
     qDebug() << "[PlayUrlManager] parsePlayUrlData done, videoUrl:" << playInfo.videoUrl << "audioUrl:" << playInfo.audioUrl
              << "cid:" << cid << "quality:" << quality;
 
     // 缓存逻辑：
-    // 1. 如果有 DASH 流且数量 >= 2，缓存结果以便后续切换清晰度
+    // 1. 视频流 >= 2（可切清晰度）或 音频流 >= 2（可切音质）都缓存，
+    //    否则单清晰度视频就没法切音质了
     // 2. 如果只有 FLV 流（番剧 V2 API 常见情况），不缓存，每次切换都重新请求 API
-    if (!cid.isEmpty() && result.dashVideoUrls.count() >= 2) {
+    if (!cid.isEmpty()
+        && (result.dashVideoUrls.count() >= 2 || result.dashAudioUrls.count() >= 2)) {
         // 统计流中包含的不同清晰度数量
         QSet<int> availableQualities;
         for (const PlayUrlInfo &s : result.dashVideoUrls) {
@@ -949,11 +951,23 @@ void PlayUrlManager::clearCache()
 // 从缓存中切换清晰度
 void PlayUrlManager::switchQualityFromCache(int quality)
 {
-    qDebug() << "[PlayUrlManager] switchQualityFromCache quality:" << quality << "hasCache:" << m_hasCachedResult;
+    applyFromCache(quality, 0);
+}
+
+void PlayUrlManager::switchAudioQualityFromCache(int audioId, int videoQualityId)
+{
+    applyFromCache(videoQualityId, audioId);
+}
+
+void PlayUrlManager::applyFromCache(int videoQualityId, int audioId)
+{
+    const int quality = videoQualityId;
+    qDebug() << "[PlayUrlManager] applyFromCache quality:" << quality << "audioId:" << audioId
+             << "hasCache:" << m_hasCachedResult;
 
     if (!m_hasCachedResult || m_cachedVideoUrlResult.dashVideoUrls.isEmpty()) {
-        qDebug() << "[PlayUrlManager] No cached result, cannot switch quality";
-        emit errorOccurred("无法切换清晰度，请重新加载视频");
+        qDebug() << "[PlayUrlManager] No cached result, cannot switch stream";
+        emit errorOccurred("无法切换，请重新加载视频");
         return;
     }
 
@@ -1046,19 +1060,89 @@ void PlayUrlManager::switchQualityFromCache(int quality)
         return;
     }
 
-    // 选择对应的音频流（使用缓存中的音频）
+    // 选择对应的音频流（使用缓存中的音频；audioId=0 时按设置/自动挑最高码率）
     if (!m_cachedVideoUrlResult.dashAudioUrls.isEmpty()) {
-        QList<PlayUrlInfo> sortedAudios = m_cachedVideoUrlResult.dashAudioUrls;
-        std::sort(sortedAudios.begin(), sortedAudios.end(),
-                  [](const PlayUrlInfo &a, const PlayUrlInfo &b) {
-                      return a.qualityId > b.qualityId;
-                  });
-        playInfo.audioUrl = sortedAudios.first().audioUrl;
+        const PlayUrlInfo audio = pickAudioStream(m_cachedVideoUrlResult.dashAudioUrls, audioId);
+        playInfo.audioUrl = audio.audioUrl;
+        playInfo.audioId = audio.qualityId;
     }
 
-    qDebug() << "[PlayUrlManager] switchQualityFromCache done, videoUrl:" << playInfo.videoUrl.left(80)
-             << "qualityId:" << playInfo.qualityId << "qualityName:" << playInfo.qualityName;
+    qDebug() << "[PlayUrlManager] applyFromCache done, videoUrl:" << playInfo.videoUrl.left(80)
+             << "qualityId:" << playInfo.qualityId << "audioUrl:" << playInfo.audioUrl.left(80);
     emit playUrlReady(playUrlInfoToMap(playInfo));
+}
+
+// ===== 音质选择 =====
+
+QString PlayUrlManager::audioQualityLabel(int id, int bandwidth)
+{
+    // B 站 DASH 音频档位（与 PiliPlus 的 AudioQuality 一致）：
+    // 30216=64K、30232=132K、30280=192K、30250=杜比全景声、30251=Hi-Res 无损
+    switch (id) {
+    case 30216: return QStringLiteral("64K");
+    case 30232: return QStringLiteral("132K");
+    case 30280: return QStringLiteral("192K");
+    case 30250: return QStringLiteral("杜比全景声");
+    case 30251: return QStringLiteral("Hi-Res 无损");
+    default: break;
+    }
+    // 新档位（或地区特别版）不认识时用实际码率兜底，不要显示裸 id
+    if (bandwidth > 0)
+        return QStringLiteral("%1 kbps").arg(bandwidth / 1000);
+    return QStringLiteral("音质 %1").arg(id);
+}
+
+// 注意返回类型必须带类名限定：函数返回类型出现在 "PlayUrlManager::" 之前，
+// 此时还没进入类作用域，直接写 PlayUrlInfo 会被当作未知类型
+PlayUrlManager::PlayUrlInfo PlayUrlManager::pickAudioStream(const QList<PlayUrlInfo> &audios, int preferredId)
+{
+    if (audios.isEmpty())
+        return PlayUrlInfo();
+
+    int want = preferredId;
+    if (want <= 0)
+        want = AppSettings::instance()->getInt("videoAudioQuality", 0);
+
+    if (want > 0) {
+        for (const PlayUrlInfo &a : audios) {
+            if (a.qualityId == want)
+                return a;
+        }
+        // 该视频没有这个档位（比如选了 Hi-Res 但视频只有 192K）：静默回落，
+        // 不要报错打断播放
+        qDebug() << "[PlayUrlManager] audio id" << want << "not available, fallback to auto";
+    }
+
+    // 自动：按实际码率取最高；bandwidth 缺失时退回 id 最大的（旧行为）
+    QList<PlayUrlInfo> sorted = audios;
+    std::sort(sorted.begin(), sorted.end(),
+              [](const PlayUrlInfo &a, const PlayUrlInfo &b) {
+                  if (a.bandwidth != b.bandwidth)
+                      return a.bandwidth > b.bandwidth;
+                  return a.qualityId > b.qualityId;
+              });
+    return sorted.first();
+}
+
+void PlayUrlManager::emitAudioQualityList(const QList<PlayUrlInfo> &audios)
+{
+    // 只列视频真实提供的档位，不放"自动"：自动是客户端的兜底规则，
+    // 下拉框直接显示当前实际生效的档位才有意义（见 playUrlInfoToMap 的 audioId）
+    QVariantList list;
+    QSet<int> seen;
+    for (const PlayUrlInfo &a : audios) {
+        if (a.qualityId <= 0 || seen.contains(a.qualityId))
+            continue;
+        seen.insert(a.qualityId);
+
+        QVariantMap item;
+        item["id"] = a.qualityId;
+        item["label"] = audioQualityLabel(a.qualityId, a.bandwidth);
+        list.append(item);
+    }
+
+    qDebug() << "[PlayUrlManager] emitAudioQualityList count:" << list.size();
+    emit audioQualityListReady(list);
 }
 
 void PlayUrlManager::parseQualityList(const QJsonObject &dataObj)
@@ -1257,6 +1341,8 @@ QVariantMap PlayUrlManager::playUrlInfoToMap(const PlayUrlInfo &info) const
     map["flvUrl"] = info.flvUrl;
     map["qualityId"] = info.qualityId;
     map["qualityName"] = info.qualityName;
+    // 实际生效的音频档位（QML 的"选择音质"下拉按它显示当前音质）
+    map["audioId"] = info.audioId;
     map["codec"] = info.codec;
     map["mimeType"] = info.mimeType;
     map["duration"] = info.duration;

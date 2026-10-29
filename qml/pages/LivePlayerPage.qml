@@ -2772,7 +2772,8 @@ Rectangle {
             anchors.fill: parent
             anchors.leftMargin: 16
             anchors.rightMargin: 8
-            anchors.topMargin: 6
+            // 顶部留 12：第一条是分组分隔线，贴着头部的标题会显得粘在一起
+            anchors.topMargin: 12
             anchors.bottomMargin: 16
             clip: true
             boundsBehavior: Flickable.StopAtBounds
@@ -2786,16 +2787,18 @@ Rectangle {
                 spacing: 12
 
                 // ---------- 弹幕 ----------
-                FluText {
-                    text: "弹幕"
-                    font: FluTextStyle.Subtitle
-                    color: FluTheme.fontPrimaryColor
-                }
-
+                // 分隔线放在分组标题**上方**：标题与它下面的各设置项属于同一组，
+                // 线只负责和上一组隔开。原来线在标题下面，等于把标题孤立出去
                 Rectangle {
                     Layout.fillWidth: true
                     Layout.preferredHeight: 1
                     color: FluTheme.dividerColor
+                }
+
+                FluText {
+                    text: "弹幕"
+                    font: FluTextStyle.Subtitle
+                    color: FluTheme.fontPrimaryColor
                 }
 
                 // 弹幕总开关
