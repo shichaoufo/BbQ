@@ -147,21 +147,37 @@ Rectangle {
 
     function closePopups() {
         if (volumePopup.opened) volumePopup.close()
-        if (danmakuPopup.opened) danmakuPopup.close()
         if (emoticonPopup.opened) emoticonPopup.close()
+        // 设置抽屉挂在窗口 overlay 上，不受本页裁剪：小窗/退出/关页前必须
+        // 主动关闭，否则会留在屏幕上盖住新页面（加存在性判断：页面初始化
+        // 期间子项可能还没创建）
+        if (settingsSheet && settingsSheet.opened) settingsSheet.close()
         // 天选对话框同为模态：小窗/退出前必须关掉，否则 modal 遮层会盖在
         // 480x270 的小窗视频上，且高度会被 overlay 裁剪
         if (anchorLotteryDialog.opened) anchorLotteryDialog.close()
         root._anchorLotteryId = ""
     }
 
+    // 设置抽屉：右侧滑入，宽度与视频播放页的设置抽屉一致（360），
+    // 高度与纵向位置贴住直播播放页本身（不是整窗），否则会盖住上面的标签栏
+    function openSettingsSheet() {
+        closePopups()
+        // FluSheet 的 Right 分支会把 width 绑成 size、height 绑成整窗高；
+        // 打开后再改成"贴住本页"的范围（enter 动画只动 x，不会覆盖这些值）
+        settingsSheet.open(FluSheetType.Right)
+        settingsSheet.width = Math.min(360, root.width)
+        settingsSheet.height = root.height
+        settingsSheet.y = root.mapToItem(null, 0, 0).y
+    }
+
     // 自动隐藏豁免：鼠标悬停在控制栏区域内，或任一弹出面板/菜单
-    //（音量、弹幕设置、画质菜单、表情面板，含面板内的下拉框）打开，
+    //（音量、设置抽屉、画质菜单、表情面板，含面板内的下拉框）打开，
     // 或弹幕输入框持有焦点（输入中）时，控制栏与鼠标指针均不进入自动隐藏
     function controlOverlayActive() {
         return controlBarHover.hovered
             || topBarHover.hovered
-            || volumePopup.opened || danmakuPopup.opened
+            || volumePopup.opened
+            || (settingsSheet && settingsSheet.opened)
             || qualityMenu.opened
             || danmakuInput.activeFocus
             || emoticonPopup.opened
@@ -913,28 +929,33 @@ Rectangle {
         }
     }
 
+    // 读取 mpv 实际流参数（分辨率/编码/码率等），供「视频信息」浮层显示。
+    // 返回值 = 是否读到（流可能还没加载出来）
+    function refreshVideoInfo() {
+        if (!mpvPlayer.hasVideo) return false
+        var info = mpvPlayer.getVideoInfo()
+        root.actualWidth = info["width"] || 0
+        root.actualHeight = info["height"] || 0
+        root.actualVideoCodec = info["videoCodec"] || ""
+        root.actualVideoFormat = info["videoFormat"] || ""
+        root.actualContainerFormat = info["containerFormat"] || ""
+        root.actualFps = info["fps"] || 0
+        root.actualVideoBitrate = info["videoBitrate"] || 0
+        root.actualAudioBitrate = info["audioBitrate"] || 0
+        root.actualAudioCodec = info["audioCodec"] || ""
+        root.actualPath = info["path"] || ""
+        return true
+    }
+
     // 延迟获取 mpv 实际视频参数（流加载需要时间）
     Timer {
         id: videoInfoTimer
         interval: 3000
         repeat: false
         onTriggered: {
-            if (!mpvPlayer.hasVideo) {
-                // 还没加载出来，再等一下
+            // 还没加载出来就再等一下
+            if (!root.refreshVideoInfo())
                 videoInfoTimer.start()
-                return
-            }
-            var info = mpvPlayer.getVideoInfo()
-            root.actualWidth = info["width"] || 0
-            root.actualHeight = info["height"] || 0
-            root.actualVideoCodec = info["videoCodec"] || ""
-            root.actualVideoFormat = info["videoFormat"] || ""
-            root.actualContainerFormat = info["containerFormat"] || ""
-            root.actualFps = info["fps"] || 0
-            root.actualVideoBitrate = info["videoBitrate"] || 0
-            root.actualAudioBitrate = info["audioBitrate"] || 0
-            root.actualAudioCodec = info["audioCodec"] || ""
-            root.actualPath = info["path"] || ""
         }
     }
 
@@ -1521,8 +1542,8 @@ Rectangle {
             if (mouse.button === Qt.RightButton) {
                 root.closeRequested()
             } else {
-                // 有弹窗打开时，先关闭弹窗
-                if (volumePopup.opened || danmakuPopup.opened) {
+                // 有弹窗/抽屉打开时，先关闭它们
+                if (volumePopup.opened || (settingsSheet && settingsSheet.opened)) {
                     closePopups()
                 } else {
                     root.toggleControls()
@@ -2233,21 +2254,6 @@ Rectangle {
                     }
                 }
 
-                FluIconButton {
-                    id: danmakuBtn
-                    iconSource: FluentIcons.Subtitles
-                    iconSize: Theme.iconSizeMedium
-                    iconColor: "white"
-                    hoverColor: "#26FFFFFF"
-                    pressedColor: "#40FFFFFF"
-                    Layout.alignment: Qt.AlignVCenter
-                    onClicked: {
-                        var wasOpen = danmakuPopup.opened
-                        closePopups()
-                        if (!wasOpen) danmakuPopup.open()
-                    }
-                }
-
                 // 画质选项
                 FluMenuBar {
                     Layout.alignment: Qt.AlignVCenter
@@ -2295,32 +2301,17 @@ Rectangle {
                     }
                 }
 
-                // 视频信息按钮（用于验证实际播放画质）
+                // 设置：弹幕设置 / 视频信息合并入口，位于小窗键左侧。
+                // 弹出的抽屉与视频播放页同款（右侧滑入、同宽、同圆角与阴影）
                 FluIconButton {
-                    iconSource: FluentIcons.Info
+                    id: settingsBtn
+                    iconSource: FluentIcons.Settings
                     iconSize: Theme.iconSizeMedium
                     iconColor: "white"
                     hoverColor: "#26FFFFFF"
                     pressedColor: "#40FFFFFF"
                     Layout.alignment: Qt.AlignVCenter
-                    onClicked: {
-                        closePopups()
-                        // 立即刷新一次实际参数
-                        if (mpvPlayer.hasVideo) {
-                            var info = mpvPlayer.getVideoInfo()
-                            root.actualWidth = info["width"] || 0
-                            root.actualHeight = info["height"] || 0
-                            root.actualVideoCodec = info["videoCodec"] || ""
-                            root.actualVideoFormat = info["videoFormat"] || ""
-                            root.actualContainerFormat = info["containerFormat"] || ""
-                            root.actualFps = info["fps"] || 0
-                            root.actualVideoBitrate = info["videoBitrate"] || 0
-                            root.actualAudioBitrate = info["audioBitrate"] || 0
-                            root.actualAudioCodec = info["audioCodec"] || ""
-                            root.actualPath = info["path"] || ""
-                        }
-                        root.showVideoInfo = !root.showVideoInfo
-                    }
+                    onClicked: root.openSettingsSheet()
                 }
 
                 // 小窗播放：进入/退出独立置顶小窗
@@ -2470,18 +2461,25 @@ Rectangle {
     Popup {
         id: emoticonPopup
         parent: emoticonBtn
-        width: 360
-        height: 340
+        // 尺寸比原来的 360×340 放大一圈：格子按列宽自适应、预览图跟着格子走
+        // （原来是格子 48 / 图 36，大表情看着像缩略图，太费眼）
+        width: 460
+        height: 420
         x: (parent.width - width) / 2
         y: -height - 10
         modal: false
         closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutsideParent
-        padding: 10
+        padding: 12
         background: Rectangle {
             radius: 6
-            color: "#2B2B2B"
+            // 跟主题走（暗色 43,43,43 / 亮色纯白 + 主题分割线色边框），
+            // 原来固定 #2B2B2B，亮色主题下完全不搭
+            color: FluTheme.dark ? Qt.rgba(43/255, 43/255, 43/255, 1)
+                                 : Qt.rgba(1, 1, 1, 1)
             border.width: 1
-            border.color: "#3A3A3A"
+            border.color: FluTheme.dark ? Qt.rgba(58/255, 58/255, 58/255, 1)
+                                        : Qt.rgba(226/255, 229/255, 234/255, 1)
+            FluShadow { radius: 6 }
         }
 
         contentItem: Column {
@@ -2566,8 +2564,8 @@ Rectangle {
                             font: FluTextStyle.Body
                             color: {
                                 if (emoTabItem.activeTab) return FluTheme.primaryColor
-                                if (emoTabMouse.containsMouse) return FluTheme.dark ? "#BFBFBF" : "#8A8A8A"
-                                return "#9E9E9E"
+                                if (emoTabMouse.containsMouse) return FluTheme.fontPrimaryColor
+                                return FluTheme.fontSecondaryColor
                             }
                         }
 
@@ -2593,7 +2591,7 @@ Rectangle {
                     anchors.centerIn: parent
                     text: root._emoticonsLoaded ? "本房间暂无可用表情" : "加载中..."
                     font: FluTextStyle.Caption
-                    color: "#999999"
+                    color: FluTheme.fontSecondaryColor
                 }
 
                 GridView {
@@ -2601,8 +2599,11 @@ Rectangle {
                     anchors.fill: parent
                     visible: root._emoticonList.length > 0
                     clip: true
-                    cellWidth: 48
-                    cellHeight: 48
+                    // 每行 6 格、格宽按面板宽度自适应：换分辨率/改缩放都不会
+                    // 出现"右边空一条"或"最后被裁掉半格"
+                    readonly property int columns: 6
+                    cellWidth: Math.floor(width / columns)
+                    cellHeight: cellWidth
                     model: root.filteredEmoticons()
                     boundsBehavior: Flickable.StopAtBounds
 
@@ -2618,14 +2619,22 @@ Rectangle {
                             anchors.fill: parent
                             anchors.margins: 2
                             radius: 4
-                            color: emoMouse.containsMouse ? "#40FFFFFF" : "transparent"
+                            color: emoMouse.containsMouse
+                                   ? (FluTheme.dark ? "#40FFFFFF" : "#0F000000")
+                                   : "transparent"
                         }
 
                         Image {
                             id: emoImage
                             anchors.centerIn: parent
-                            width: 36
-                            height: 36
+                            // 通用/UP主/房间专属这类是整张贴图，铺满格子（只留 4px 边），
+                            // 不再压在 48px——之前缩到 48 就只剩个轮廓；
+                            // 黄豆类（pkg_name 固定 "emoji"）是文字小表情，放太大会糊，
+                            // 维持略大于原尺寸即可。分类是分 Tab 显示的，不会大小参差
+                            width: modelData.pkgName === "emoji"
+                                   ? Math.min(parent.width - 20, 40)
+                                   : Math.min(parent.width - 8, 68)
+                            height: width
                             source: modelData.url
                             fillMode: Image.PreserveAspectFit
                             asynchronous: true
@@ -2638,8 +2647,8 @@ Rectangle {
                             anchors.centerIn: parent
                             visible: emoImage.status !== Image.Ready
                             text: modelData.text
-                            font.pixelSize: 10
-                            color: "#CCCCCC"
+                            font.pixelSize: 12
+                            color: FluTheme.fontSecondaryColor
                         }
 
                         MouseArea {
@@ -2687,7 +2696,11 @@ Rectangle {
         padding: 0
         background: Rectangle {
             radius: 5
-            color: "#2B2B2B"
+            // 跟主题走：暗色 43,43,43 / 亮色纯白，配方与 FluPopup 自带背景一致。
+            // 原先是固定 #2B2B2B，亮色主题下就是一块黑板
+            color: FluTheme.dark ? Qt.rgba(43/255, 43/255, 43/255, 1)
+                                 : Qt.rgba(1, 1, 1, 1)
+            FluShadow { radius: 5 }
         }
 
         Column {
@@ -2701,275 +2714,305 @@ Rectangle {
                 anchors.horizontalCenter: parent.horizontalCenter
                 text: Math.round(root.volume * 100) + "%"
                 font: FluTextStyle.Caption
-                color: "#FFFFFF"
+                color: FluTheme.fontPrimaryColor
             }
 
-            Item {
+            // 音量条：与视频播放页同款，直接用 FluentUI 的垂直 Slider。
+            // 高度按剩余空间算——Column 不拉伸子项，而垂直 FluSlider 的
+            // implicitHeight 固定 180，塞进 160 高的弹层会顶掉上面的百分比
+            FluSlider {
                 id: volumeSlider
                 anchors.horizontalCenter: parent.horizontalCenter
                 width: 32
-                height: 120
-
-                property real trackHeight: 104
-                property real trackTop: (height - trackHeight) / 2
-
-                Rectangle {
-                    anchors.horizontalCenter: parent.horizontalCenter
-                    y: volumeSlider.trackTop
-                    width: 4
-                    height: volumeSlider.trackHeight
-                    radius: 2
-                    color: "#808080"
-                }
-
-                Rectangle {
-                    anchors.horizontalCenter: parent.horizontalCenter
-                    y: volumeSlider.trackTop + volumeSlider.trackHeight * (1 - root.volume)
-                    width: 4
-                    height: volumeSlider.trackHeight * root.volume
-                    radius: 2
-                    color: FluTheme.primaryColor
-                }
-
-                Item {
-                    anchors.horizontalCenter: parent.horizontalCenter
-                    width: 16
-                    height: 16
-                    y: volumeSlider.trackTop + volumeSlider.trackHeight * (1 - root.volume) - height / 2
-
-                    Rectangle {
-                        anchors.fill: parent
-                        radius: 8
-                        color: "#FFFFFF"
-                    }
-
-                    Rectangle {
-                        anchors.centerIn: parent
-                        width: 8
-                        height: 8
-                        radius: 4
-                        color: FluTheme.primaryColor
-                    }
-                }
-
-                MouseArea {
-                    anchors.fill: parent
-                    function updateVolume(mouse) {
-                        var ratio = 1 - (mouse.y - volumeSlider.trackTop) / volumeSlider.trackHeight
-                        root.volume = Math.max(0, Math.min(1, ratio))
-                    }
-                    onPressed: updateVolume(mouse)
-                    onPositionChanged: updateVolume(mouse)
-                }
+                height: Math.max(80, parent.height - parent.topPadding
+                                    - parent.bottomPadding
+                                    - volumePercent.height - parent.spacing)
+                orientation: Qt.Vertical
+                from: 0
+                to: 1
+                stepSize: 0.01
+                value: root.volume
+                tooltipEnabled: false
+                onMoved: root.volume = value
             }
         }
     }
 
-    // 弹幕设置弹出面板
-    Popup {
-        id: danmakuPopup
-        parent: danmakuBtn
-        width: 280
-        height: contentItem.implicitHeight + topPadding + bottomPadding
-        x: parent.width - width
-        y: -height - 10
-        modal: false
-        closePolicy: Popup.CloseOnEscape
-        padding: 16
+    // ===== 播放设置面板（右侧抽屉）=====
+    // 与视频播放页同款：右侧滑入、同宽（由 openSettingsSheet() 设成 360）、
+    // 同样的左侧圆角与阴影。弹幕设置与视频信息合并到这里，控制栏只留一个设置键
+    FluSheet {
+        id: settingsSheet
+        title: "设置"
+        // Right 模式下 size 表示宽度，openSettingsSheet() 打开时会再校正一次
+        size: 360
+
+        // 背景与视频播放页的设置/简介抽屉一致：只圆左侧两角（右边缘贴着
+        // 窗口边，右上/右下若也圆会露出下面的遮罩），阴影半径跟着圆角走
         background: Rectangle {
-            radius: 5
-            color: "#2B2B2B"
+            radius: Theme.radiusMedium
+            topLeftRadius: Theme.radiusMedium
+            bottomLeftRadius: Theme.radiusMedium
+            topRightRadius: 0
+            bottomRightRadius: 0
+            border.width: 1
+            border.color: FluTheme.dark
+                          ? (Window.active ? Qt.rgba(55/255, 55/255, 55/255, 1)
+                                           : Qt.rgba(45/255, 45/255, 45/255, 1))
+                          : Qt.rgba(226/255, 229/255, 234/255, 1)
+            color: FluTheme.dark
+                   ? (Window.active ? Qt.rgba(38/255, 44/255, 54/255, 1)
+                                    : Qt.rgba(39/255, 39/255, 39/255, 1))
+                   : Qt.rgba(251/255, 251/255, 253/255, 1)
+            FluShadow { radius: Theme.radiusMedium }
         }
 
-        contentItem: ColumnLayout {
-            width: parent.width - parent.leftPadding - parent.rightPadding
-            spacing: 16
-
-            FluText {
-                text: "弹幕设置"
-                font: FluTextStyle.Subtitle
-                color: "#FFFFFF"
-            }
-
-            RowLayout {
-                Layout.fillWidth: true
-                spacing: 8
-
-                FluText {
-                    text: "显示弹幕"
-                    font: FluTextStyle.Body
-                    color: "#FFFFFF"
-                }
-
-                Item { Layout.fillWidth: true }
-
-                FluToggleSwitch {
-                    checked: root.danmakuEnabled
-                    clickListener: function() { root.danmakuEnabled = !root.danmakuEnabled }
-                    normalColor: "#323232"
-                    hoverColor: "#3E3E3E"
-                    borderNormalColor: "#A1A1A1"
-                    dotNormalColor: "#D0D0D0"
-                    dotCheckColor: "#000000"
-                }
-            }
-
-            // 弹幕帧率限制（高刷屏节流档位；60Hz 屏不节流，禁用）。
-            // 与视频播放页共用同一 FramePacer 档位与持久化键
-            RowLayout {
-                Layout.fillWidth: true
-                spacing: 8
-
-                FluText {
-                    text: "弹幕帧率限制"
-                    font: FluTextStyle.Body
-                    color: "#FFFFFF"
-                    opacity: liveDanmakuFpsCombo.enabled ? 1.0 : 0.4
-                }
-
-                Item { Layout.fillWidth: true }
-
-                FluComboBox {
-                    id: liveDanmakuFpsCombo
-                    // DWM 权威刷新率（Screen.refreshRate 高刷屏常误报 60）
-                    readonly property real refreshRate: FramePacer.refreshRate
-                    readonly property var optionValues: {
-                        // 等于刷新率的档位与"不限制"功能等价（vsync 钳制渲染
-                        // 上限即刷新率），严格过滤掉，避免出现冗余选项
-                        var vals = [60, 100, 120, 144].filter(
-                            function(r) { return r < refreshRate - 1 })
-                        vals.push(0)
-                        return vals
-                    }
-                    enabled: refreshRate > 63
-                    model: optionValues.map(
-                        function(v) { return v === 0 ? "不限制" : v + " fps" })
-                    function syncIndex() {
-                        // live 命名空间（与页面内其他弹幕设置一致）；曾误用
-                        // video/danmaku/fpsLimit 导致与视频页互相覆盖
-                        var saved = Settings.getInt("live/danmaku/fpsLimit", 60)
-                        var idx = optionValues.indexOf(saved)
-                        if (idx < 0)
-                            idx = optionValues.indexOf(60)
-                        currentIndex = idx >= 0 ? idx : 0
-                    }
-                    Component.onCompleted: syncIndex()
-                    onOptionValuesChanged: syncIndex()
-                    onActivated: function(index) {
-                        FramePacer.setTargetRate(optionValues[index])
-                        Settings.setInt("live/danmaku/fpsLimit", optionValues[index])
-                    }
-                }
-            }
-
-            // 弹幕描边样式（对齐 B 站三档，与视频页同款）
-            RowLayout {
-                Layout.fillWidth: true
-                spacing: 8
-
-                FluText {
-                    text: "描边样式"
-                    font: FluTextStyle.Body
-                    color: "#FFFFFF"
-                }
-
-                Item { Layout.fillWidth: true }
-
-                FluComboBox {
-                    model: ["描边", "重墨", "45°投影"]
-                    currentIndex: root.danmakuOutlineStyle
-                    onActivated: function(index) {
-                        root.danmakuOutlineStyle = index
-                        savePlayerSettings()
-                    }
-                }
-            }
+        Flickable {
+            id: settingsFlick
+            anchors.fill: parent
+            anchors.leftMargin: 16
+            anchors.rightMargin: 8
+            anchors.topMargin: 6
+            anchors.bottomMargin: 16
+            clip: true
+            boundsBehavior: Flickable.StopAtBounds
+            contentWidth: width
+            contentHeight: settingsCol.implicitHeight
+            ScrollBar.vertical: FluScrollBar { policy: ScrollBar.AsNeeded }
 
             ColumnLayout {
-                Layout.fillWidth: true
-                spacing: 6
+                id: settingsCol
+                width: settingsFlick.width - 12
+                spacing: 12
 
+                // ---------- 弹幕 ----------
                 FluText {
-                    text: "弹幕大小"
-                    font: FluTextStyle.Body
-                    color: "#FFFFFF"
+                    text: "弹幕"
+                    font: FluTextStyle.Subtitle
+                    color: FluTheme.fontPrimaryColor
                 }
 
-                FluSlider {
+                Rectangle {
                     Layout.fillWidth: true
-                    from: 0.5
-                    to: 2.0
-                    stepSize: 0.1
-                    value: root.danmakuSize
-                    text: value.toFixed(1) + "x"
-                    onValueChanged: root.danmakuSize = value
-                }
-            }
-
-            ColumnLayout {
-                Layout.fillWidth: true
-                spacing: 6
-
-                FluText {
-                    text: "不透明度"
-                    font: FluTextStyle.Body
-                    color: "#FFFFFF"
+                    Layout.preferredHeight: 1
+                    color: FluTheme.dividerColor
                 }
 
-                FluSlider {
+                // 弹幕总开关
+                RowLayout {
                     Layout.fillWidth: true
-                    from: 0.1
-                    to: 1.0
-                    stepSize: 0.05
-                    value: root.danmakuOpacity
-                    text: Math.round(value * 100) + "%"
-                    onValueChanged: root.danmakuOpacity = value
-                }
-            }
+                    spacing: 12
 
-            ColumnLayout {
-                Layout.fillWidth: true
-                spacing: 6
+                    FluText {
+                        text: "显示弹幕"
+                        font: FluTextStyle.Body
+                        color: FluTheme.fontPrimaryColor
+                        Layout.fillWidth: true
+                        wrapMode: Text.Wrap
+                    }
 
-                FluText {
-                    text: "显示范围"
-                    font: FluTextStyle.Body
-                    color: "#FFFFFF"
+                    FluToggleSwitch {
+                        checked: root.danmakuEnabled
+                        clickListener: function() { root.danmakuEnabled = !root.danmakuEnabled }
+                    }
                 }
 
-                FluRadioButtons {
-                    id: danmakuRangeGroup
-                    orientation: Qt.Horizontal
-                    currentIndex: root.danmakuRangeIndex
-                    onCurrentIndexChanged: root.danmakuRangeIndex = currentIndex
+                // 弹幕帧率限制（高刷屏节流档位；60Hz 屏不节流，禁用）。
+                // 与视频播放页共用同一 FramePacer 档位，但持久化键独立
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 12
 
-                    FluRadioButton { text: "1/4屏"; textColor: "#FFFFFF" }
-                    FluRadioButton { text: "半屏"; textColor: "#FFFFFF" }
-                    FluRadioButton { text: "3/4屏"; textColor: "#FFFFFF" }
-                    FluRadioButton { text: "全屏"; textColor: "#FFFFFF" }
+                    FluText {
+                        text: "弹幕帧率限制"
+                        font: FluTextStyle.Body
+                        color: FluTheme.fontPrimaryColor
+                        Layout.fillWidth: true
+                        wrapMode: Text.Wrap
+                        opacity: liveDanmakuFpsCombo.enabled ? 1.0 : 0.4
+                    }
+
+                    FluComboBox {
+                        id: liveDanmakuFpsCombo
+                        Layout.preferredWidth: 132
+                        // DWM 权威刷新率（Screen.refreshRate 高刷屏常误报 60）
+                        readonly property real refreshRate: FramePacer.refreshRate
+                        readonly property var optionValues: {
+                            // 等于刷新率的档位与"不限制"功能等价（vsync 钳制渲染
+                            // 上限即刷新率），严格过滤掉，避免出现冗余选项
+                            var vals = [60, 100, 120, 144].filter(
+                                function(r) { return r < refreshRate - 1 })
+                            vals.push(0)
+                            return vals
+                        }
+                        enabled: refreshRate > 63
+                        model: optionValues.map(
+                            function(v) { return v === 0 ? "不限制" : v + " fps" })
+                        function syncIndex() {
+                            // live 命名空间（与页面内其他弹幕设置一致）；曾误用
+                            // video/danmaku/fpsLimit 导致与视频页互相覆盖
+                            var saved = Settings.getInt("live/danmaku/fpsLimit", 60)
+                            var idx = optionValues.indexOf(saved)
+                            if (idx < 0)
+                                idx = optionValues.indexOf(60)
+                            currentIndex = idx >= 0 ? idx : 0
+                        }
+                        Component.onCompleted: syncIndex()
+                        onOptionValuesChanged: syncIndex()
+                        onActivated: function(index) {
+                            FramePacer.setTargetRate(optionValues[index])
+                            Settings.setInt("live/danmaku/fpsLimit", optionValues[index])
+                        }
+                    }
                 }
-            }
 
-            // 弹幕速度
-            ColumnLayout {
-                Layout.fillWidth: true
-                spacing: 6
+                // 弹幕描边样式（对齐 B 站三档，与视频页同款）
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 12
 
-                FluText {
-                    text: "弹幕速度"
-                    font: FluTextStyle.Body
-                    color: "#FFFFFF"
+                    FluText {
+                        text: "描边样式"
+                        font: FluTextStyle.Body
+                        color: FluTheme.fontPrimaryColor
+                        Layout.fillWidth: true
+                        wrapMode: Text.Wrap
+                    }
+
+                    FluComboBox {
+                        Layout.preferredWidth: 132
+                        model: ["描边", "重墨", "45°投影"]
+                        currentIndex: root.danmakuOutlineStyle
+                        onActivated: function(index) {
+                            root.danmakuOutlineStyle = index
+                            savePlayerSettings()
+                        }
+                    }
                 }
 
-                FluRadioButtons {
-                    id: danmakuSpeedGroup
-                    orientation: Qt.Horizontal
-                    currentIndex: root.danmakuSpeedIndex
-                    onCurrentIndexChanged: root.danmakuSpeedIndex = currentIndex
+                // 弹幕大小
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    spacing: 4
 
-                    FluRadioButton { text: "慢"; textColor: "#FFFFFF" }
-                    FluRadioButton { text: "中"; textColor: "#FFFFFF" }
-                    FluRadioButton { text: "快"; textColor: "#FFFFFF" }
+                    FluText {
+                        text: "弹幕大小"
+                        font: FluTextStyle.Body
+                        color: FluTheme.fontPrimaryColor
+                    }
+
+                    FluSlider {
+                        Layout.fillWidth: true
+                        from: 0.5
+                        to: 2.0
+                        stepSize: 0.1
+                        value: root.danmakuSize
+                        text: value.toFixed(1) + "x"
+                        onValueChanged: root.danmakuSize = value
+                    }
+                }
+
+                // 不透明度
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    spacing: 4
+
+                    FluText {
+                        text: "不透明度"
+                        font: FluTextStyle.Body
+                        color: FluTheme.fontPrimaryColor
+                    }
+
+                    FluSlider {
+                        Layout.fillWidth: true
+                        from: 0.1
+                        to: 1.0
+                        stepSize: 0.05
+                        value: root.danmakuOpacity
+                        text: Math.round(value * 100) + "%"
+                        onValueChanged: root.danmakuOpacity = value
+                    }
+                }
+
+                // 显示范围
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    spacing: 4
+
+                    FluText {
+                        text: "显示范围"
+                        font: FluTextStyle.Body
+                        color: FluTheme.fontPrimaryColor
+                    }
+
+                    FluRadioButtons {
+                        orientation: Qt.Horizontal
+                        currentIndex: root.danmakuRangeIndex
+                        onCurrentIndexChanged: root.danmakuRangeIndex = currentIndex
+
+                        FluRadioButton { text: "1/4屏" }
+                        FluRadioButton { text: "半屏" }
+                        FluRadioButton { text: "3/4屏" }
+                        FluRadioButton { text: "全屏" }
+                    }
+                }
+
+                // 弹幕速度
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    spacing: 4
+
+                    FluText {
+                        text: "弹幕速度"
+                        font: FluTextStyle.Body
+                        color: FluTheme.fontPrimaryColor
+                    }
+
+                    FluRadioButtons {
+                        orientation: Qt.Horizontal
+                        currentIndex: root.danmakuSpeedIndex
+                        onCurrentIndexChanged: root.danmakuSpeedIndex = currentIndex
+
+                        FluRadioButton { text: "慢" }
+                        FluRadioButton { text: "中" }
+                        FluRadioButton { text: "快" }
+                    }
+                }
+
+                Rectangle {
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 1
+                    color: FluTheme.dividerColor
+                }
+
+                // ---------- 视频信息 ----------
+                // 打开后播放器右下角叠加实时流参数（分辨率/编码/码率），
+                // 打开时先同步刷新一次，避免出现"先空一下再出数"
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 12
+
+                    FluText {
+                        text: "视频信息"
+                        font: FluTextStyle.Body
+                        color: FluTheme.fontPrimaryColor
+                        Layout.fillWidth: true
+                        wrapMode: Text.Wrap
+                    }
+
+                    FluToggleSwitch {
+                        checked: root.showVideoInfo
+                        clickListener: function() {
+                            root.refreshVideoInfo()
+                            root.showVideoInfo = !root.showVideoInfo
+                        }
+                    }
+                }
+
+                // 底部留白：最后一项贴着窗口下沿会显得很挤
+                Item {
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 8
                 }
             }
         }

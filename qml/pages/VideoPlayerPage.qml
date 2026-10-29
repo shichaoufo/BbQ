@@ -4837,7 +4837,12 @@ Rectangle {
                         padding: 0
                         background: Rectangle {
                             radius: 5
-                            color: "#2B2B2B"
+                            // 跟主题走：暗色 43,43,43 / 亮色纯白，配方与 FluPopup
+                            // 自带背景一致，阴影半径跟圆角。原先是固定 #2B2B2B，
+                            // 亮色主题下就成了一块突兀的黑板
+                            color: FluTheme.dark ? Qt.rgba(43/255, 43/255, 43/255, 1)
+                                                 : Qt.rgba(1, 1, 1, 1)
+                            FluShadow { radius: 5 }
                         }
 
                         Column {
@@ -4851,69 +4856,32 @@ Rectangle {
                                 anchors.horizontalCenter: parent.horizontalCenter
                                 text: Math.round(pageRoot.volume * 100) + "%"
                                 font: FluTextStyle.Caption
-                                color: "#FFFFFF"
+                                color: FluTheme.fontPrimaryColor
                             }
 
-                            Item {
+                            // 音量条：直接用 FluentUI 的 Slider（orientation: Qt.Vertical），
+                            // 与进度条、设置抽屉里的滑块同一套样式。
+                            // 之前手写一根，是因为垂直模式的 FluSlider implicitHeight 固定
+                            // 为 180，塞进 160 高的弹层里会把上面的百分比文字顶出去、整体
+                            // 错位；这里按"剩余空间"给高度就正常了。
+                            // tooltipEnabled 关掉：百分比已经常驻显示在上方，不需要再弹一个
+                            FluSlider {
                                 id: volumeSlider
                                 anchors.horizontalCenter: parent.horizontalCenter
                                 width: 32
-                                height: 120
-
-                                property real trackHeight: 104
-                                property real trackTop: (height - trackHeight) / 2
-
-                                // 轨道
-                                Rectangle {
-                                    anchors.horizontalCenter: parent.horizontalCenter
-                                    y: volumeSlider.trackTop
-                                    width: 4
-                                    height: volumeSlider.trackHeight
-                                    radius: 2
-                                    color: "#808080"
-                                }
-
-                                // 填充
-                                Rectangle {
-                                    anchors.horizontalCenter: parent.horizontalCenter
-                                    y: volumeSlider.trackTop + volumeSlider.trackHeight * (1 - pageRoot.volume)
-                                    width: 4
-                                    height: volumeSlider.trackHeight * pageRoot.volume
-                                    radius: 2
-                                    color: FluTheme.primaryColor
-                                }
-
-                                // 手柄
-                                Item {
-                                    anchors.horizontalCenter: parent.horizontalCenter
-                                    width: 16
-                                    height: 16
-                                    y: volumeSlider.trackTop + volumeSlider.trackHeight * (1 - pageRoot.volume) - height / 2
-
-                                    Rectangle {
-                                        anchors.fill: parent
-                                        radius: 8
-                                        color: "#FFFFFF"
-                                    }
-
-                                    Rectangle {
-                                        anchors.centerIn: parent
-                                        width: 8
-                                        height: 8
-                                        radius: 4
-                                        color: FluTheme.primaryColor
-                                    }
-                                }
-
-                                MouseArea {
-                                    anchors.fill: parent
-                                    function updateVolume(mouse) {
-                                        var ratio = 1 - (mouse.y - volumeSlider.trackTop) / volumeSlider.trackHeight
-                                        pageRoot.volume = Math.max(0, Math.min(1, ratio))
-                                    }
-                                    onPressed: updateVolume(mouse)
-                                    onPositionChanged: updateVolume(mouse)
-                                }
+                                // 高度按剩余空间算：Column 不会拉伸子项，而垂直模式的
+                                // FluSlider implicitHeight 固定 180，写死或不管都会把
+                                // 上面的百分比文字顶出弹层（就是之前"排版错乱"的原因）
+                                height: Math.max(80, parent.height - parent.topPadding
+                                                    - parent.bottomPadding
+                                                    - volumePercent.height - parent.spacing)
+                                orientation: Qt.Vertical
+                                from: 0
+                                to: 1
+                                stepSize: 0.01
+                                value: pageRoot.volume
+                                tooltipEnabled: false
+                                onMoved: pageRoot.volume = value
                             }
                         }
                     }
