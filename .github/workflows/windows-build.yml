@@ -1,4 +1,8 @@
-# Windows 每次推送自动编译 BbQ（MinGW，与本地 Qt 6.11.1 环境一致）
+# Windows 手动触发编译 BbQ（MinGW，与本地 Qt 6.11.1 环境一致）
+#
+# 不再随 push 自动编译：往 master 推一次就整套编一遍，会白白消耗 Actions
+# 配额与存储（Windows runner 分钟数还是按 2 倍计），需要 Windows 包时在
+# Actions 页面手动 Run workflow。
 #
 # 产物：BbQ-Windows-x64.zip 绿色版（exe + Qt dll + mpv.dll + FluentUI 插件），
 # 解压即用，免本地配置——用于快速分发给别人测试。
@@ -15,10 +19,9 @@
 name: Windows Build
 
 on:
-  push:
-    branches: [ main, master ]
-  pull_request:
-    branches: [ main, master ]
+  # 仅手动触发：Actions 页 → Windows Build → Run workflow。
+  # 原先是 push / pull_request 到 main、master 自动跑，推一次代码就编一遍，
+  # 与 macOS / Linux 两个 workflow 保持一致改为手动
   workflow_dispatch: {}
 
 jobs:
