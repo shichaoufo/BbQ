@@ -1161,6 +1161,8 @@ QVariantMap PlayUrlManager::videoDetailToMap(const VideoDetail &detail) const
     map["pubdate"] = QString::number(detail.pubdate);
     map["pic"] = detail.pic;
     map["description"] = detail.description;
+    map["argueMsg"] = detail.argueMsg;
+    map["noReprint"] = detail.noReprint;
     // QVariant 不接受 QList<QVariantMap>，转成 QVariantList 再交给 QML
     QVariantList staffList;
     staffList.reserve(detail.staff.size());
@@ -1418,6 +1420,10 @@ void PlayUrlManager::getVideoUrlByAid(const QString &aid, const QString &overrid
         detail.bvid = dataObj["bvid"].toString();
         detail.pic = dataObj["pic"].toString();
         detail.description = dataObj["desc"].toString();
+        // 作者声明（"含AI生成内容"等）：空串表示这条视频没有声明
+        detail.argueMsg = dataObj["argue_info"].toObject()["argue_msg"].toString();
+        // 版权标志：1 = 显示"未经作者授权 禁止转载"
+        detail.noReprint = dataObj["rights"].toObject()["no_reprint"].toInt() == 1;
         detail.pubdate = dataObj["pubdate"].toVariant().toLongLong();
 
         QJsonObject owner = dataObj["owner"].toObject();
@@ -1581,6 +1587,10 @@ void PlayUrlManager::getVideoUrlByBvid(const QString &bvid, const QString &overr
         detail.title = title;
         detail.pic = dataObj["pic"].toString();
         detail.description = dataObj["desc"].toString();
+        // 作者声明（"含AI生成内容"等）：空串表示这条视频没有声明
+        detail.argueMsg = dataObj["argue_info"].toObject()["argue_msg"].toString();
+        // 版权标志：1 = 显示"未经作者授权 禁止转载"
+        detail.noReprint = dataObj["rights"].toObject()["no_reprint"].toInt() == 1;
         detail.pubdate = dataObj["pubdate"].toVariant().toLongLong();
 
         QJsonObject owner = dataObj["owner"].toObject();
@@ -4236,6 +4246,11 @@ void PlayUrlManager::fetchUpVipInfo(qlonglong mid)
         qDebug() << "[PlayUrlManager] fetchUpVipInfo verifyType:" << verifyType << "faceNft:" << faceNft;
         emit upVipReady(effectiveType, faceNft, verifyType);
         emit upPendantReady(pendantImage);
+
+        // 投稿数在 data 层（不是 card 里）：{"data": {"card": {...}, "archive_count": 399}}
+        const qlonglong archiveCount = dataObj["archive_count"].toVariant().toLongLong();
+        qDebug() << "[PlayUrlManager] fetchUpVipInfo archive_count:" << archiveCount;
+        emit upArchiveCountReady(archiveCount);
 
         reply->deleteLater();
     });

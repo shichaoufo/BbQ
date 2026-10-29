@@ -27,6 +27,9 @@ Rectangle {
     property string upPendantImage: ""
     property int upVerify: -1
     property string upFans: ""
+    // UP 主投稿数（card 接口的 data.archive_count），与粉丝数拼成
+    // "18.5万粉丝 · 1.2万视频"
+    property int upArchiveCount: 0
     property int upVipType: 0
     property bool upHasCollect: false   // UP 主是否数字藏品(NFT)头像用户（钻石角标）
 
@@ -50,6 +53,11 @@ Rectangle {
     property string shareCount: "0"
     property string cover: ""
     property string description: ""
+    // 作者声明（"含AI生成内容"等），来自 view 接口的 argue_info.argue_msg。
+    // 空串 = 没有声明；UP 主主动勾选，不是平台自动判定。
+    property string argueMsg: ""
+    // 是否显示"未经作者授权 禁止转载"（view 接口 rights.no_reprint）
+    property bool noReprint: false
     property bool isLiked: false
     property bool isDisliked: false
     property bool isCoined: false
@@ -757,6 +765,9 @@ Rectangle {
     // 上层页面压上来 / 撤走（可嵌套计数）
     function pushCover() {
         pageRoot._coverDepth += 1
+        // 被别的牌压住：简介面板是窗口级 overlay，不受本页裁剪，必须一并收起，
+        // 否则会浮在新牌上面
+        if (descSheet.opened) descSheet.close()
         pageRoot.suspendPlayback()
     }
 
@@ -1187,6 +1198,39 @@ Rectangle {
     property int lastDanmakuTime: 0
     property int _lastTickTime: -1
 
+    // 简介面板几何：从右侧滑入，宽度正好盖住右侧栏（评论 / 推荐 / 投稿）
+    //   · 宽度 = 右侧栏宽 + 「页面右边缘 → 窗口右边缘」的空隙，等于从评论区左边缘
+    //     一直到窗口右边，视觉上不多不少压住评论区
+    //   · 高度与纵向位置 = 视频页本身的范围（不是整窗），面板顶不会高过卡片顶
+    // 全部用 mapToItem 实时量，所以换分辨率、改系统缩放、拖窗口都能跟着变。
+    function applyDescSheetGeometry() {
+        var win = pageRoot.Window
+        if (!win || win.width <= 0 || win.height <= 0) return
+
+        var pageTop = pageRoot.mapToItem(null, 0, 0).y
+        // 直接量右侧栏的左边缘，而不是"rightPanelWidth + 卡片右边距"倒推：
+        // 布局 spacing、卡片 border、圆角都会带来误差，之前"热"字还能露出一点
+        // 就是这些误差累积的。再向左多盖 6px —— 多出的部分落在左列的右边缘
+        // 空白上，看不出接缝，但能保证评论区左边缘一定被压住。
+        var panelLeft = rightPanel.mapToItem(null, 0, 0).x
+        var w = Math.round(win.width - panelLeft) + 6
+        descSheet.size = w
+        if (descSheet.opened) {
+            descSheet.width = w
+            descSheet.height = pageRoot.height
+            descSheet.y = pageTop
+        }
+    }
+
+    function openDescSheet() {
+        applyDescSheetGeometry()
+        // FluSheet 的 Right 分支会把 height 绑到整窗高、y 归 0；随后再改成
+        // "贴住视频页"的范围（enter 动画只动 x，不会覆盖 y/height）
+        descSheet.open(FluSheetType.Right)
+        descSheet.height = pageRoot.height
+        descSheet.y = pageRoot.mapToItem(null, 0, 0).y
+    }
+
     function closePopups() {
         if (volumePopup.opened) volumePopup.close()
         if (danmakuPopup.opened) danmakuPopup.close()
@@ -1197,6 +1241,9 @@ Rectangle {
         if (chapterMenu.opened) chapterMenu.close()
         if (subtitleMenu.opened) subtitleMenu.close()
         if (codecMenu.opened) codecMenu.close()
+        // 简介面板挂在窗口 overlay 上，不受本页裁剪；页面隐藏/停止播放时
+        // 必须主动关闭，否则会留在屏幕上盖住新页面
+        if (descSheet.opened) descSheet.close()
     }
 
     // 自动隐藏豁免：鼠标悬停在控制栏区域内，或任一弹出面板/菜单
@@ -1475,6 +1522,11 @@ Rectangle {
         }
     }
 
+    // 窗口尺寸/缩放变化：面板若开着，按新尺寸重算宽度与位置
+    // 加 descSheet 存在性判断：根对象的 width/height 在子项创建之前就可能变化
+    onWidthChanged: if (descSheet && descSheet.opened) applyDescSheetGeometry()
+    onHeightChanged: if (descSheet && descSheet.opened) applyDescSheetGeometry()
+
     onVisibleChanged: {
         if (!visible) {
             // 小窗模式下页面变为不可见（外部关闭视频的兜底路径）：
@@ -1743,6 +1795,8 @@ Rectangle {
         pageRoot.upVipType = 0
         pageRoot.upHasCollect = false
         pageRoot.description = ""
+        pageRoot.argueMsg = ""
+        pageRoot.noReprint = false
         pageRoot.videoUrlInfo = null
         pageRoot.videoDuration = 0
         pageRoot.defaultFavoriteFid = ""
@@ -1821,6 +1875,7 @@ Rectangle {
         pageRoot.videoTitle = "视频播放"
         pageRoot.upName = "加载中..."
         pageRoot.upFans = ""
+        pageRoot.upArchiveCount = 0
         pageRoot.viewCount = "0"
         pageRoot.danmakuCount = "0"
         pageRoot.likeCount = "0"
@@ -2634,6 +2689,9 @@ Rectangle {
                 pageRoot.shareCount = pageRoot.formatNumber(detail.share)
                 pageRoot.pubDate = GlobalState.formatDateTime(detail.pubdate)
                 pageRoot.description = detail.description || ""
+                // 作者声明（"含AI生成内容"等），空串表示没有
+                pageRoot.argueMsg = detail.argueMsg || ""
+                pageRoot.noReprint = detail.noReprint === true
                 // 填充互动状态
                 pageRoot.isLiked = !!detail.reqLike
                 pageRoot.isDisliked = !!detail.reqDislike
@@ -2807,6 +2865,9 @@ Rectangle {
             pageRoot.pubDate = GlobalState.formatDateTime(detail.pubdate)
             pageRoot.cover = detail.pic || ""
             pageRoot.description = detail.description || ""
+            // 作者声明（"含AI生成内容"等），空串表示没有
+            pageRoot.argueMsg = detail.argueMsg || ""
+            pageRoot.noReprint = detail.noReprint === true
             pageRoot.isLiked = !!detail.reqLike
             pageRoot.isDisliked = !!detail.reqDislike
             pageRoot.isCoined = !!detail.reqCoin
@@ -3216,6 +3277,11 @@ Rectangle {
         }
         function onUpPendantReady(pendantImage) {
             pageRoot.upPendantImage = pendantImage || ""
+        }
+        // 投稿数来自 card 接口（与粉丝数不是同一个请求，到达顺序不固定，
+        // 显示时两个都就绪才拼接）
+        function onUpArchiveCountReady(count) {
+            pageRoot.upArchiveCount = count > 0 ? count : 0
         }
         function onQualityListReady(list) {
             pageRoot.qualityList = list
@@ -5230,11 +5296,32 @@ Rectangle {
                     }
 
                     // 视频简介不为空时，悬停标题显示简介
+                    //
+                    // **必须自己给 x/y**：FluTooltip 的默认定位是
+                    //   x: (parent.width - implicitWidth) / 2
+                    //   y: -implicitHeight - 3
+                    // 用的是"内容单行自然宽度"，而这里用 width 把宽度限制成了 480。
+                    // 简介一长，implicitWidth 可能是几千像素 → x 变成很大的负数，
+                    // Popup 再被窗口边界修正拉回来，于是 tooltip 一会儿贴左、一会儿
+                    // 居中、一会儿贴右（完全取决于这条简介有多长）。按实际 width/
+                    // height 定位后，恒定居中在标题正上方。
                     FluTooltip {
                         visible: titleHoverArea.containsMouse && pageRoot.description !== ""
                         text: pageRoot.description
                         delay: 500
                         width: Math.min(implicitWidth, 480)
+                        x: parent ? (parent.width - width) / 2 : 0
+                        y: -height - 3
+                        // 简介可能非常长：不限高会顶出窗口上沿，被 Popup 的边界修正
+                        // 之后纵向也开始"跳"。这里限制 12 行，超出时最后一行末尾省略；
+                        // 完整内容看下方的"视频简介"面板。
+                        contentItem: FluText {
+                            text: pageRoot.description
+                            font: FluTextStyle.Body
+                            wrapMode: Text.Wrap
+                            maximumLineCount: 12
+                            elide: Text.ElideRight
+                        }
                     }
                 }
 
@@ -5366,10 +5453,21 @@ Rectangle {
                                 }
 
                                 FluText {
-                                    text: pageRoot.upFans
+                                    // "18.5万粉丝 · 1.2万视频"
+                                    // 粉丝数与投稿数来自两个不同请求，到达顺序不固定：
+                                    // 粉丝还没到就先不显示；投稿数没到则只显示粉丝数。
+                                    // 投稿数与播放量等同一套换算规则（1万 -> X.X万，
+                                    // 1亿 -> X.X亿），与官方显示一致。
+                                    text: pageRoot.upFans === ""
+                                          ? ""
+                                          : (pageRoot.upArchiveCount > 0
+                                             ? pageRoot.upFans + " · "
+                                               + pageRoot.formatNumber(pageRoot.upArchiveCount)
+                                               + "视频"
+                                             : pageRoot.upFans)
                                     font: FluTextStyle.Caption
                                     color: FluTheme.fontSecondaryColor
-                                    visible: pageRoot.upFans !== ""
+                                    visible: text !== ""
                                 }
                             }
                             // 名称与关注按钮之间留点空隙（Row 的 spacing 是 6，
@@ -5475,6 +5573,91 @@ Rectangle {
                     RowLayout {
                         anchors.fill: parent
                         spacing: 12
+
+                        // 视频简介：tooltip 只做预览（最多 12 行），完整内容从底部
+                        // 弹出这个面板看。放最左，点赞/点踩/投币/收藏整体靠右。
+                        FluButton {
+                            Layout.preferredHeight: 34
+                            Layout.preferredWidth: 100
+                            background: Rectangle {
+                                color: "transparent"
+                                radius: 4
+                            }
+                            contentItem: RowLayout {
+                                anchors.fill: parent
+                                spacing: 0
+
+                                Item { Layout.fillWidth: true }
+
+                                IconFontIcon {
+                                    name: "message"
+                                    Layout.preferredWidth: 20
+                                    Layout.preferredHeight: 20
+                                    iconColor: FluTheme.fontPrimaryColor
+                                    Layout.alignment: Qt.AlignVCenter
+                                }
+
+                                FluText {
+                                    text: "视频简介"
+                                    font: FluTextStyle.Body
+                                    color: FluTheme.fontPrimaryColor
+                                    Layout.alignment: Qt.AlignVCenter
+                                }
+
+                                Item { Layout.fillWidth: true }
+                            }
+                            onClicked: pageRoot.openDescSheet()
+                        }
+
+                        // 紧跟在"视频简介"按钮右侧，同一位置只显示一条：
+                        //   1) 有作者声明 → 显示声明（如"含AI生成内容"）
+                        //   2) 没有声明但有 no_reprint → "未经作者授权 禁止转载"
+                        //   3) 两者都没有 → 整块隐藏，不留空隙
+                        Row {
+                            visible: pageRoot.argueMsg !== "" || pageRoot.noReprint
+                            spacing: 4
+                            // 给个确定高度：子项用 verticalCenter 对齐时不会再反过来
+                            // 依赖 Row 自身高度（避免绑定循环告警），顺带与按钮同高
+                            Layout.preferredHeight: 34
+                            Layout.alignment: Qt.AlignVCenter
+
+                            FluIcon {
+                                // 声明用 info（次要色）；"禁止转载"换成禁止符并用主题红，
+                                // 后者是限制性提示，需要比灰字更醒目
+                                iconSource: pageRoot.argueMsg !== ""
+                                            ? FluentIcons.Info
+                                            : FluentIcons.StatusCircleBlock
+                                iconSize: 13
+                                iconColor: pageRoot.argueMsg !== ""
+                                           ? FluTheme.fontSecondaryColor
+                                           : Theme.error
+                                // FluIcon 是 Text：高度取字体行高（13px 字号约 16px 高），
+                                // 而图标字形是按**基线**画的、视觉中心天生偏上；
+                                // verticalCenter 对的是盒子中心而非字形中心，所以要补偏移。
+                                //
+                                // 偏移必须**按字形分开给**：不同 glyph 在 em box 里的位置
+                                // 并不一致，Info（圆圈 i）要补 2px，StatusCircleBlock（禁止符）
+                                // 的圆更大、重心更低，补 1px 就够，用同一个值必然有一个偏。
+                                // 换字号时按比例缩放（大致 iconSize * 0.15 / 0.08）。
+                                anchors.verticalCenter: parent.verticalCenter
+                                anchors.verticalCenterOffset: pageRoot.argueMsg !== "" ? 2 : 1
+                            }
+
+                            FluText {
+                                text: pageRoot.argueMsg !== ""
+                                      ? pageRoot.argueMsg
+                                      : "未经作者授权 禁止转载"
+                                font: FluTextStyle.Caption
+                                color: FluTheme.fontSecondaryColor
+                                anchors.verticalCenter: parent.verticalCenter
+                                // 争议类提示可能较长，限宽省略，别把右边的互动按钮挤走
+                                width: Math.min(implicitWidth, 220)
+                                elide: Text.ElideRight
+                            }
+                        }
+
+                        // 撑开：把后面的互动按钮整组推到右端
+                        Item { Layout.fillWidth: true }
 
                         FluButton {
                             Layout.preferredHeight: 34
@@ -5675,9 +5858,6 @@ Rectangle {
                             }
                         }
 
-                        Item { Layout.fillWidth: true }
-
-                        Item { Layout.fillWidth: true }
                     }
                 }
 
@@ -5736,6 +5916,8 @@ Rectangle {
 
         // ========== 右侧：标签切换区 ==========
         ColumnLayout {
+            // 简介抽屉的宽度以它的左边缘为准（见 applyDescSheetGeometry）
+            id: rightPanel
             Layout.preferredWidth: pageRoot.rightPanelWidth
             Layout.minimumWidth: pageRoot.rightPanelWidth
             Layout.maximumWidth: pageRoot.rightPanelWidth
@@ -7439,6 +7621,76 @@ Rectangle {
                     iconColor: "#FFFFFF"
                     onClicked: pageRoot.exitMiniWindow()
                 }
+            }
+        }
+    }
+
+    // ===== 视频简介面板（右侧抽屉）=====
+    // 标题那行的 tooltip 只做预览（最多 12 行、超出省略）；完整简介在这里看：
+    // 从右侧滑入、宽度盖住右侧栏，可纵向滚动，正文用 FluCopyableText
+    //（readOnly + selectByMouse + 右键菜单），支持选中与复制。
+    FluSheet {
+        id: descSheet
+        // 标题带 BV 号，一眼确认是哪一支视频（番剧没有 bvid 时只显示标题）
+        title: pageRoot.bvid !== "" ? ("视频简介 " + pageRoot.bvid) : "视频简介"
+        // Right 模式下 size 表示**宽度**，由 applyDescSheetGeometry() 在 open 前
+        // 算好；这里的初值只是兜底（FluSheet 自身的默认值是 278）
+        size: 320
+
+        // 圆角与客户端其它卡片统一（Theme.radiusMedium = 8）。
+        // 只圆左侧两角：面板右边缘正好贴着窗口边，右上/右下若也圆，会露出下面的
+        // 遮罩，看着像缺了一块。颜色/边框/阴影照抄 FluSheet 自带的那份。
+        background: Rectangle {
+            radius: Theme.radiusMedium
+            topLeftRadius: Theme.radiusMedium
+            bottomLeftRadius: Theme.radiusMedium
+            topRightRadius: 0
+            bottomRightRadius: 0
+            border.width: 1
+            border.color: FluTheme.dark
+                          ? (Window.active ? Qt.rgba(55/255, 55/255, 55/255, 1)
+                                           : Qt.rgba(45/255, 45/255, 45/255, 1))
+                          : Qt.rgba(226/255, 229/255, 234/255, 1)
+            color: FluTheme.dark
+                   ? (Window.active ? Qt.rgba(38/255, 44/255, 54/255, 1)
+                                    : Qt.rgba(39/255, 39/255, 39/255, 1))
+                   : Qt.rgba(251/255, 251/255, 253/255, 1)
+            // 阴影必须跟着圆角走：FluShadow 是按 radius 一层层画同心圆角矩形的
+            // （radius + index、margins -index），传 0 就是直角——背景圆角之后，
+            // 圆角外侧就会露出阴影的直角，暗色主题下特别明显。
+            // 它只有单一 radius、不能分角，但右侧那两角的阴影本来就落在窗口外，
+            // 看不见，所以这里按左侧的圆角值给即可。
+            FluShadow { radius: Theme.radiusMedium }
+        }
+
+        // 自己搭 Flickable 而不是用 ScrollView：ScrollView 会把内容宽度按内容的
+        // 单行自然宽度算，长简介容易带出横向尺寸问题；这里 contentWidth 直接钉成
+        // 视口宽度，只允许纵向滚动。
+        // 拖动选择不必担心被 Flickable 抢走：鼠标按下事件先派发给最上层的
+        // TextEdit（descBody），它接受后 Flickable 就收不到，拖选正常；滚动交给
+        // 滚轮和右侧滚动条。
+        Flickable {
+            id: descFlick
+            anchors.fill: parent
+            anchors.leftMargin: 16
+            anchors.rightMargin: 8
+            anchors.topMargin: 8
+            anchors.bottomMargin: 16
+            clip: true
+            boundsBehavior: Flickable.StopAtBounds
+            contentWidth: width
+            contentHeight: descBody.height
+            ScrollBar.vertical: FluScrollBar { policy: ScrollBar.AsNeeded }
+
+            // 宽度减掉滚动条预留（12），不依赖"可用宽度"变化：
+            // AsNeeded 滚动条出现/消失会改变可用宽度，进而触发文本重排、
+            // 高度变化，容易来回抖动。
+            FluCopyableText {
+                id: descBody
+                width: descFlick.width - 12
+                text: pageRoot.description !== "" ? pageRoot.description : "暂无简介"
+                wrapMode: TextEdit.Wrap
+                font: FluTextStyle.Body
             }
         }
     }

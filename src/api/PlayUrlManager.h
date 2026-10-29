@@ -147,6 +147,15 @@ public:
         qlonglong pubdate;       // 发布时间戳
         QString pic;             // 视频封面URL
         QString description;     // 视频简介
+        // 作者声明 / 争议提示（/x/web-interface/view 的 data.argue_info.argue_msg）。
+        // 实测：20 条 AI 相关视频里 13 条为"含AI生成内容"，其余为空串；
+        // argue_type 恒为 0、argue_link 恒为空，文案全在这一个字段里。
+        // 它是 UP 主主动勾选的声明，不是平台自动判定，所以空串只代表"没声明"。
+        QString argueMsg;
+        // 版权标志：view 接口 data.rights.no_reprint，1 = 网页上会显示
+        // "未经作者授权 禁止转载"（B 站投稿时默认勾选，命中率不低）。
+        // 语义是"1 = 显示禁止转载"，不是"1 = 允许转载"，别取反。
+        bool noReprint = false;
 
         // 联合投稿（staff）。B站"联合投稿"视频的每个参与者都在这份数组里，
         // 每项含 mid / name / face / title（身份，如 UP主、参演、配音）。
@@ -312,6 +321,10 @@ signals:
     // 认证必须走 card 接口：view 接口的 owner 实测只有 mid/name/face，
     // 不下发 official_verify）
     void upVipReady(int vipType, bool faceNft, int verifyType);
+    // UP 主投稿数（card 接口的 data.archive_count，与 vip/认证同一次响应）。
+    // 单独发信号而不是给 upVipReady 加参数：QML 那边是按位置接收的，加参数
+    // 会把已有连接全部改一遍，风险没必要。
+    void upArchiveCountReady(qlonglong count);
 
     // UP 主头像框图片已获取
     void upPendantReady(const QString &pendantImage);
