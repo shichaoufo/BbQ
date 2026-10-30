@@ -66,7 +66,9 @@ cmake --build build --config Release
 
 ## 许可
 
-本项目未授予任何商业使用许可。代码仅供学习、研究与个人使用参考；未经作者书面许可，不得用于商业用途、付费分发或任何形式的牟利行为。
+本项目以 [GNU General Public License v3.0](LICENSE) 发布：你可以自由使用、修改和分发，但衍生作品必须以相同许可开源，且不附带任何担保。
+
+仓库中包含的第三方组件（Qt、libmpv / FFmpeg、FluentUI 等）各自遵循其原始许可，分发时需要注意的义务见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
 ---
 
