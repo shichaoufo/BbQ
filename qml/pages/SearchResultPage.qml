@@ -2005,7 +2005,7 @@ FluPage {
                                             }
                                         }
 
-                                        FluImage {
+                                        AppImage {
                                             id: bgCoverImg
                                             anchors.fill: parent
                                             source: {

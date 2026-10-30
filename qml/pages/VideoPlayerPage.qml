@@ -4128,7 +4128,7 @@ Rectangle {
                 }
 
                 // 视频封面（作为未真正播放时的占位）
-                FluImage {
+                AppImage {
                     anchors.fill: parent
                     source: GlobalState.fixImageUrl(pageRoot.cover,
                                                     videoContainer.width * Screen.devicePixelRatio,
@@ -5954,7 +5954,7 @@ Rectangle {
 
                                                                 Component {
                                                                     id: commentStaticImageComponent
-                                                                    FluImage {
+                                                                    AppImage {
                                                                         anchors.fill: parent
                                                                         // 单图（非长图）取原比例图不裁；其余（多图任意 / 单图长图）都让 CDN 按容器比例裁；
                                                                         // 注意不能用 "@Ww_Hh.jpg"（无 _1c）—— contain 语义会把长图缩成细条再放大，排布就糊了
@@ -5969,6 +5969,8 @@ Rectangle {
                                                                         asynchronous: true
                                                                         cache: true
                                                                         smooth: true
+                                                                        // 缩略图是从 480/1080 缩下来的，开 mipmap 让缩小采样平滑，避免摩尔纹
+                                                                        mipmap: true
                                                                         onSourceSizeChanged: {
                                                                             if (mainImageContainer.pic.width <= 0 && sourceSize.width > 0 && sourceSize.height > 0)
                                                                                 mainImageContainer.decodedRatio = sourceSize.height / sourceSize.width
@@ -6360,7 +6362,7 @@ Rectangle {
 
                                                                 Component {
                                                                     id: replyStaticImageComponent
-                                                                    FluImage {
+                                                                    AppImage {
                                                                         anchors.fill: parent
                                                                         // 单图（非长图）取原比例图不裁；其余（多图任意 / 单图长图）都让 CDN 按容器比例裁
                                                                         source: GlobalState.fixImageUrl(pageRoot.commentThumbUrl(
@@ -6374,6 +6376,8 @@ Rectangle {
                                                                         asynchronous: true
                                                                         cache: true
                                                                         smooth: true
+                                                                        // 缩略图是从 480/1080 缩下来的，开 mipmap 让缩小采样平滑，避免摩尔纹
+                                                                        mipmap: true
                                                                         onSourceSizeChanged: {
                                                                             if (replyImageContainer.pic.width <= 0 && sourceSize.width > 0 && sourceSize.height > 0)
                                                                                 replyImageContainer.decodedRatio = sourceSize.height / sourceSize.width

@@ -150,6 +150,9 @@ Item {
                     playing: segItem.isEmote && flow.visible
                     fillMode: Image.PreserveAspectFit
                     smooth: true
+                    // 动图原图通常比显示尺寸大得多，没有 mipmap 时缩小采样会
+                    // 出现闪烁/锯齿（和静态表情同一个问题）
+                    mipmap: true
                     cache: true
                 }
             }

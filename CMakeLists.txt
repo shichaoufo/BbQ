@@ -193,6 +193,7 @@ set(QML_RESOURCE_FILES
     qml/pages/HistoryPage.qml
     qml/pages/UserProfilePage.qml
     qml/components/NavigationBar.qml
+    qml/components/AppImage.qml
     qml/components/VideoCard.qml
     qml/components/LiveCard.qml
     qml/components/HistoryCard.qml

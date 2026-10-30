@@ -115,7 +115,7 @@ Rectangle {
                 }
             }
 
-            FluImage {
+            AppImage {
                 anchors.fill: parent
                 source: GlobalState.fixImageUrlStatic(root.cover)
                 fillMode: Image.PreserveAspectCrop

@@ -493,7 +493,7 @@ QtObject {
             var eurl = (typeof em === "string") ? em : (em.url || "")
             if (!eurl) return _cmtEscText(tok)
             var sz = (typeof em === "object" && em.width > 0) ? em.width : 24
-            return '<img src="' + _cmtEscAttr(eurl) + '" width="' + sz + '" height="' + sz
+            return '<img src="' + _cmtEscAttr(_cmtEmoteImgUrl(eurl, sz)) + '" width="' + sz + '" height="' + sz
                  + '" align="middle" style="vertical-align:middle;">'
         }
 
@@ -684,6 +684,55 @@ QtObject {
         buf += _cmtEscText(raw.substring(last))
         flush()
         return segs
+    }
+
+    // 评论表情的 CDN 地址。
+    //
+    // 为什么要加尺寸参数：富文本 <img> 只认 width/height（逻辑像素，通常 20~24），
+    // 原图几十上百像素会被缩到这个尺寸，再由 Qt 按设备像素比放大绘制 ——
+    // 缩放比大、又没有 mipmap（富文本图片没有这个开关），细线条（描边/高光）
+    // 就会出现锯齿和摩尔纹，看着像糊了一层。
+    // 这里直接按"设备像素"请求：size × DPR，纹理与屏幕像素基本 1:1，
+    // 100% 缩放请求 24、150% 请求 36、200% 请求 48，不需要再缩放。
+    //
+    // 用不带扩展名的写法：CDN 按原格式返回（表情是透明底 PNG 就还是 PNG），
+    // 强制 .jpg 会变黑底，强制 .png 又多一层格式转换的风险。
+    // 已带 @ 参数的 URL 原样返回；带 query 的把参数插在 query 之前。
+    function _cmtEmoteImgUrl(url, size) {
+        if (!url) return ""
+        var u = String(url)
+        if (u.indexOf("//") === 0) u = "https:" + u
+        if (u.indexOf("@") >= 0) return u
+        var q = u.indexOf("?")
+        var base = q >= 0 ? u.substring(0, q) : u
+        var tail = q >= 0 ? u.substring(q) : ""
+        var px = _cmtEmoteRequestPx(size)
+        return base + "@" + px + "w_" + px + "h_1e_1c" + tail
+    }
+
+    // 表情请求的像素边长：逻辑尺寸 × 设备像素比。
+    // 取不到 DPR 时按 2 倍兜底 —— 多下几个像素（48px 的 PNG 也就几 KB）
+    // 总比按 1 倍请求、在高 DPI 屏上被放大糊掉强。
+    function _cmtEmoteRequestPx(size) {
+        var s = size > 0 ? size : 24
+        var dpr = 0
+        try {
+            var screens = Qt.application.screens
+            if (screens && screens.length > 0 && screens[0].devicePixelRatio > 0)
+                dpr = screens[0].devicePixelRatio
+        } catch (e) {
+            dpr = 0
+        }
+        if (dpr <= 0) dpr = 2
+        return Math.min(72, Math.max(24, Math.round(s * dpr)))
+    }
+
+    // 供"自己拼 <img>"的页面复用（动态正文：DynamicPage 里有一份独立的
+    // 富文本生成逻辑）。不共用的话那些地方还是把原图硬塞进富文本，
+    // 缩小后一样有锯齿；顺带也避免走 fixImageUrl 给的 "@.jpg" 把表情的
+    // 透明底压成黑底。
+    function commentEmoteImgUrl(url, size) {
+        return _cmtEmoteImgUrl(url, size)
     }
 
     // 该表情是否带动态版本（服务端在 emote 条目上下发 gif_url）。

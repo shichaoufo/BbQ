@@ -1912,7 +1912,9 @@ FluPage {
                 if (!e || !e.url) return match
                 var size = e.width || 24
                 if (size <= 0) size = 24
-                var fixedUrl = GlobalState.fixImageUrl(e.url)
+                // 与评论区表情同一套尺寸规则（按设备像素取图）；
+                // fixImageUrl 给的 @.jpg 还会把透明底表情压成黑底
+                var fixedUrl = GlobalState.commentEmoteImgUrl(e.url, size)
                 return '<img src="' + fixedUrl + '" width="' + size + '" height="' + size + '" align="middle" style="vertical-align:middle;">'
             })
         }
@@ -3129,6 +3131,8 @@ FluPage {
                                                                     asynchronous: true
                                                                     cache: true
                                                                     smooth: true
+                                                                    // 缩略图是从 CDN 大图缩下来的，开 mipmap 让缩小采样平滑，避免摩尔纹
+                                                                    mipmap: true
                                                                     onSourceSizeChanged: {
                                                                         if (forwardImageContainer.pic.width <= 0 && sourceSize.width > 0 && sourceSize.height > 0)
                                                                             forwardImageContainer.decodedRatio = sourceSize.height / sourceSize.width
@@ -3322,6 +3326,8 @@ FluPage {
                                                             asynchronous: true
                                                             cache: true
                                                             smooth: true
+                                                            // 缩略图是从 CDN 大图缩下来的，开 mipmap 让缩小采样平滑，避免摩尔纹
+                                                            mipmap: true
                                                             onSourceSizeChanged: {
                                                                 if (feedImageContainer.pic.width <= 0 && sourceSize.width > 0 && sourceSize.height > 0)
                                                                     feedImageContainer.decodedRatio = sourceSize.height / sourceSize.width
@@ -4058,6 +4064,8 @@ FluPage {
                                                         asynchronous: true
                                                         cache: true
                                                         smooth: true
+                                                        // 缩略图是从 CDN 大图缩下来的，开 mipmap 让缩小采样平滑，避免摩尔纹
+                                                        mipmap: true
                                                         onSourceSizeChanged: {
                                                             if (forwardDetailImageContainer.pic.width <= 0 && sourceSize.width > 0 && sourceSize.height > 0)
                                                                 forwardDetailImageContainer.decodedRatio = sourceSize.height / sourceSize.width
@@ -4262,6 +4270,8 @@ FluPage {
                                                 asynchronous: true
                                                 cache: true
                                                 smooth: true
+                                                // 缩略图是从 CDN 大图缩下来的，开 mipmap 让缩小采样平滑，避免摩尔纹
+                                                mipmap: true
                                                 onSourceSizeChanged: {
                                                     if (detailImageContainer.pic.width <= 0 && sourceSize.width > 0 && sourceSize.height > 0)
                                                         detailImageContainer.decodedRatio = sourceSize.height / sourceSize.width
