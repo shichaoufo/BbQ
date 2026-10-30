@@ -7,6 +7,12 @@
 # 产物：BbQ-Windows-x64.zip 绿色版（exe + Qt dll + mpv.dll + FluentUI 插件），
 # 解压即用，免本地配置——用于快速分发给别人测试。
 #
+# 产物去处：
+#   1) Actions artifact，保留 3 天
+#   2) GitHub Release 资产（长期保存）：每次手动 Run 时自动打一个 tag
+#      （默认 build-YYYYMMDD-HHmm，也可以在 Run workflow 时自己填），
+#      把 zip 挂上去，便于直接发给别人下载
+#
 # 依赖说明：
 #   - Qt 6.11.1 win64_mingw + Qt 配套 MinGW 13.1（aqt 手动安装）
 #   - libmpv 已内置仓库 third_party/mpv-dev（含 #17764 D3D11 补丁，
@@ -22,7 +28,16 @@ on:
   # 仅手动触发：Actions 页 → Windows Build → Run workflow。
   # 原先是 push / pull_request 到 main、master 自动跑，推一次代码就编一遍，
   # 与 macOS / Linux 两个 workflow 保持一致改为手动
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag（留空则自动生成 build-YYYYMMDD-HHmm）'
+        required: false
+        default: ''
+
+# 创建 tag / Release 并上传资产需要写权限
+permissions:
+  contents: write
 
 jobs:
   windows-x64:
@@ -152,6 +167,19 @@ jobs:
           Copy-Item "third_party\mpv-dev\runtime\*.dll" $binDir -Force
           Get-ChildItem $binDir | ForEach-Object { $_.Name }
 
+      # 打成单个 zip：artifact 传目录没问题，但 Release 资产只能是文件，
+      # 而且别人下载时一个 zip 比一堆散文件方便。用系统自带 bsdtar（-a 按扩展
+      # 名选格式），比 Compress-Archive 快一个量级（目录里有 200+ MB 的 dll）。
+      - name: Package zip
+        shell: pwsh
+        run: |
+          $zip = Join-Path $env:RUNNER_TEMP "BbQ-Windows-x64.zip"
+          if (Test-Path $zip) { Remove-Item $zip -Force }
+          tar -a -c -f "$zip" -C "$env:BIN_DIR" .
+          if (-not (Test-Path $zip)) { throw "zip not created" }
+          "ZIP_PATH=$zip" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host ("zip size: {0:N1} MB" -f ((Get-Item $zip).Length / 1MB))
+
       # 只在 push / 手动触发时上传产物。
       #
       # 为什么排除 PR：PR 需要的只是"能否编译"这个信号，产物没人下载，
@@ -167,3 +195,37 @@ jobs:
           name: BbQ-Windows-x64
           path: ${{ env.BIN_DIR }}
           retention-days: 3
+
+      # 手动触发时发布到 Release：tag 默认按时间生成，避免同名覆盖；
+      # 也可以 Run workflow 时手填（重复填同一个会更新那条 Release 的资产）
+      - name: Resolve release tag
+        shell: pwsh
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          $tag = $env:INPUT_TAG
+          if ([string]::IsNullOrWhiteSpace($tag)) {
+            $tag = "build-" + (Get-Date -Format "yyyyMMdd-HHmm")
+          }
+          "RELEASE_TAG=$tag" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "release tag: $tag"
+
+      - name: Publish to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: BbQ ${{ env.RELEASE_TAG }}
+          # 自动构建出来的包一律标成 Pre-release，不会被当成稳定版推荐给访客；
+          # 想发正式版就在 Releases 页面把它改成 Latest
+          prerelease: true
+          # 不自动生成 release notes：checkout 是 fetch-depth 1，拿不到完整历史
+          generate_release_notes: false
+          body: |
+            Windows x64 绿色版（MinGW 构建，Qt 6.11.1，含 libmpv 与 FluentUI）
+
+            - 解压后直接运行 `BbQ.exe`，无需安装 Qt / mpv
+            - 由 CI 自动构建，未做完整人工验证，仅供测试
+            - 本项目与哔哩哔哩官方无关，使用风险自负（见 README）
+          files: ${{ env.ZIP_PATH }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
