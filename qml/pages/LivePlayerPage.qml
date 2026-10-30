@@ -1179,6 +1179,28 @@ Rectangle {
     property string _lotteryJoinedId: ""
     // 正在请求参与中的 id（响应回来时据此标记已参与；-101 等失败则不标记）
     property string _lotteryPendingJoinId: ""
+
+    // 已参与过的天选 id（本地持久记录：最近 20 条，逗号分隔，新的在前）。
+    // 服务端既没有"查我是否参与过某场天选"的接口，AnchorLottery/Info 也不回传
+    // 参与状态，所以退出直播间再进来只能靠本地记录把按钮恢复成「已抽奖」。
+    // 不记的话会显示成可参与的「抽奖」，点下去才被服务端以 400080 拒绝
+    property string _joinedLotteryIds: Settings.getString("live/joinedLotteryIds", "")
+
+    function _rememberJoinedLottery(id) {
+        if (!id) return
+        var arr = root._joinedLotteryIds === "" ? [] : root._joinedLotteryIds.split(",")
+        if (arr.indexOf(id) >= 0) return
+        arr.unshift(id)
+        if (arr.length > 20)
+            arr = arr.slice(0, 20)
+        root._joinedLotteryIds = arr.join(",")
+        Settings.setString("live/joinedLotteryIds", root._joinedLotteryIds)
+    }
+
+    function _hasJoinedLottery(id) {
+        if (!id || root._joinedLotteryIds === "") return false
+        return root._joinedLotteryIds.split(",").indexOf(id) >= 0
+    }
     // 按钮是否有内容可显示（是否有未结束的天选）。
     // 注意：真正的"隐藏/出现"由 topBar 的 opacity 统一控制（与控制栏其他
     // 组件一致），这里只管"有没有抽奖"这一维度
@@ -1347,7 +1369,7 @@ Rectangle {
                     color: "transparent"
                     clip: true
                     anchors.verticalCenter: parent.verticalCenter
-                    FluImage {
+                    AppImage {
                         anchors.fill: parent
                         source: scBanner.scData.face !== "" ? GlobalState.fixImageUrl(scBanner.scData.face, 72, 72, true) : ""
                         fillMode: Image.PreserveAspectCrop
@@ -1421,6 +1443,9 @@ Rectangle {
             root._lotteryGiftPrice = giftPrice > 0 ? giftPrice : 0
             root._lotteryDeadline = Date.now() + Math.max(1, maxTime) * 1000
             root._refreshLotteryRemain()
+            // 本机参与过这场（重连时服务端可能重推 START）：保持"已抽奖"态
+            if (root._hasJoinedLottery(lotteryId))
+                root._lotteryJoinedId = lotteryId
 
             // 小窗不弹提示：模态对话框会遮死 480x270 小窗视频且高度被 overlay 裁剪
             if (root.isMiniWindow) return
@@ -1452,6 +1477,11 @@ Rectangle {
             root._clearLotteryState()
         }
         function onConnected() {
+            // 进房/重连成功：主动补查一次进行中的天选。
+            // 服务端对同一场天选只推一次 ANCHOR_LOT_START，进房时它已经开始
+            // （或退出过又重进）就永远收不到那条推送，顶部常驻抽奖按钮也就
+            // 不会出现。断线重连复用同一条路径，顺带修复"断流期间错过天选"
+            Api.getLiveAnchorLotteryInfo(String(root.roomId))
         }
         function onDisconnected() {
         }
@@ -1500,8 +1530,12 @@ Rectangle {
                 var resp = JSON.parse(dataStr)
                 if (resp.code === 0) {
                     // 标记该 id 已参与：顶部常驻按钮文案切为"已抽奖"（按钮在
-                    // 天选结束前一直保留），并阻止重复请求
-                    if (pendingId !== "") root._lotteryJoinedId = pendingId
+                    // 天选结束前一直保留），并阻止重复请求。同时写进本地记录，
+                    // 退出直播间再进来也能恢复成"已抽奖"
+                    if (pendingId !== "") {
+                        root._lotteryJoinedId = pendingId
+                        root._rememberJoinedLottery(pendingId)
+                    }
                     scInfoBar.showSuccess("已参与天选时刻，静候开奖~")
                 } else {
                     var errMsg = resp.message || resp.msg || ("错误码: " + resp.code)
@@ -1510,7 +1544,15 @@ Rectangle {
                     case -101: errMsg = "请先登录后参与抽奖"; break
                     case -400: errMsg = "请求参数有误"; break
                     case -403: errMsg = "风控拦截，稍后再试"; break
-                    case 400080: errMsg = "你已参与过本场天选"; break
+                    case 400080:
+                        errMsg = "你已参与过本场天选"
+                        // 别处（网页/手机）参与过的情况：照样标记成"已抽奖"，
+                        // 免得按钮一直停在可参与状态、每次点都被拒
+                        if (pendingId !== "") {
+                            root._lotteryJoinedId = pendingId
+                            root._rememberJoinedLottery(pendingId)
+                        }
+                        break
                     case 400090: errMsg = "抽奖已结束"; break
                     }
                     scInfoBar.showWarning("参与失败: " + errMsg)
@@ -1519,6 +1561,43 @@ Rectangle {
                 console.warn("[LivePlayerPage] anchorLotteryJoinResult parse error:", e)
                 scInfoBar.showWarning("参与失败: 响应解析错误")
             }
+        }
+        // 进房补查到的"进行中天选"。只恢复常驻按钮，不弹提示框：
+        // 用户刚进房就糊一脸对话框很烦，需要参与时点顶部「抽奖」即可
+        function onLiveAnchorLotteryInfoReady(info) {
+            if (!info || !info.lotteryId) return
+            // WS 推送已经建立了同一场：不重复处理（否则会把已参与的按钮文案冲掉）
+            if (root._lotteryId === info.lotteryId) return
+
+            var now = Date.now()
+            var deadline = 0
+            // lottery_time 是服务端给的结束时间戳，比 max_time 准；只有它是
+            // 未来时间才采信，否则退回"现在 + max_time"。
+            // 单位兼容：秒（10 位）与毫秒（13 位）都见过，按量级判断
+            var lt = info.lotteryTime || 0
+            var ltMs = lt > 1e12 ? lt : lt * 1000
+            if (ltMs > now)
+                deadline = ltMs
+            else if (info.maxTime > 0)
+                deadline = now + info.maxTime * 1000
+            else
+                deadline = now + 60000   // 两者都没有：兜底给 1 分钟，等 WS 的 END 收尾
+
+            if (deadline <= now) return   // 已经结束，别显示按钮
+
+            root._lotteryId = info.lotteryId
+            root._lotteryAward = info.awardName || ""
+            root._lotteryRequireType = info.requireType > 0 ? info.requireType : 0
+            root._lotteryDanmu = info.danmu || ""
+            root._lotteryGiftPrice = info.giftPrice > 0 ? info.giftPrice : 0
+            root._lotteryDeadline = deadline
+            // 记成"已提示过"：随后若 WS 又补推这场 START，不会再弹对话框
+            root._lastAnchorLotteryPromptId = info.lotteryId
+            // 本机参与过这场（退出重进 / 断线重连）：直接恢复成"已抽奖"，
+            // 否则按钮会显示成可参与的「抽奖」，点下去才被服务端拒绝
+            if (root._hasJoinedLottery(info.lotteryId))
+                root._lotteryJoinedId = info.lotteryId
+            root._refreshLotteryRemain()
         }
     }
 
@@ -1663,7 +1742,7 @@ Rectangle {
 
         }
         // 直播封面占位（流加载前显示）
-        FluImage {
+        AppImage {
             anchors.fill: parent
             source: GlobalState.fixImageUrl(root.cover,
                                            parent.width * Screen.devicePixelRatio,

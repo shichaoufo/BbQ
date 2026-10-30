@@ -1956,6 +1956,69 @@ void ApiManager::sendLiveDanmakuEmoticon(const QString &roomId, const QString &e
 // 客户端先自己完成，官方网页端同样是「关注 → 发弹幕 → 参与」三步。
 // 这里串行执行，前面一步失败也继续（已关注会返回 22014，弹幕有频率限制
 // 也可能失败，但都不该挡住参与），只把最后 Join 的结果回给 QML。
+void ApiManager::getLiveAnchorLotteryInfo(const QString &roomId)
+{
+    if (roomId.isEmpty())
+        return;
+
+    QUrl url("https://api.live.bilibili.com/xlive/lottery-interface/v1/AnchorLottery/Info");
+    QUrlQuery query;
+    query.addQueryItem("room_id", roomId);
+    query.addQueryItem("platform", "web");
+    url.setQuery(query);
+
+    QNetworkRequest request(url);
+    request.setRawHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                       "AppleWebKit/537.36 (KHTML, like Gecko) "
+                                       "Chrome/120.0.0.0 Safari/537.36");
+    request.setRawHeader("Referer", QString("https://live.bilibili.com/%1").arg(roomId).toUtf8());
+    request.setRawHeader("Origin", "https://live.bilibili.com");
+    request.setRawHeader("Accept", "application/json, text/plain, */*");
+
+    QString cookies = LoginManager::instance()->getCookies();
+    if (!cookies.isEmpty())
+        request.setRawHeader("Cookie", cookies.toUtf8());
+
+    QSslConfiguration config = QSslConfiguration::defaultConfiguration();
+    config.setPeerVerifyMode(QSslSocket::VerifyNone);
+    request.setSslConfiguration(config);
+
+    QNetworkReply *reply = m_networkManager->get(request);
+    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        QByteArray data = reply->readAll();
+        reply->deleteLater();
+
+        QVariantMap info;
+        QJsonDocument doc = QJsonDocument::fromJson(data);
+        if (doc.isObject()) {
+            QJsonObject root = doc.object();
+            // 未开播 / 无天选时 data 可能是 null，toObject() 会给空对象，
+            // 下面取不到 lottery_id 就按"没有进行中的天选"处理
+            if (root["code"].toInt() == 0) {
+                QJsonObject obj = root["data"].toObject();
+                QString lotteryId = obj["lottery_id"].toString();
+                if (!lotteryId.isEmpty()) {
+                    info["lotteryId"] = lotteryId;
+                    info["awardName"] = obj["award_name"].toString();
+                    info["awardNum"] = obj["award_num"].toInt();
+                    info["requireType"] = obj["require_type"].toInt();
+                    info["requireText"] = obj["require_text"].toString();
+                    info["danmu"] = obj["danmu"].toString();
+                    info["maxTime"] = obj["max_time"].toInt();
+                    // 服务端给的结束时间（unix 秒）；比 max_time 更准，
+                    // QML 优先用它算倒计时
+                    info["lotteryTime"] = obj["lottery_time"].toVariant().toLongLong();
+                    info["giftPrice"] = obj["require_gift"].toInt();
+                }
+            }
+        }
+
+        qWarning() << "[ApiManager] anchor lottery info, has:" << !info.isEmpty()
+                   << "id:" << info.value("lotteryId").toString();
+        emit liveAnchorLotteryInfoReady(info);
+    });
+}
+
 void ApiManager::joinLiveLottery(const QString &roomId, const QString &lotteryId,
                                  const QString &anchorMid, int requireType,
                                  const QString &danmu)

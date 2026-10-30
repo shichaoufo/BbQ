@@ -104,6 +104,11 @@ signals:
     void liveDanmakuSendResult(const QByteArray &data);      // 发送弹幕（文字/表情）响应
     void liveEmoticonsReceived(const QByteArray &data);      // 表情包列表响应
     void anchorLotteryJoinResult(const QByteArray &data);    // 天选时刻参与响应
+    // 进房主动查询到的"当前进行中的天选"（AnchorLottery/Info）。
+    // 空 map = 这个房间此刻没有进行中的天选。字段：
+    // lotteryId / awardName / awardNum / requireType / requireText /
+    // danmu / maxTime(秒) / lotteryTime(结束时间戳,秒) / giftPrice
+    void liveAnchorLotteryInfoReady(const QVariantMap &info);
     void videoDanmakuSendResult(const QByteArray &data);     // 视频弹幕发送响应
     void userUploadedVideosReceived(const QByteArray &data);
     void relatedVideosReceived(const QByteArray &data);
@@ -158,6 +163,13 @@ public:
     Q_INVOKABLE void joinLiveLottery(const QString &roomId, const QString &lotteryId,
                                      const QString &anchorMid, int requireType,
                                      const QString &danmu);
+
+    // 主动查询当前直播间是否有进行中的天选时刻。
+    // 必要性：天选状态原本只靠 WS 的 ANCHOR_LOT_START 推送建立，而服务端对
+    // 同一场只推一次 —— 进房时天选已经开始了（或退出重进），就永远收不到
+    // 这条推送，顶部常驻抽奖按钮也就不会出现。进房/重连后查一次补状态，
+    // 结果经 liveAnchorLotteryInfoReady 回 QML
+    Q_INVOKABLE void getLiveAnchorLotteryInfo(const QString &roomId);
 
     // ===== 视频弹幕发送（Web 路线：cookie + csrf，经 /x/v2/dm/post）=====
     // colorDecimal: 十进制颜色值（如 16777215=白色）；progressMs: 当前播放进度（毫秒，弹幕落点）
