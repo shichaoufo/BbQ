@@ -530,7 +530,11 @@ void MpvObjectD3D11::applyCacheOptions()
         // 直播：小 cache 低延迟，避免延迟随播放时长累积
         setOpt("cache", "yes");
         setOpt("cache-secs", "10");
-        setOpt("demuxer-max-bytes", "10M");
+        // 16M 是原值。master 上那次「调小缓存」的实验把它也降到了 10M，
+        // 但那 10 秒缓存最多也就用 5MB（1080p 直播约 500KB/s），
+        // 10M 和 16M 都不构成瓶颈、下调无收益，故恢复 16M
+        // （4K 直播约 1MB/s、10 秒要 10MB，16M 才留得住余量）
+        setOpt("demuxer-max-bytes", "16M");
         // 直播不需要回看：回看缓存直接为 0（对齐 PiliPlus，省 8M 内存）
         setOpt("demuxer-max-back-bytes", "0");
         setOpt("demuxer-readahead-secs", "10");
