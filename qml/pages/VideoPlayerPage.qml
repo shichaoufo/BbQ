@@ -1082,6 +1082,101 @@ Rectangle {
         return Qt.size(s, s)
     }
 
+    // ===== 评论区布局诊断（2026-10-31 加，用于定位"偶发错乱"）=====
+    //
+    // 现象：特定视频的某几条评论必定错位 —— 用户名与正文之间大片空白、
+    // 操作栏叠到相邻评论上；展开再折叠楼中楼后自行恢复；**未展开也会复现**。
+    //
+    // 关键：正文、操作栏都在**头像行 RowLayout 内部**的 ColumnLayout 里，
+    // 只看 commentItemLayout 的直接子项根本看不到它们（只有 RowLayout 和
+    // 楼中楼容器两项），所以这里递归 3 层。
+    //
+    // 三种异常：
+    //   · diff   ：容器高 ≠ 内容所需高（>0 下方留白，<0 内容溢出压到下一项）
+    //   · OVERLAP：相邻子项上下重叠
+    //   · GAP    ：相邻子项之间异常大空隙（>48px；正常间距最大是正文的 14px）
+    property int _cmtDiagCount: 0
+    property double _cmtDiagWindowEnd: 0
+
+    function _cmtNodeName(node) {
+        return String(node).split("(")[0]
+                .replace(/_QMLTYPE_\d+/, "")
+                .replace(/^QQuick/, "")
+    }
+
+    function diagCommentLayout(item, layout, model, tag) {
+        if (!item || !layout || !model) return
+        if (!layout.children || layout.children.length === 0) return
+        if (layout.implicitHeight === undefined || layout.width <= 0) return
+
+        var need = layout.implicitHeight + 16
+        var diff = item.height - need
+        var lines = []
+        var overlap = false
+        var hasGap = false
+
+        // 递归收集（最多 4 层）：顺便检查重叠与异常空隙
+        var walk = function (node, depth) {
+            var name = pageRoot._cmtNodeName(node)
+            // 只有垂直容器才有"上下依次排列"的语义。Row/RowLayout 的子项 y
+            // 相同是正常的横向排列；Rectangle 里套 MultiEffect 这类覆盖式嵌套
+            // 也是 y=0 —— 对它们判重叠全是误报（2026-10-31 实测：ad03a27 布局
+            // 完全正常却被标 OVERLAP，就是因为头像与右侧 ColumnLayout 同为 y=0）
+            var vertical = name.indexOf("Column") >= 0
+            var cs = node.children || []
+            var prevBottom = -1
+            var pad = ""
+            for (var p = 0; p < depth; p++) pad += " ";
+            for (var i = 0; i < cs.length; i++) {
+                var k = cs[i]
+                if (!k || k.visible === false) continue
+                var gap = 0
+                if (vertical) {
+                    gap = prevBottom >= 0 ? (k.y - prevBottom) : 0
+                    if (prevBottom > k.y + 1) overlap = true
+                    if (gap > 48) hasGap = true
+                }
+                if (lines.length < 40) {
+                    lines.push(pad + pageRoot._cmtNodeName(k)
+                               + "{y" + Math.round(k.y)
+                               + ",h" + Math.round(k.height)
+                               + ",ih" + Math.round(k.implicitHeight)
+                               + (gap > 48 ? ",GAP" + Math.round(gap) : "") + "}")
+                }
+                prevBottom = k.y + k.height
+                if (depth < 3) walk(k, depth + 1)
+            }
+        }
+        walk(layout, 0)
+
+        // 三项都正常才安静返回（正常评论零日志开销）
+        if (Math.abs(diff) <= 2 && !overlap && !hasGap) return
+
+        var now = Date.now()
+        if (now > pageRoot._cmtDiagWindowEnd) {
+            pageRoot._cmtDiagWindowEnd = now + 5000
+            pageRoot._cmtDiagCount = 0
+        }
+        if (pageRoot._cmtDiagCount >= 6) return   // 一屏多个坏项时限流，别刷屏
+        pageRoot._cmtDiagCount += 1
+
+        console.warn("[CommentLayout] " + tag
+                     + (overlap ? " OVERLAP" : "")
+                     + " rpid=" + (model.rpid || "?")
+                     + " user=" + (model.uname || "?")
+                     + " | w=" + Math.round(item.width)
+                     + " h=" + Math.round(item.height)
+                     + " need=" + Math.round(need)
+                     + " diff=" + Math.round(diff)
+                     + " layoutH=" + Math.round(layout.height)
+                     + " layoutIH=" + Math.round(layout.implicitHeight)
+                     + " | pics=" + pageRoot.commentPicCount(model.pictures)
+                     + " replies=" + (model.count || 0)
+                     + (model.repliesExpanded ? "+expanded" : "")
+                     + (hasGap ? " HATGAP" : "")
+                     + " | " + lines.join(" "))
+    }
+
     // 方形缩略图的裁剪锚点。
     // B 站图床 "@<w>w_<h>h_<anchor>.jpg" 的 anchor 实测（fix3/cdn_crop_probe*.py 逐像素定位）：
     //   1e_1c = 居中；1e_2c = 左上；1e_3c = 右下
@@ -5991,6 +6086,37 @@ Rectangle {
                                         property int commentIndex: index
                                         property var parentModel: model
 
+                                        // 布局诊断触发点（实现见 pageRoot.diagCommentLayout）。
+                                        // 只在不一致时输出日志，正常路径零开销。
+                                        //   · onCompleted → 首帧渲染后延迟一次，抓"渲染完还是错的"
+                                        //   · onWidthChanged → 窗口缩放 / 小窗切换后重排
+                                        //   · onHeightChanged → 高度落定但内容对不上
+                                        Component.onCompleted: cmtLayoutAudit.auditFromStart()
+                                        onWidthChanged: cmtLayoutAudit.auditFromStart()
+                                        onHeightChanged: pageRoot.diagCommentLayout(
+                                                             commentItem, commentItemLayout, model, "hchg")
+
+                                        Timer {
+                                            id: cmtLayoutAudit
+                                            interval: 400
+                                            repeat: false
+                                            // 采样 4 次（0.4/0.8/1.2/1.6s）：错乱可能在
+                                            // 图片解码、子评论加载之后才出现，只查一次
+                                            // 容易漏。不用 repeatCount —— 当前环境不认
+                                            // 这个属性（启动报"无法分配给不存在的属性"）
+                                            property int _ticks: 0
+                                            function auditFromStart() {
+                                                _ticks = 0
+                                                start()
+                                            }
+                                            onTriggered: {
+                                                pageRoot.diagCommentLayout(
+                                                    commentItem, commentItemLayout, model, "audit")
+                                                _ticks += 1
+                                                if (_ticks < 4) restart()
+                                            }
+                                        }
+
                                         // 右键"命中归属"标记：commentMetaAt() 从最深的子项
                                         // 往上找它，楼中楼行上也有同名标记 —— 近者优先，
                                         // 所以子评论赢过卡片。
@@ -6413,7 +6539,17 @@ Rectangle {
                                         Layout.topMargin: 4
                                         // 内层改用 anchors 定位，不再是本 Layout 的直接
                                         // 子项，所以要显式给出高度：内容高 + 上下各 8px
-                                        implicitHeight: vpSubReplyLayout.implicitHeight + 16
+                                        //
+                                        // 用 Layout.preferredHeight 而不是 implicitHeight：
+                                        // visible 由 model.repliesExpanded 驱动，
+                                        // 切换时 Layout 曾出现"高度算进去了、位置没排"
+                                        // —— 子项 y 停在 0 与上一项重叠（2026-10-31 日志：
+                                        // Rectangle{y0,h16} 叠在 RowLayout{y0,h150} 上，
+                                        // layoutH 却正确含了这 16px）。preferredHeight
+                                        // 随 visible 变成确定的新值，Layout 必然会重排
+                                        Layout.preferredHeight: visible
+                                                                ? (vpSubReplyLayout.implicitHeight + 16)
+                                                                : 0
                                         radius: Theme.radiusMedium
                                         color: FluTheme.frameColor
                                         visible: model.repliesExpanded
