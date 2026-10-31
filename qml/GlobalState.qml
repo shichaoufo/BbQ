@@ -300,19 +300,23 @@ QtObject {
         if (s.indexOf("@") >= 0) return s
         return s + "@40h.png"
     }
-    function _cmtIconImg(u) {
+    function _cmtIconImg(u, size) {
         var src = _cmtIconSrc(u)
         if (!src) return ""
         // 只给 height，宽度交给 Qt 按图片真实比例推（见上）。给死 width 就会变形。
         //
         // 必须写 HTML 属性 align="middle"：Qt 富文本**不解析 CSS 的
         // vertical-align**，只认 <img> 的 align 属性（映射到
-        // QTextImageFormat::verticalAlignment）。只给 style 时图片按默认
-        // align="bottom" 对齐到文字基线，看起来比旁边文字低一截
-        // （评论里播放/购物袋/淘宝/京东这些链接小标签就是这个问题）。
-        // style 一并保留，纯属对其它渲染路径无害。
+        // QTextImageFormat::verticalAlignment）。缺省 align="bottom" 时图片
+        // 底边贴文字基线，看起来低一截。
+        //
+        // 高度默认 16、与正文行高对齐：图片一旦明显高于行高，即便
+        // align="middle" 也会显偏下 —— Qt 是拿"基线 + ascent/2"当中线的，
+        // 大图的重心天然往下沉。评论正文 13px、行高约 19px，20px 时就偏下了。
+        // （size 参数留给以后按场景微调，目前调用方都不传。）
+        var h = (size > 0) ? size : 16
         return '<img src="' + _cmtEscAttr(src)
-             + '" height="20" align="middle" style="vertical-align:middle;">'
+             + '" height="' + h + '" align="middle" style="vertical-align:middle;">'
     }
     // ============ 断行 ============
     // 长 URL 在 Text.Wrap 下整串被当成一个"词"，没有任何断行机会，
@@ -499,7 +503,11 @@ QtObject {
         if (em) {
             var eurl = (typeof em === "string") ? em : (em.url || "")
             if (!eurl) return _cmtEscText(tok)
-            var sz = (typeof em === "object" && em.width > 0) ? em.width : 24
+            var sz = (typeof em === "object" && em.width > 0) ? em.width : 18
+            // 表情高度别超出行高太多：评论正文 13px、行高约 19px，而 Qt 的
+            // align="middle" 是"基线 + ascent/2"定中线，图越大视觉重心越往下
+            // 沉（24px 默认值时观感明显偏下）。封顶 18，与链接小标签一致。
+            if (sz > 18) sz = 18
             return '<img src="' + _cmtEscAttr(_cmtEmoteImgUrl(eurl, sz)) + '" width="' + sz + '" height="' + sz
                  + '" align="middle" style="vertical-align:middle;">'
         }
