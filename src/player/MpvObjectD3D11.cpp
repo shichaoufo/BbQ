@@ -530,7 +530,7 @@ void MpvObjectD3D11::applyCacheOptions()
         // 直播：小 cache 低延迟，避免延迟随播放时长累积
         setOpt("cache", "yes");
         setOpt("cache-secs", "10");
-        setOpt("demuxer-max-bytes", "16M");
+        setOpt("demuxer-max-bytes", "10M");
         // 直播不需要回看：回看缓存直接为 0（对齐 PiliPlus，省 8M 内存）
         setOpt("demuxer-max-back-bytes", "0");
         setOpt("demuxer-readahead-secs", "10");
