@@ -305,16 +305,10 @@ QtObject {
         if (!src) return ""
         // 只给 height，宽度交给 Qt 按图片真实比例推（见上）。给死 width 就会变形。
         //
-        // 必须写 HTML 属性 align="middle"：Qt 富文本**不解析 CSS 的
-        // vertical-align**，只认 <img> 的 align 属性（映射到
-        // QTextImageFormat::verticalAlignment）。缺省 align="bottom" 时图片
-        // 底边贴文字基线，看起来低一截。
-        //
-        // 高度默认 16、与正文行高对齐：图片一旦明显高于行高，即便
-        // align="middle" 也会显偏下 —— Qt 是拿"基线 + ascent/2"当中线的，
-        // 大图的重心天然往下沉。评论正文 13px、行高约 19px，20px 时就偏下了。
-        // （size 参数留给以后按场景微调，目前调用方都不传。）
-        var h = (size > 0) ? size : 16
+        // 链接小标签用 middle：图标中线对齐文字中线，视觉上最贴合文字。
+        // 注意 align 和 style 必须一致 —— style 里的 vertical-align 会覆盖
+        // align 属性，只改 align 不生效（历史踩坑）。
+        var h = (size > 0) ? size : 20
         return '<img src="' + _cmtEscAttr(src)
              + '" height="' + h + '" align="middle" style="vertical-align:middle;">'
     }
@@ -503,13 +497,9 @@ QtObject {
         if (em) {
             var eurl = (typeof em === "string") ? em : (em.url || "")
             if (!eurl) return _cmtEscText(tok)
-            var sz = (typeof em === "object" && em.width > 0) ? em.width : 18
-            // 表情高度别超出行高太多：评论正文 13px、行高约 19px，而 Qt 的
-            // align="middle" 是"基线 + ascent/2"定中线，图越大视觉重心越往下
-            // 沉（24px 默认值时观感明显偏下）。封顶 18，与链接小标签一致。
-            if (sz > 18) sz = 18
+            var sz = (typeof em === "object" && em.width > 0) ? em.width : 24
             return '<img src="' + _cmtEscAttr(_cmtEmoteImgUrl(eurl, sz)) + '" width="' + sz + '" height="' + sz
-                 + '" align="middle" style="vertical-align:middle;">'
+                 + '" align="top" style="vertical-align:top;">'
         }
 
         // (b) @提及：只有服务端登记过才染，且必须拿到 mid 才可点
