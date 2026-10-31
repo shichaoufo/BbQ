@@ -190,6 +190,33 @@ ConfFilterResult filterWindowsOnlyMpvConf(const QString &text)
 
 static const QString MPV_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 static const QString MPV_REFERER = "https://www.bilibili.com";
+
+// 音频 CDN 跟随视频（与 D3D11 实现同逻辑，完整理由见 MpvObjectD3D11.cpp）：
+// B 站 upos 镜像的 upsig 不绑 host（PiliPlus 直接 replace(host:) 即可证），
+// 但 Akamai 的 hdnts 签名绑 host、非 /upgcxcode/ 形态签名规则不确定，均不处理。
+static QString alignAudioHostToVideo(const QString &videoUrl, const QString &audioUrl)
+{
+    if (videoUrl.isEmpty() || audioUrl.isEmpty()) return audioUrl;
+    const QUrl v(videoUrl);
+    const QUrl a(audioUrl);
+    if (!v.isValid() || !a.isValid()) return audioUrl;
+
+    const QString vh = v.host().toLower();
+    const QString ah = a.host().toLower();
+    if (vh.isEmpty() || ah.isEmpty() || vh == ah) return audioUrl;
+    if (!videoUrl.contains(QLatin1String("/upgcxcode/"))
+        || !audioUrl.contains(QLatin1String("/upgcxcode/"))) {
+        return audioUrl;
+    }
+    if (vh.contains(QLatin1String("akamaized.net"))) return audioUrl;
+    if (!vh.contains(QLatin1String("bilivideo.com"))) return audioUrl;
+
+    QUrl out(a);
+    out.setHost(vh);
+    out.setPort(v.port());
+    qDebug() << "[MpvObject] audio CDN aligned to video:" << ah << "->" << vh;
+    return out.toString();
+}
 static const QString MPV_ORIGIN = "https://www.bilibili.com";
 
 class MpvRenderer : public QQuickFramebufferObject::Renderer
@@ -935,6 +962,10 @@ void MpvObject::initMpv()
     mpv_observe_property(m_mpv, 0, "video-params", MPV_FORMAT_NODE);
     // 音轨消失检测（见 audioLost）
     mpv_observe_property(m_mpv, 0, "audio-params", MPV_FORMAT_NODE);
+    // 音频时钟：供 QML 音频停滞看门狗轮询
+    mpv_observe_property(m_mpv, 0, "audio-pts", MPV_FORMAT_DOUBLE);
+    // 缓冲中（paused-for-cache）：播放卡死看门狗据此区分正常缓冲与 core 卡死
+    mpv_observe_property(m_mpv, 0, "paused-for-cache", MPV_FORMAT_FLAG);
     mpv_observe_property(m_mpv, 0, "seekable", MPV_FORMAT_FLAG);
     mpv_observe_property(m_mpv, 0, "hwdec-current", MPV_FORMAT_STRING);
     // 容器帧率：FramePacer 自适应心跳的输入（≥50fps 内容按需升档节奏）。
@@ -999,12 +1030,18 @@ void MpvObject::applyCacheOptions()
     if (!m_mpvInitialized) {
         // "半死连接"（TCP 还在、服务器不再回数据）靠它暴露：默认没有读超时，
         // 会一直挂着，既不出 EOF 也不报错，应用层重连根本没机会触发。
-        mpv_set_option_string(m_mpv, "network-timeout", "12");
+        mpv_set_option_string(m_mpv, "network-timeout", "6");
         // FFmpeg 层自动续连：吸收瞬时抖动，省掉一次重取 playurl。
         // 真断流、URL 过期仍交给应用层。
+        // reconnect_at_eof 是关键补充（原先漏了）：B 站 m4s 带 Content-Length，
+        // 读到一半断连时 http 层常把"提前结束"当 EOF 返回，此时
+        // reconnect_streamed（只管 filesize 未知的流式响应）不生效，
+        // demuxer 就认为该流正常播完 —— EDL 双流里音频那条静默死掉、
+        // 画面继续放。提前 EOF（off<filesize）会重连，真播完不受影响。
         mpv_set_option_string(m_mpv, "stream-lavf-o",
                               "reconnect=1,reconnect_streamed=1,"
-                              "reconnect_on_network_error=1,reconnect_delay_max=3");
+                              "reconnect_at_eof=1,reconnect_on_network_error=1,"
+                              "reconnect_delay_max=4,timeout=5000000");
     }
 
     struct CacheOption { const char *name; const char *value; };
@@ -1217,6 +1254,14 @@ void MpvObject::setAudioSource(const QString &audioSource)
     if (m_audioSource == audioSource) return;
     m_audioSource = audioSource;
     emit audioSourceChanged();
+}
+
+void MpvObject::setAudioCdnAlign(bool on)
+{
+    if (m_audioCdnAlign == on) return;
+    m_audioCdnAlign = on;
+    emit audioCdnAlignChanged();
+    qDebug() << "[MpvObject] audioCdnAlign =" << on;
 }
 
 bool MpvObject::playing() const
@@ -1512,8 +1557,14 @@ QString MpvObject::playbackMediaUrl() const
     // 暴露（走 END_FILE/ERROR 的重试），而不是像 audio-add 外挂音轨那样
     // 静默地只剩视频（"画面正常、声音消失"）。
     // 每段语法：%<字节数>%<URL>（长度是字节数，URL 含非 ASCII 时按字符数会错位）
+    //
+    // 音频 CDN 对齐到视频（见 MpvObjectD3D11.cpp alignAudioHostToVideo 注释）：
+    // QML 侧可经 audioCdnAlign 关闭
+    const QString audioUrl = m_audioCdnAlign
+            ? alignAudioHostToVideo(m_source, m_audioSource)
+            : m_audioSource;
     const QByteArray v = m_source.toUtf8();
-    const QByteArray a = m_audioSource.toUtf8();
+    const QByteArray a = audioUrl.toUtf8();
     QByteArray edl("edl://!no_chapters;%");
     edl += QByteArray::number(v.size());
     edl += '%';
@@ -1648,6 +1699,15 @@ void MpvObject::onMpvEvents()
                 if (m_duration != newDur) {
                     m_duration = newDur;
                     emit durationChanged();
+                }
+            } else if (strcmp(prop->name, "audio-pts") == 0 && prop->format == MPV_FORMAT_DOUBLE) {
+                // 只更新成员供 QML 命令式读取，刻意不 emit（见 .h 属性注释）
+                m_audioPts = *static_cast<double*>(prop->data);
+            } else if (strcmp(prop->name, "paused-for-cache") == 0 && prop->format == MPV_FORMAT_FLAG) {
+                const bool buf = *static_cast<int*>(prop->data) != 0;
+                if (m_buffering != buf) {
+                    m_buffering = buf;
+                    emit bufferingChanged();
                 }
             } else if (strcmp(prop->name, "pause") == 0 && prop->format == MPV_FORMAT_FLAG) {
                 bool paused = *static_cast<int*>(prop->data) != 0;
@@ -1794,7 +1854,11 @@ void MpvObject::onMpvEvents()
             // 正常路径音轨已在 EDL 里；只有 EDL 兜底退回纯视频时才 audio-add
             if (m_pendingAudioAdd && !m_audioSource.isEmpty()) {
                 m_pendingAudioAdd = false;
-                QByteArray audioData = m_audioSource.toUtf8();
+                // 兜底路径同样对齐 CDN，与正常路径保持一致
+                const QString audioUrl = m_audioCdnAlign
+                        ? alignAudioHostToVideo(m_source, m_audioSource)
+                        : m_audioSource;
+                QByteArray audioData = audioUrl.toUtf8();
                 const char *cmd[] = {"audio-add", audioData.constData(), nullptr};
                 mpv_command_async(m_mpv, 0, cmd);
             }

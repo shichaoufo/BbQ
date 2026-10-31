@@ -110,6 +110,33 @@ Rectangle {
     property int _stallRecoverCount: 0
     property int _stallLastFrames: -1
     property int _stallLastPos: -1
+    // 音频停滞看门狗状态（与画面看门狗对称，见 audioStallWatchdog）
+    property int _audioStallTicks: 0
+    property int _audioStallLastPos: -1
+    property real _audioStallLastPts: -1
+    // 进度条拖动防抖：拖动中累积的目标位置，停手 180ms 才真正 seek
+    // （拖动每像素一次 seek 会堵死两条 HTTP 流的 demuxer，见 progressSlider 注释）
+    property int _seekPendingMs: 0
+    // seek 卡死看门狗的状态：最后一次 seek 的发起时间与目标位置。
+    // 见 seekStallWatchdog
+    property double _seekRequestedAt: 0
+    property int _seekTargetMs: 0
+    // 播放停滞看门狗状态（正常播放也会卡，见 playbackStallWatchdog）
+    property int _playbackStallTicks: 0
+    property int _lastPlaybackPos: -1
+    property int _playbackStallRecoverCount: 0
+
+    // 所有 seek 的统一入口（进度条 / 键盘 / 时间戳跳转 / 章节…）。
+    // 除了转发给 mpv，还记录"发起的时刻 + 目标位置"，供 seekStallWatchdog
+    // 判断这次 seek 是否被卡住。
+    function doSeek(ms) {
+        pageRoot._seekTargetMs = ms
+        pageRoot._seekRequestedAt = Date.now()
+        mpvPlayer.seek(ms)
+    }
+    // 上次音频丢失的时间戳（ms）：用于重试计数的"事件窗口"重置——
+    // 同一个视频长时间播放时网络会抖很多次，不让历史上限把后续独立事件卡死
+    property double _lastAudioLossAt: 0
     
     // 番剧相关属性
     property bool isBangumi: false
@@ -817,7 +844,7 @@ Rectangle {
             var duration = mpvPlayer.duration > 0 ? mpvPlayer.duration
                                                   : (pageRoot.videoDuration > 0 ? pageRoot.videoDuration * 1000 : 0)
             if (duration > 0 && mpvPlayer.position >= duration - 500) {
-                mpvPlayer.seek(0)
+                pageRoot.doSeek(0)
             }
             mpvPlayer.play()
         }
@@ -1558,12 +1585,25 @@ Rectangle {
         var dur = mpvPlayer.duration
         // 还没起来、或已经播到结尾（正常结束）都不算丢失
         if (pos <= 0 || dur <= 0 || pos >= dur - 5000) return
+        // 距离上次音频丢失超过 5 分钟 → 视为新的独立事件，清空连败计数。
+        // 否则同一个视频看两小时、网络抖 6 次就会误触上限判定成"彻底失败"
+        var now = Date.now()
+        if (pageRoot._lastAudioLossAt > 0 && now - pageRoot._lastAudioLossAt > 300000) {
+            pageRoot._audioLossRetries = 0
+        }
+        pageRoot._lastAudioLossAt = now
         if (pageRoot._audioLossRetries >= 5) {
             pageRoot.loadFailed = true
             console.warn("[VideoPlayerPage] audio lost, retry limit reached, giving up")
             return
         }
         pageRoot._audioLossRetries += 1
+        // 连续两次都起不来 → 目标 CDN 上很可能确实没有这个音频对象
+        // （换成视频的 host 后 404）。关掉"音频跟随视频"，退回各用各的镜像，
+        // 下一轮重试就会用回服务端原始 audioUrl / audioBackupUrls
+        if (pageRoot._audioLossRetries >= 2) {
+            mpvPlayer.audioCdnAlign = false
+        }
         pageRoot._savedPositionBeforeRetry = pos
         pageRoot._retryingPlayback = true
         console.warn("[VideoPlayerPage] audio track lost at", pos, "ms, reopening at same position, attempt",
@@ -1738,7 +1778,7 @@ Rectangle {
             var duration = mpvPlayer.duration > 0 ? mpvPlayer.duration
                                                   : (pageRoot.videoDuration > 0 ? pageRoot.videoDuration * 1000 : 0)
             if (mpvPlayer.position + 500 >= duration && duration > 0) {
-                mpvPlayer.seek(0)
+                pageRoot.doSeek(0)
             }
             mpvPlayer.play()
         }
@@ -1753,7 +1793,7 @@ Rectangle {
         var target = cur + deltaMs
         if (dur > 0) target = Math.max(0, Math.min(target, dur))
         else target = Math.max(0, target)
-        mpvPlayer.seek(target)
+        pageRoot.doSeek(target)
     }
 
     focus: true
@@ -1927,6 +1967,7 @@ Rectangle {
         pageRoot._pendingSeek = 0
         pageRoot.playbackRetryCount = 0
         pageRoot._audioLossRetries = 0
+        pageRoot._lastAudioLossAt = 0
         pageRoot._retryingPlayback = false
         pageRoot._savedPositionBeforeRetry = 0
         // 画面看门狗复位（换视频后重新计数，否则沿用上一个视频的冻结计数）
@@ -1934,6 +1975,10 @@ Rectangle {
         pageRoot._stallRecoverCount = 0
         pageRoot._stallLastFrames = -1
         pageRoot._stallLastPos = -1
+        // 音频看门狗同样复位
+        pageRoot._audioStallTicks = 0
+        pageRoot._audioStallLastPos = -1
+        pageRoot._audioStallLastPts = -1
         // 字幕状态复位：换视频必须清空字幕轨，否则切到"无字幕"的新视频时，
         // 新视频发出的空列表会被 onSubtitleListReady 的"空列表不覆盖非空"
         // 守卫拦下，导致**残留上一个视频的字幕轨**（选的是别人的字幕）
@@ -2228,6 +2273,161 @@ Rectangle {
                 pageRoot.playbackRetryCount += 1
                 pageRoot._retryingPlayback = true
                 playbackRetryTimer.restart()
+            }
+        }
+    }
+
+    // 进度条拖动防抖。拖动中 onMoved 会连续触发，每像素 seek 一次对
+    // DASH 双流（两条 HTTP 连接）等于把 demuxer 反复打断重定位；这里改成
+    // 停手 180ms 才发一次，拖动过程只靠滑块位置本身做视觉预览。
+    Timer {
+        id: seekDebounce
+        interval: 180
+        repeat: false
+        onTriggered: {
+            if (mpvPlayer.duration > 0 && pageRoot._seekPendingMs >= 0) {
+                pageRoot.doSeek(pageRoot._seekPendingMs)
+            }
+        }
+    }
+
+    // ===== seek 卡死看门狗：进度条卡住不动、再拖也没反应 =====
+    //
+    // 症状（2026-10-30 22:39 日志）：连续快进后进度条停住，拖动无响应，
+    // 好一点过几十秒自己恢复，否则只能关掉视频重开。
+    //
+    // 机制：seek 目标超出 demuxer 缓存（日志里 cached range 0 到 319.9s，
+    // 而目标是 323.9s 起）时，mpv 必须等 HTTP 读新数据。此刻网络一抖
+    // （"Failure when receiving data from the peer"）core 线程就卡在
+    // read 里，后续 seek 全部排队（日志里的 queuing seek ... (cascade)），
+    // 而且 mpv 不认为自己在 buffering —— QML 侧收不到任何"加载中"信号，
+    // 用户看到的就是"死了"。日志里这段空白是 22:39:32 → 22:40:00。
+    //
+    // 判定：发起 seek 后 15 秒仍未到位（差值 > 3 秒）、在播放、没在重试。
+    // 处理：复用 playbackRetryTimer（换 CDN + 从目标位置续播），等价于
+    //       用户手动的"关掉重开"，但自动且保留进度。
+    Timer {
+        id: seekStallWatchdog
+        interval: 1000
+        repeat: true
+        running: pageRoot.visible && !pageRoot.wasClosed && pageRoot._seekRequestedAt > 0
+        onTriggered: {
+            var elapsed = Date.now() - pageRoot._seekRequestedAt
+            var pos = mpvPlayer.position
+            if (Math.abs(pos - pageRoot._seekTargetMs) < 3000) {
+                // 到位了（或用户已经正常播到目标附近）
+                pageRoot._seekRequestedAt = 0
+                return
+            }
+            if (elapsed < 15000) return
+            if (pageRoot._retryingPlayback || mpvPlayer.paused) return
+
+            console.warn("[SeekStall] seek 卡住 " + Math.round(elapsed / 1000) + "s 未到位"
+                         + " target=" + pageRoot._seekTargetMs + " pos=" + pos
+                         + "，换 CDN 从目标位置续播")
+            pageRoot._seekRequestedAt = 0
+            pageRoot._savedPositionBeforeRetry = pageRoot._seekTargetMs
+            pageRoot.playbackRetryCount += 1
+            pageRoot._retryingPlayback = true
+            playbackRetryTimer.restart()
+        }
+    }
+
+    // ===== 播放停滞看门狗：没有 seek、看着看着也卡住 =====
+    //
+    // 覆盖"正常播放中进度条突然不动"的场景（不涉及任何 seek 操作）。
+    // 机制与 seek 卡死同源：core 线程阻塞在 demuxer read 上（网络半死连接，
+    // 既不返回数据也不结束），time-pos 就不再更新；另一种是缓存耗尽后迟迟
+    // 补不回来。两种情况 mpv 都不会自己重连，只能靠外部兜底。
+    //
+    // 判定：position 连续 N 秒完全不变（正常播放每秒至少走 1）：
+    //   · 正在 seek（_seekRequestedAt > 0）→ 交给 seekStallWatchdog，别重复处理
+    //   · mpv 明确在缓冲（buffering=true，即 paused-for-cache）→ 容忍 30 秒，
+    //     网络慢但还在动弹，过早重连反而更糟
+    //   · 没有缓冲标志 → 12 秒即判 core 卡死
+    // 处理：换 CDN 从当前位置续播，最多 3 次（避免坏流无限重连）
+    Timer {
+        id: playbackStallWatchdog
+        interval: 1000
+        repeat: true
+        running: pageRoot.visible && mpvPlayer.playing && mpvPlayer.hasVideo
+                 && mpvPlayer.duration > 0 && !pageRoot.wasClosed
+        onTriggered: {
+            var pos = mpvPlayer.position
+            if (pos !== pageRoot._lastPlaybackPos) {
+                pageRoot._lastPlaybackPos = pos
+                pageRoot._playbackStallTicks = 0
+                return
+            }
+            if (mpvPlayer.paused || pageRoot._retryingPlayback) return
+            // seek 进行中由 seekStallWatchdog 负责，这里不插手
+            if (pageRoot._seekRequestedAt > 0) return
+
+            pageRoot._playbackStallTicks += 1
+            var limit = mpvPlayer.buffering ? 30 : 12
+            if (pageRoot._playbackStallTicks < limit) return
+            if (pageRoot._playbackStallRecoverCount >= 3) return
+
+            console.warn("[PlaybackStall] 进度停住 " + pageRoot._playbackStallTicks
+                         + "s（buffering=" + mpvPlayer.buffering + "）pos=" + pos
+                         + "，换 CDN 续播 attempt=" + (pageRoot._playbackStallRecoverCount + 1))
+            pageRoot._playbackStallRecoverCount += 1
+            pageRoot._playbackStallTicks = 0
+            pageRoot._savedPositionBeforeRetry = pos
+            pageRoot.playbackRetryCount += 1
+            pageRoot._retryingPlayback = true
+            playbackRetryTimer.restart()
+        }
+    }
+
+    // ===== 音频停滞看门狗：画面在走、音频时钟不动 =====
+    //
+    // 与上面 videoStallWatchdog 完全对称的反方向。CDN 掐断音频流（-30280）
+    // 而视频流照跑时，**音轨仍留在 track-list 里（audio-params 不会变 null）**，
+    // 所以 C++ 那条 audioLost（音轨消失）收不到 —— 症状就是"画面正常、声音
+    // 永久消失"。2026-10-30 的日志实证：20:58~21:05 出现 6 次
+    // "Failure when receiving data from the peer, retrying (#N)"，之后缓冲归零，
+    // 声音再没回来，用户只能退出重进。
+    // 底层还有一层：B 站 m4s 带 Content-Length，连接断在半路时 FFmpeg 常把
+    // "提前结束"当 EOF 返回，而原先 stream-lavf-o 没开 reconnect_at_eof，
+    // demuxer 就认为这条流正常播完了（已在 mpv 网络选项里补上）。
+    //
+    // 判定（三个同时满足）：
+    //   1. 在播放、有视频轨、时长已知
+    //   2. position 在前进（排除整体缓冲/暂停）
+    //   3. audioPts 连续 5 秒没有前进（正常 A/V 偏差在 ±50ms 内）
+    // 处理：复用 handleAudioLost（自带次数上限 + 恢复原位置），它最终走
+    // playbackRetryTimer 轮换 CDN。
+    Timer {
+        id: audioStallWatchdog
+        interval: 1000
+        repeat: true
+        running: pageRoot.visible && mpvPlayer.playing && mpvPlayer.hasVideo
+                 && mpvPlayer.duration > 0 && !pageRoot.wasClosed
+        onTriggered: {
+            var pos = mpvPlayer.position
+            var apts = mpvPlayer.audioPts
+
+            var posAdvanced = (pageRoot._audioStallLastPos >= 0 && pos > pageRoot._audioStallLastPos)
+            // 20ms 容差：audioPts 精度到秒的小数，正常播放每秒会走 ~1.0
+            var aptsAdvanced = (pageRoot._audioStallLastPts >= 0
+                                && apts > pageRoot._audioStallLastPts + 0.02)
+
+            if (!posAdvanced || aptsAdvanced) {
+                // 整体没在走（缓冲/暂停/刚起播），或音频时钟正常前进
+                pageRoot._audioStallTicks = 0
+            } else {
+                pageRoot._audioStallTicks += 1
+            }
+
+            pageRoot._audioStallLastPos = pos
+            pageRoot._audioStallLastPts = apts
+
+            if (pageRoot._audioStallTicks >= 5 && !pageRoot._retryingPlayback) {
+                console.warn("[AudioStall] 音频时钟停住 " + pageRoot._audioStallTicks
+                             + "s（画面仍在走）pos=" + pos + " apts=" + apts)
+                pageRoot._audioStallTicks = 0
+                pageRoot.handleAudioLost()
             }
         }
     }
@@ -3173,7 +3373,7 @@ Rectangle {
                 pageRoot._pendingSeek = Math.floor(historyMs)
                 // 如果视频已经在播放，立即 seek
                 if (mpvPlayer.hasVideo && mpvPlayer.duration > 0) {
-                    mpvPlayer.seek(pageRoot._pendingSeek)
+                    pageRoot.doSeek(pageRoot._pendingSeek)
                     mpvPlayer.play()
                     // 空降让路：抬高护栏到恢复位置 +1.5s，避免恢复瞬间
                     // （若历史位置恰落在标注片段内）被空降跳过立即覆盖
@@ -3197,7 +3397,19 @@ Rectangle {
             // 新流准备就绪，重置播放级重试状态
             pageRoot.playbackRetryCount = 0
             pageRoot._retryingPlayback = false
+            pageRoot._audioLossRetries = 0
+            pageRoot._lastAudioLossAt = 0
             playbackRetryTimer.stop()
+            // 新流（换视频/换清晰度/换音质）重新尝试"音频跟随视频 CDN"：
+            // 上一次可能因目标 host 上缺这个音频对象被自动关掉，新流值得再试
+            mpvPlayer.audioCdnAlign = true
+            // seek 看门狗复位（旧流上的 seek 目标对新流无意义）
+            pageRoot._seekRequestedAt = 0
+            pageRoot._seekPendingMs = 0
+            // 播放停滞看门狗复位（新流重新计数）
+            pageRoot._playbackStallTicks = 0
+            pageRoot._lastPlaybackPos = -1
+            pageRoot._playbackStallRecoverCount = 0
             // 切换清晰度/编码前保存的进度，等 fileLoaded 信号后再 seek
             if (pageRoot._switchingStream) {
                 pageRoot._pendingSeek = pageRoot._savedPosition
@@ -3827,7 +4039,7 @@ Rectangle {
                                 if (maxMs > 0 && seekMs >= maxMs) {
                                     seekMs = Math.max(0, maxMs - 3000)
                                 }
-                                mpvPlayer.seek(seekMs)
+                                pageRoot.doSeek(seekMs)
                                 mpvPlayer.play()
                                 // 空降让路：抬高护栏到恢复位置 +1.5s，避免恢复瞬间
                                 // （若历史位置恰落在标注片段内）被空降跳过立即覆盖
@@ -3879,7 +4091,7 @@ Rectangle {
                                 var sseg = pageRoot.sponsorSegments[ssi]
                                 if (sponsorPosSec >= sseg.start && sponsorPosSec < sseg.end - 0.5) {
                                     pageRoot._sponsorSkipGuardMs = position + 1500
-                                    mpvPlayer.seek(sseg.end * 1000)
+                                    pageRoot.doSeek(sseg.end * 1000)
                                     pageRoot.showSponsorSkip(sseg)
                                     SponsorBlockManager.reportViewed(sseg.uuid)
                                     break
@@ -4405,7 +4617,7 @@ Rectangle {
                                         return pageRoot.formatDuration(Math.floor(modelData.from)) + "  " + t
                                     }
                                     onTriggered: {
-                                        mpvPlayer.seek(modelData.from * 1000)
+                                        pageRoot.doSeek(modelData.from * 1000)
                                     }
                                 }
                             }
@@ -4478,9 +4690,13 @@ Rectangle {
                                 to: mpvPlayer.duration > 0 ? mpvPlayer.duration : (pageRoot.videoDuration > 0 ? pageRoot.videoDuration * 1000 : 1)
                                 value: mpvPlayer.position
                                 text: pageRoot.formatDuration(Math.floor(value / 1000))
-                                onMoved: {
-                                    mpvPlayer.seek(value)
-                                }
+                                // 拖动中**不能**每次移动都 seek：DASH 是两条 HTTP
+                                // 流，每次 seek 都要中断 demuxer 重新定位并等网络，
+                                // 拖 100 像素就是 100 次排队。网络稍抖就把 core 堵死，
+                                // 表现为"进度条卡住、再拖也没反应"（2026-10-30 日志：
+                                // 22:39:32 起 28 秒空白，期间 seek 只能排 cascade）。
+                                // 改为防抖：拖动中只更新显示，停手 180ms 后才发一次。
+                                onMoved: { pageRoot._seekPendingMs = value; seekDebounce.restart() }
 
                                 // 覆写背景：复刻 FluSlider 原样式（灰底槽 + 主题色
                                 // 已播放条）+ 章节刻度层。无章节时刻度层空转，
@@ -4648,7 +4864,7 @@ Rectangle {
                                         var duration = mpvPlayer.duration > 0 ? mpvPlayer.duration
                                                                                   : (pageRoot.videoDuration > 0 ? pageRoot.videoDuration * 1000 : 0)
                                         if (duration > 0 && mpvPlayer.position >= duration - 500) {
-                                            mpvPlayer.seek(0)
+                                            pageRoot.doSeek(0)
                                         }
                                         mpvPlayer.play()
                                     }
@@ -5884,7 +6100,7 @@ Rectangle {
                                                             // 时间戳：本页有播放器上下文，跳转进度
                                                             //（是否可点已在格式化阶段按"数字边界 + 不超时长"校验过）
                                                             if (link.indexOf("timestamp:") === 0) {
-                                                                mpvPlayer.seek(parseInt(link.substring("timestamp:".length), 10))
+                                                                pageRoot.doSeek(parseInt(link.substring("timestamp:".length), 10))
                                                             } else if (!GlobalState.openCommentLink(link, App)) {
                                                                 // App 必须显式传入：GlobalState 是 pragma Singleton，
                                                                 // 内部解析不到 main.cpp 的上下文属性 App
@@ -6294,7 +6510,7 @@ Rectangle {
                                                             // 时间戳：本页有播放器上下文，跳转进度
                                                             //（是否可点已在格式化阶段按"数字边界 + 不超时长"校验过）
                                                             if (link.indexOf("timestamp:") === 0) {
-                                                                mpvPlayer.seek(parseInt(link.substring("timestamp:".length), 10))
+                                                                pageRoot.doSeek(parseInt(link.substring("timestamp:".length), 10))
                                                             } else if (!GlobalState.openCommentLink(link, App)) {
                                                                 // App 必须显式传入：GlobalState 是 pragma Singleton，
                                                                 // 内部解析不到 main.cpp 的上下文属性 App
@@ -7264,7 +7480,8 @@ Rectangle {
                     to: mpvPlayer.duration > 0 ? mpvPlayer.duration : (pageRoot.videoDuration > 0 ? pageRoot.videoDuration * 1000 : 1)
                     value: mpvPlayer.position
                     text: pageRoot.formatDuration(Math.floor(value / 1000))
-                    onMoved: mpvPlayer.seek(value)
+                    // 与主进度条同策略：防抖后再 seek（见 progressSlider 注释）
+                    onMoved: { pageRoot._seekPendingMs = value; seekDebounce.restart() }
                 }
 
                 FluText {

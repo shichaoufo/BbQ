@@ -100,6 +100,90 @@ bool PlayUrlManager::isOfficialCDN(const QString &url)
     return url.contains("bilivideo.com") || url.contains("akamaized.net");
 }
 
+namespace {
+
+// CDN 厂商白名单（只列**国内**节点）。数组下标即优先级：
+//   0 = 华为云（最优先）  1 = 腾讯云  2 = 阿里云
+// 刻意排除：海外节点（upos-sz-mirrorhwov / aliov / cosov、Akamai 的
+// akamaized.net、香港 hk_bcache）以及金山云 ks3 —— 按要求只在这三家国内
+// 节点里挑。用**完整 host 相等**匹配而不是 contains，避免 mirrorhwov 被
+// 误判成 mirrorhw 这类子串陷阱。
+const QStringList kCdnHostsByRank[3] = {
+    {   // 0：华为云
+        QStringLiteral("upos-sz-mirrorhwo1.bilivideo.com"),
+        QStringLiteral("upos-sz-mirrorhw.bilivideo.com"),
+        QStringLiteral("upos-sz-mirrorhwb.bilivideo.com"),
+        QStringLiteral("upos-sz-mirror08c.bilivideo.com"),
+        QStringLiteral("upos-sz-mirror08h.bilivideo.com"),
+        QStringLiteral("upos-sz-mirror08ct.bilivideo.com"),
+        QStringLiteral("upos-tf-all-hw.bilivideo.com"),
+    },
+    {   // 1：腾讯云
+        QStringLiteral("upos-sz-mirrorcoso1.bilivideo.com"),
+        QStringLiteral("upos-sz-mirrorcos.bilivideo.com"),
+        QStringLiteral("upos-sz-mirrorcosb.bilivideo.com"),
+        QStringLiteral("upos-tf-all-tx.bilivideo.com"),
+    },
+    {   // 2：阿里云
+        QStringLiteral("upos-sz-mirrorali.bilivideo.com"),
+        QStringLiteral("upos-sz-mirroralib.bilivideo.com"),
+        QStringLiteral("upos-sz-mirroralio1.bilivideo.com"),
+    },
+};
+
+}   // namespace
+
+int PlayUrlManager::cdnVendorRank(const QString &host)
+{
+    if (host.isEmpty()) return -1;
+    const QString h = host.toLower();
+    for (int rank = 0; rank < 3; ++rank) {
+        if (kCdnHostsByRank[rank].contains(h)) return rank;
+    }
+    return -1;
+}
+
+QString PlayUrlManager::pickPreferredCdn(const QString &baseUrl, const QList<QString> &backupUrls)
+{
+    // 候选：baseUrl 在前，备份按服务端给的顺序
+    QList<QString> candidates;
+    candidates.reserve(backupUrls.size() + 1);
+    if (!baseUrl.isEmpty()) candidates.append(baseUrl);
+    for (const QString &u : backupUrls) {
+        if (!u.isEmpty()) candidates.append(u);
+    }
+
+    // 按厂商逐档扫（把华为的所有候选都看完再轮到腾讯），保证"只要有华为
+    // 节点就一定用华为"；同一档内保持服务端给的先后顺序。
+    // 返回的是候选里的原始 URL —— 不改 host，签名天然有效。
+    for (int rank = 0; rank < 3; ++rank) {
+        for (const QString &u : candidates) {
+            const QString host = QUrl(u).host().toLower();
+            if (cdnVendorRank(host) == rank) {
+                if (u != baseUrl) {
+                    qDebug() << "[PlayUrlManager] CDN priority pick, rank" << rank
+                             << "(0=hw 1=cos 2=ali):" << host;
+                }
+                return u;
+            }
+        }
+    }
+    return QString();
+}
+
+void PlayUrlManager::sortBackupsByCdnPriority(QList<QString> &urls)
+{
+    // stable_sort：同档位内保持服务端给的原始顺序
+    std::stable_sort(urls.begin(), urls.end(), [](const QString &a, const QString &b) {
+        const int ra = cdnVendorRank(QUrl(a).host().toLower());
+        const int rb = cdnVendorRank(QUrl(b).host().toLower());
+        // 不参与优先级的（PCDN/海外/未知）排最后
+        const int ka = (ra < 0) ? 99 : ra;
+        const int kb = (rb < 0) ? 99 : rb;
+        return ka < kb;
+    });
+}
+
 bool PlayUrlManager::isPCDN(const QString &url)
 {
     // PCDN 节点是不包含官方 CDN 域名的节点
@@ -130,7 +214,17 @@ QString PlayUrlManager::getOfficialCDNFromBackups(const QString &baseUrl, const 
 QString PlayUrlManager::handleUrl(const QString &baseUrl, const QList<QString> &backupUrls, bool isProxy)
 {
     if (baseUrl.isEmpty()) return baseUrl;
-    
+
+    // 步骤0：CDN 厂商优先级（华为 > 腾讯 > 阿里，不含海外节点）。
+    // 从 baseUrl + backupUrls 里按该顺序挑一条原始 URL 直接用；挑不到才
+    // 走后面的老逻辑。例外：用户手动开了"全部替换"并指定了服务器时，
+    // 以手动手准（设置项优先级高于自动挑）。
+    const bool manualOverride = (m_cdnReplaceMode == 1 && !m_cdnServer.isEmpty());
+    if (!manualOverride) {
+        const QString preferred = pickPreferredCdn(baseUrl, backupUrls);
+        if (!preferred.isEmpty()) return preferred;
+    }
+
     QString optimizedUrl = baseUrl;
     bool isPCDN = PlayUrlManager::isPCDN(baseUrl);
     
@@ -514,6 +608,7 @@ void PlayUrlManager::parsePlayUrlData(const QByteArray &data, int quality, const
                         flvBackupUrls.append(bu.toString());
                 }
                 QString baseFlvUrl = firstSeg["url"].toString();
+                sortBackupsByCdnPriority(flvBackupUrls);
                 result.flvUrl = handleUrl(baseFlvUrl, flvBackupUrls);
                 playInfo.flvUrl = result.flvUrl;
                 playInfo.videoUrl = result.flvUrl;
@@ -549,10 +644,10 @@ void PlayUrlManager::parsePlayUrlData(const QByteArray &data, int quality, const
                     flvBackupUrls.append(backup.toString());
                 }
             }
-            playInfo.flvBackupUrls = flvBackupUrls;
-            
             // 使用 handleUrl 处理 FLV URL
             QString baseFlvUrl = firstDurl["url"].toString();
+            sortBackupsByCdnPriority(flvBackupUrls);
+            playInfo.flvBackupUrls = flvBackupUrls;
             result.flvUrl = handleUrl(baseFlvUrl, flvBackupUrls);
             playInfo.flvUrl = result.flvUrl;
             playInfo.videoUrl = result.flvUrl;
@@ -601,6 +696,10 @@ void PlayUrlManager::parsePlayUrlData(const QByteArray &data, int quality, const
                         videoBackupUrls.append(backup.toString());
                     }
                 }
+                // 备份也按 CDN 优先级排（华为 > 腾讯 > 阿里）：重试路径按
+                // playbackRetryCount 轮换这些备份，不排序则第一次重试就落到
+                // 低优先级节点上
+                sortBackupsByCdnPriority(videoBackupUrls);
                 info.videoBackupUrls = videoBackupUrls;
                 
                 // 使用 handleUrl 处理视频 URL（优先官方 CDN，支持 CDN 替换）
@@ -661,6 +760,8 @@ void PlayUrlManager::parsePlayUrlData(const QByteArray &data, int quality, const
                         audioBackupUrls.append(backup.toString());
                     }
                 }
+                // 音频备份同样按 CDN 优先级排序（与视频保持一致）
+                sortBackupsByCdnPriority(audioBackupUrls);
                 info.audioBackupUrls = audioBackupUrls;
                 
                 // 使用 handleUrl 处理音频 URL

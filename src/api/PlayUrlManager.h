@@ -643,7 +643,20 @@ private:
     
     // 从备选 URL 列表中获取第一个官方 CDN URL
     static QString getOfficialCDNFromBackups(const QString &baseUrl, const QList<QString> &backupUrls);
-    
+
+    // CDN 厂商优先级：华为云 > 腾讯云 > 阿里云（不含海外节点）。
+    // 从 baseUrl + backupUrls 里按该优先级挑第一条，挑不到返回空串。
+    // 用的是服务端原始 URL（不改 host），签名天然有效；这里只影响"用哪个
+    // 候选"，不做 host 替换（那是 m_cdnReplaceMode 的活）。
+    static QString pickPreferredCdn(const QString &baseUrl, const QList<QString> &backupUrls);
+    // 该 host 属于哪一档优先级（0=华为, 1=腾讯, 2=阿里, -1=不参与优先级）
+    static int cdnVendorRank(const QString &host);
+    // 把备份列表按 CDN 优先级稳定排序（未知厂商排最后）。
+    // 重试路径（VideoPlayerPage 的 playbackRetryTimer）按 playbackRetryCount
+    // 轮换这些备份，不排序的话第一次重试就落到低优先级节点，"优先级"只在
+    // 首次播放时成立
+    static void sortBackupsByCdnPriority(QList<QString> &urls);
+
     // 处理 URL：优先官方 CDN，支持 CDN 替换
     QString handleUrl(const QString &baseUrl, const QList<QString> &backupUrls, 
                       bool isProxy = false);

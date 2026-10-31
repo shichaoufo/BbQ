@@ -33,9 +33,19 @@ class MpvObjectD3D11 : public QQuickItem
     Q_PROPERTY(bool playing READ playing WRITE setPlaying NOTIFY playingChanged)
     Q_PROPERTY(int position READ position NOTIFY positionChanged)
     Q_PROPERTY(int duration READ duration NOTIFY durationChanged)
+    // 音频时钟（秒）。只给 QML 的音频停滞看门狗**轮询**用，故意不带
+    // NOTIFY：audio-pts 每秒变几十次，走信号会像 position 那样驱动整窗
+    // 绑定重算。QML 在 Timer 里命令式读每次都会重新调用 READ。
+    Q_PROPERTY(qreal audioPts READ audioPts)
+    // 音频 CDN 是否跟随视频（默认开）。关掉后回到"音视频各用服务端给的
+    // 镜像"——音频流反复起不来时说明目标 host 上可能没有该音频对象
+    Q_PROPERTY(bool audioCdnAlign READ audioCdnAlign WRITE setAudioCdnAlign NOTIFY audioCdnAlignChanged)
     Q_PROPERTY(qreal volume READ volume WRITE setVolume NOTIFY volumeChanged)
     Q_PROPERTY(qreal speed READ speed WRITE setSpeed NOTIFY speedChanged)
     Q_PROPERTY(bool hasVideo READ hasVideo NOTIFY hasVideoChanged)
+    // 是否因缓存不足而暂停（mpv 的 paused-for-cache）。播放卡死看门狗靠它
+    // 区分"正常缓冲"（可以多等一会）和"core 卡在 HTTP read"（要尽快重连）
+    Q_PROPERTY(bool buffering READ buffering NOTIFY bufferingChanged)
     Q_PROPERTY(bool seekable READ seekable NOTIFY seekableChanged)
     // 直播模式开关：true=直播（小cache低延迟），false=视频点播（大cache抗抖动）
     // 必须在 setSource 之前设置才生效（mpv 选项在 loadfile 前应用）
@@ -56,6 +66,10 @@ public:
 
     int position() const;
     int duration() const;
+    qreal audioPts() const { return m_audioPts; }
+    bool audioCdnAlign() const { return m_audioCdnAlign; }
+    void setAudioCdnAlign(bool on);
+    bool buffering() const { return m_buffering; }
 
     qreal volume() const;
     void setVolume(qreal volume);
@@ -110,6 +124,8 @@ signals:
     void hasVideoChanged();
     void seekableChanged();
     void liveModeChanged();
+    void audioCdnAlignChanged();
+    void bufferingChanged();
     void fileLoaded();
     void errorOccurred(const QString &error);
     // 音轨在播放途中消失（DASH 音频流断流/解码失败），视频轨还活着。
@@ -185,6 +201,14 @@ private:
     bool m_mpvInitialized = false;
     bool m_desiredPlaying = true;  // 加载新文件后是否自动播放
     int m_position = 0;
+    // 音频时钟（秒，mpv audio-pts）。QML 音频停滞看门狗读它判断"音频还在走
+    // 没有"：EDL 双流里音频那条单独断流时 audio-params 不变 null（音轨仍在），
+    // audioLost 收不到，只能靠时钟不前进这个信号
+    qreal m_audioPts = 0.0;
+    // 音频 CDN 跟随视频（见 alignAudioHostToVideo 注释）
+    bool m_audioCdnAlign = true;
+    // paused-for-cache：mpv 因缓存不足主动暂停
+    bool m_buffering = false;
     // positionChanged 信号节流：time-pos 以视频帧率上报（30fps 视频即
     // 30 次/秒），每次 emit 都驱动 QML 进度条绑定更新 → 整窗合成。
     // pacer tick 与 mpv 事件到达相位错开时各自触发独立呈现（关弹幕

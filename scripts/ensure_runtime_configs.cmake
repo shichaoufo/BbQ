@@ -43,7 +43,8 @@ elseif(EXISTS "${SRC_DIR}/config/mpv.conf")
     message(STATUS "ensure_runtime_configs: 已从 config/mpv.conf 复制")
 else()
     # 兜底：连模板都没有时至少给一份能跑的配置，别让 mpv 读空文件
+    # hr-seek=no 的理由见 config/mpv.conf 注释（default 对向前 seek 仍精确）
     file(WRITE "${_mpvdir}/mpv.conf"
-         "vf=\nhr-seek=yes\nvideo-sync=display-resample\n")
+         "vf=\nhr-seek=no\nvideo-sync=display-resample\n")
     message(STATUS "ensure_runtime_configs: 模板缺失，已写入内置默认 mpv.conf")
 endif()
