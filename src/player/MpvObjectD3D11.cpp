@@ -545,10 +545,16 @@ void MpvObjectD3D11::applyCacheOptions()
         // 视频码率通常是音频的 10-20 倍，同样秒数吃掉的数据量完全不同，
         // 所以"视频先断"是常态。
         setOpt("cache", "yes");
-        setOpt("cache-secs", "45");
-        setOpt("demuxer-max-bytes", "96M");
-        setOpt("demuxer-max-back-bytes", "24M");
-        setOpt("demuxer-readahead-secs", "45");
+        // 折中档（2026-10-31）：原 45s/96M 偏奢侈，而实测把 cache 调小到
+        // 20s/10M 也并不能解决卡顿（卡顿根因是长断流，20s 和 45s 都撑不过，
+        // 见 playbackStallWatchdog 的注释）。取 30s/32M：1080p（约 400KB/s）
+        // 下 cache-secs 先到，32M 用不满；高码率 4K 则由 32M 兜底（约 16s）。
+        // 与看门狗的 buffering 容忍 30s 对齐，不会出现"缓存早空、看门狗还在等"。
+        setOpt("cache-secs", "30");
+        setOpt("demuxer-max-bytes", "32M");
+        // 回看 12M（约 25~30s）：5M 只有 10s 左右，稍微往回拖就必然走网络
+        setOpt("demuxer-max-back-bytes", "12M");
+        setOpt("demuxer-readahead-secs", "30");
         setOpt("vf", "amf_frc");
     }
 }

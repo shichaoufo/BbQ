@@ -1016,12 +1016,13 @@ void MpvObject::applyCacheOptions()
         maxBackBytes = "0";
         readaheadSecs = "10";
     } else {
-        // 视频点播：大cache 抗网络抖动，避免 CDN 短暂断流时 demuxer 缓存
-        // 耗尽而停住。30s 前向 + 64M 字节上限（约 30-60s 1080p 数据），
-        // 16M 回看缓冲（seek 后退时不需重新下载）
+        // 视频点播：抗网络抖动的缓存。30s 前向 + 32M 字节上限（1080p 约
+        // 400KB/s 时 cache-secs 先到、32M 用不满；4K 高码率则由 32M 兜底，
+        // 约 16s），12M 回看缓冲（约 25~30s，往回拖不必重新下载）。
+        // 与 D3D11 实现保持一致；折中档的理由见 MpvObjectD3D11.cpp。
         cacheSecs = "30";
-        maxBytes = "64M";
-        maxBackBytes = "16M";
+        maxBytes = "32M";
+        maxBackBytes = "12M";
         readaheadSecs = "30";
     }
 
