@@ -1203,8 +1203,12 @@ Rectangle {
     }
     // 按钮是否有内容可显示（是否有未结束的天选）。
     // 注意：真正的"隐藏/出现"由 topBar 的 opacity 统一控制（与控制栏其他
-    // 组件一致），这里只管"有没有抽奖"这一维度
-    readonly property bool lotteryButtonVisible: _lotteryId !== "" && _lotteryRemain > 0
+    // 组件一致），这里只管"有没有抽奖"这一维度。
+    // _lotteryDeadline <= 0 只是兜底分支：正常情况下 Anchor/Check 的
+    // time + current_time 能算出准确截止时间，deadline 是真实值；
+    // 万一缺字段则按钮照常显示、不跑倒计时，由 WS 的 END 推送收尾
+    readonly property bool lotteryButtonVisible:
+        _lotteryId !== "" && (_lotteryDeadline <= 0 || _lotteryRemain > 0)
 
     // 结束/到点时的统一清理：状态归零 + 关掉仍挂着的提示弹窗。
     // 弹窗一直没选（既没点参与也没点取消）的情况下，倒计时结束必须让它
@@ -1213,6 +1217,9 @@ Rectangle {
         root._lotteryId = ""
         root._lotteryAward = ""
         root._lotteryRemain = 0
+        // deadline 也要归零：否则下一次"截止时间未知"的天选会继承上次的
+        // 旧时间戳，导致按钮可见性判断错乱
+        root._lotteryDeadline = 0
         root._lotteryRequireType = 0
         root._lotteryDanmu = ""
         root._lotteryGiftPrice = 0
@@ -1221,12 +1228,14 @@ Rectangle {
     }
 
     // 每秒刷新剩余秒；归零即清空状态（按钮消失）。与服务端 ANCHOR_LOT_END
-    // 互为兜底——推送先到就直接清，推送丢了本地倒计时也能收尾
+    // 互为兜底——推送先到就直接清，推送丢了本地倒计时也能收尾。
+    // 截止时间未知（deadline<=0）时不做任何判断：交由 END 推送和复查定时器
     function _refreshLotteryRemain() {
         if (root._lotteryId === "") {
             root._lotteryRemain = 0
             return
         }
+        if (root._lotteryDeadline <= 0) return
         var remain = Math.ceil((root._lotteryDeadline - Date.now()) / 1000)
         if (remain <= 0) {
             root._clearLotteryState()
@@ -1239,8 +1248,23 @@ Rectangle {
         id: lotteryTick
         interval: 1000
         repeat: true
-        running: root._lotteryId !== ""
+        // 只有已知截止时间才 tick（未知时不跑，避免把"0 秒剩余"误判成到点）
+        running: root._lotteryId !== "" && root._lotteryDeadline > 0
         onTriggered: root._refreshLotteryRemain()
+    }
+
+    // 截止时间未知时的复查定时器：进房补查到的天选没有剩余时间，只能靠
+    // 周期性重查 status 来收掉按钮（WS 的 ANCHOR_LOT_END 可能丢、也可能因为
+    // 进房太晚根本没收到过 START/END 这一对）。
+    // 1 分钟一次，只在这个"未知"状态存在时运行，成本可以忽略。
+    Timer {
+        id: lotteryRecheckTimer
+        interval: 60000
+        repeat: true
+        running: root._lotteryId !== "" && root._lotteryDeadline <= 0
+        onTriggered: {
+            if (root.roomId !== "") Api.getLiveAnchorLotteryInfo(String(root.roomId))
+        }
     }
 
     // 参与当前天选（弹窗按钮与常驻按钮共用）
@@ -1441,7 +1465,9 @@ Rectangle {
             root._lotteryRequireType = requireType > 0 ? requireType : 0
             root._lotteryDanmu = danmu || ""
             root._lotteryGiftPrice = giftPrice > 0 ? giftPrice : 0
-            root._lotteryDeadline = Date.now() + Math.max(1, maxTime) * 1000
+            // maxTime 缺失（<=0）时按"截止时间未知"处理，而不是塞个 1 秒
+            // 假值让按钮闪一下就消失（未知时靠 END 推送 + 复查定时器收尾）
+            root._lotteryDeadline = maxTime > 0 ? Date.now() + maxTime * 1000 : 0
             root._refreshLotteryRemain()
             // 本机参与过这场（重连时服务端可能重推 START）：保持"已抽奖"态
             if (root._hasJoinedLottery(lotteryId))
@@ -1565,7 +1591,14 @@ Rectangle {
         // 进房补查到的"进行中天选"。只恢复常驻按钮，不弹提示框：
         // 用户刚进房就糊一脸对话框很烦，需要参与时点顶部「抽奖」即可
         function onLiveAnchorLotteryInfoReady(info) {
-            if (!info || !info.lotteryId) return
+            if (!info || !info.lotteryId) {
+                // 复查拿到"没有了"（data=null / status≠1）：清掉**截止时间未知**
+                // 的那个按钮。已知截止时间的那些由倒计时和 WS END 负责，
+                // 不在这里动（避免请求时序晚到把刚建立的按钮误删）
+                if (root._lotteryId !== "" && root._lotteryDeadline <= 0)
+                    root._clearLotteryState()
+                return
+            }
             // WS 推送已经建立了同一场：不重复处理（否则会把已参与的按钮文案冲掉）
             if (root._lotteryId === info.lotteryId) return
 
@@ -1580,10 +1613,12 @@ Rectangle {
                 deadline = ltMs
             else if (info.maxTime > 0)
                 deadline = now + info.maxTime * 1000
-            else
-                deadline = now + 60000   // 两者都没有：兜底给 1 分钟，等 WS 的 END 收尾
+            // 两者都没有（Anchor/Check 就是这个情况）→ deadline 保持 0，表示
+            // "截止时间未知"：按钮照常显示、不跑倒计时，靠 WS 的 ANCHOR_LOT_END
+            // 和下面的复查定时器收尾。
+            // （以前这里兜底 now+60s，会把还有几分钟才结束的天选在 1 分钟后误删）
 
-            if (deadline <= now) return   // 已经结束，别显示按钮
+            if (deadline > 0 && deadline <= now) return   // 明确已结束，别显示按钮
 
             root._lotteryId = info.lotteryId
             root._lotteryAward = info.awardName || ""
@@ -1598,6 +1633,8 @@ Rectangle {
             if (root._hasJoinedLottery(info.lotteryId))
                 root._lotteryJoinedId = info.lotteryId
             root._refreshLotteryRemain()
+            // 截止时间未知 → 起复查定时器（见 lotteryRecheckTimer）
+            if (deadline <= 0) lotteryRecheckTimer.restart()
         }
     }
 
@@ -1811,7 +1848,12 @@ Rectangle {
             id: videoInfoPanel
             anchors.right: parent.right
             anchors.top: parent.top
-            anchors.margins: Theme.spacingMedium
+            // 右上角那行是「抽奖 / 关注」按钮：它们 anchors.top 也是
+            // Theme.spacingMedium、按钮高约 32~36，所以面板原来用同一个
+            // margins 时正好压在按钮上。这里把上边距单独让出一行按钮的高度
+            anchors.rightMargin: Theme.spacingMedium
+            // 小窗只有 480x270，不加这段偏移，否则面板会被顶出视口
+            anchors.topMargin: Theme.spacingMedium + (root.isMiniWindow ? 0 : 52)
             width: infoColumn.width + 24
             height: infoColumn.height + 24
             color: "#E6000000"

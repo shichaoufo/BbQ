@@ -1961,10 +1961,17 @@ void ApiManager::getLiveAnchorLotteryInfo(const QString &roomId)
     if (roomId.isEmpty())
         return;
 
-    QUrl url("https://api.live.bilibili.com/xlive/lottery-interface/v1/AnchorLottery/Info");
+    // 观众侧「房间当前是否有进行中的天选」查询。
+    // 正确端点是 GET /xlive/lottery-interface/v1/Anchor/Check?roomid=<房间号>
+    // —— 注意参数是 roomid（**无下划线**），字段是 id 而不是 lottery_id。
+    //
+    // 此前写成 /xlive/lottery-interface/v1/AnchorLottery/Info（主播视角的旧
+    // 路径），实测直接返回纯文本 "404 page not found"：JSON 解析失败 →
+    // info 为空 → QML 收到 has:false。表现出来就是"错过推送再进房间没有
+    // 抽奖按钮"，而且日志里看起来像是"房间里确实没有天选"，很难察觉。
+    QUrl url("https://api.live.bilibili.com/xlive/lottery-interface/v1/Anchor/Check");
     QUrlQuery query;
-    query.addQueryItem("room_id", roomId);
-    query.addQueryItem("platform", "web");
+    query.addQueryItem("roomid", roomId);
     url.setQuery(query);
 
     QNetworkRequest request(url);
@@ -1992,29 +1999,54 @@ void ApiManager::getLiveAnchorLotteryInfo(const QString &roomId)
         QJsonDocument doc = QJsonDocument::fromJson(data);
         if (doc.isObject()) {
             QJsonObject root = doc.object();
-            // 未开播 / 无天选时 data 可能是 null，toObject() 会给空对象，
-            // 下面取不到 lottery_id 就按"没有进行中的天选"处理
+            // 没有进行中的天选时 data 为 null（toObject() 给空对象），
+            // 下面取不到 id 就按"没有"处理
             if (root["code"].toInt() == 0) {
                 QJsonObject obj = root["data"].toObject();
-                QString lotteryId = obj["lottery_id"].toString();
-                if (!lotteryId.isEmpty()) {
+                // status：1=进行中，2=已结束。没有该字段的形态按"有 id 即可用"处理
+                const int status = obj.contains("status") ? obj["status"].toInt() : 1;
+                // 该接口的抽奖 id 字段名是 id（不是 lottery_id）；服务端可能
+                // 给数字也可能给字符串，两种都兼容（数字走 toLongLong 避免
+                // 走 double 丢精度）
+                const QJsonValue idVal = obj["id"];
+                const QString lotteryId = idVal.isString()
+                        ? idVal.toString()
+                        : (idVal.isDouble() ? QString::number(idVal.toVariant().toLongLong())
+                                            : QString());
+                if (!lotteryId.isEmpty() && status == 1) {
                     info["lotteryId"] = lotteryId;
                     info["awardName"] = obj["award_name"].toString();
                     info["awardNum"] = obj["award_num"].toInt();
                     info["requireType"] = obj["require_type"].toInt();
                     info["requireText"] = obj["require_text"].toString();
                     info["danmu"] = obj["danmu"].toString();
-                    info["maxTime"] = obj["max_time"].toInt();
-                    // 服务端给的结束时间（unix 秒）；比 max_time 更准，
-                    // QML 优先用它算倒计时
-                    info["lotteryTime"] = obj["lottery_time"].toVariant().toLongLong();
                     info["giftPrice"] = obj["require_gift"].toInt();
+
+                    // 剩余时间：实测 Anchor/Check 的返回里是
+                    //   time         剩余秒数
+                    //   current_time 服务端当前 unix 秒（用来抵消本地时钟偏差）
+                    // 两者相加 = 这场天选的绝对结束时间戳，QML 直接拿它算倒计时。
+                    // （Go 库的 struct 没映射这两个字段，一开始误以为"接口不给
+                    //  时间"，实际是有的）
+                    const int remainSec = obj["time"].toInt();
+                    const qint64 srvNow = obj["current_time"].toVariant().toLongLong();
+                    if (remainSec > 0) {
+                        info["maxTime"] = remainSec;
+                        if (srvNow > 0)
+                            info["lotteryTime"] = srvNow + remainSec;
+                    }
+                    // 服务端给的其它展示字段
+                    info["awardPriceText"] = obj["award_price_text"].toString();
+                    info["joinTotal"] = obj["join_total"].toInt();
+                    info["awardPerCapita"] = obj["award_per_capita"].toInt();
                 }
             }
         }
 
         qWarning() << "[ApiManager] anchor lottery info, has:" << !info.isEmpty()
-                   << "id:" << info.value("lotteryId").toString();
+                   << "id:" << info.value("lotteryId").toString()
+                   << "remain:" << info.value("maxTime").toInt() << "s"
+                   << "raw bytes:" << data.size();
         emit liveAnchorLotteryInfoReady(info);
     });
 }
