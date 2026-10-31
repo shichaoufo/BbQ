@@ -6539,17 +6539,7 @@ Rectangle {
                                         Layout.topMargin: 4
                                         // 内层改用 anchors 定位，不再是本 Layout 的直接
                                         // 子项，所以要显式给出高度：内容高 + 上下各 8px
-                                        //
-                                        // 用 Layout.preferredHeight 而不是 implicitHeight：
-                                        // visible 由 model.repliesExpanded 驱动，
-                                        // 切换时 Layout 曾出现"高度算进去了、位置没排"
-                                        // —— 子项 y 停在 0 与上一项重叠（2026-10-31 日志：
-                                        // Rectangle{y0,h16} 叠在 RowLayout{y0,h150} 上，
-                                        // layoutH 却正确含了这 16px）。preferredHeight
-                                        // 随 visible 变成确定的新值，Layout 必然会重排
-                                        Layout.preferredHeight: visible
-                                                                ? (vpSubReplyLayout.implicitHeight + 16)
-                                                                : 0
+                                        implicitHeight: vpSubReplyLayout.implicitHeight + 16
                                         radius: Theme.radiusMedium
                                         color: FluTheme.frameColor
                                         visible: model.repliesExpanded
