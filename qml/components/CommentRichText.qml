@@ -65,7 +65,16 @@ Item {
 
     // 只绑高度：宽度交给 Layout（实例处用 Layout.fillWidth）。
     // 若这里也绑 implicitWidth，会与子项 width 形成循环绑定。
-    implicitHeight: hasAnimatedEmote ? flow.implicitHeight : plainText.implicitHeight
+    //
+    // 宽度未定（Layout 还没分配）时不贡献高度：否则 Text/Flow 会按 0 宽换行
+    // —— 每字一行 / 表情竖排 —— 把 implicitHeight 撑成几十上百像素。表现就是
+    // 评论里"用户名和正文之间一大块空白"，而且因为只影响高度不影响内容位置，
+    // 只有下一次重排（展开/折叠楼中楼、改窗口大小）才会被纠正
+    // （2026-10-31 用户截图：特定视频的几条评论必现，展开折叠一次即可恢复）。
+    // 宽度一旦分配，这条绑定会重算回真实高度。
+    implicitHeight: root.width > 0
+                    ? (hasAnimatedEmote ? flow.implicitHeight : plainText.implicitHeight)
+                    : 0
 
     // ---------- 路径一：无动态表情，与替换前完全等价 ----------
     Text {
