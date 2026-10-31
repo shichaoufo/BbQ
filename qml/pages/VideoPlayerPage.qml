@@ -2239,12 +2239,34 @@ Rectangle {
     //   3. renderedFrameCount 连续 3 秒不变（真的没有新画面输出）
     // 处理：换 CDN 备份地址 + 回到原位置重播（复用 playbackRetryTimer 那条链路，
     // 它会轮换 videoBackupUrls/audioBackupUrls）。最多自愈 2 次，避免死循环。
+    // 窗口是否最小化/隐藏。看门狗用它排除"不是视频卡了，是窗口压根没在渲染"。
+    // 最小化后 QSG 不再触发渲染 → renderedFrameCount 不增长、position 照走，
+    // 与"视频流被掐断"在数据上完全同构，只能靠这个外部状态区分
+    // （2026-10-31 日志实证：最小化期间 mpv 连刷 "mpv_render_context_render()
+    //  not being called or stuck."，随后被误判成画面卡死、白重连了一次）
+    readonly property bool _windowNotRendering: {
+        var w = Window.window
+        if (!w) return false
+        return w.visibility === Window.Minimized || w.visibility === Window.Hidden
+    }
+
     Timer {
         id: videoStallWatchdog
         interval: 1000
         repeat: true
+        // _windowNotRendering：窗口没在渲染时不做判定（否则最小化 = 必然误判）
         running: pageRoot.visible && mpvPlayer.playing && mpvPlayer.hasVideo
                  && mpvPlayer.duration > 0 && !pageRoot.wasClosed
+                 && !pageRoot._windowNotRendering
+        // 停过再启（最小化恢复、暂停恢复、加载完成）：旧的位置/帧数记录已过期，
+        // 清零重来，否则第一秒就可能拿恢复前的值做差、误判成卡住
+        onRunningChanged: {
+            if (running) {
+                pageRoot._stallTicks = 0
+                pageRoot._stallLastFrames = -1
+                pageRoot._stallLastPos = -1
+            }
+        }
         onTriggered: {
             var frames = mpvPlayer.renderedFrameCount()
             var pos = mpvPlayer.position
@@ -7164,6 +7186,7 @@ Rectangle {
 
                 // ---------- UP主投稿页 ----------
                 Flickable {
+                    id: upVideoFlick
                     Layout.fillWidth: true
                     Layout.fillHeight: true
                     clip: true
@@ -7213,6 +7236,10 @@ Rectangle {
                             pageSize: 20
                             pageCurrent: pageRoot.uploadPage
                             onRequestPage: function (page, count) {
+                                // 翻页后回到列表顶部：用户通常滚到列表底部才点页码，
+                                // 不归零的话新一页会继承旧的 contentY，停在半截处，
+                                // 看起来像"没翻页"。内容随后异步替换，contentY 保持在 0。
+                                upVideoFlick.contentY = 0
                                 pageRoot.loadUploadsPage(page, count)
                             }
                         }
