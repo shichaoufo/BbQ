@@ -304,8 +304,15 @@ QtObject {
         var src = _cmtIconSrc(u)
         if (!src) return ""
         // 只给 height，宽度交给 Qt 按图片真实比例推（见上）。给死 width 就会变形。
+        //
+        // 必须写 HTML 属性 align="middle"：Qt 富文本**不解析 CSS 的
+        // vertical-align**，只认 <img> 的 align 属性（映射到
+        // QTextImageFormat::verticalAlignment）。只给 style 时图片按默认
+        // align="bottom" 对齐到文字基线，看起来比旁边文字低一截
+        // （评论里播放/购物袋/淘宝/京东这些链接小标签就是这个问题）。
+        // style 一并保留，纯属对其它渲染路径无害。
         return '<img src="' + _cmtEscAttr(src)
-             + '" height="20" style="vertical-align:middle;">'
+             + '" height="20" align="middle" style="vertical-align:middle;">'
     }
     // ============ 断行 ============
     // 长 URL 在 Text.Wrap 下整串被当成一个"词"，没有任何断行机会，
