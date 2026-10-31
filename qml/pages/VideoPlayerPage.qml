@@ -2282,11 +2282,19 @@ Rectangle {
             var backupUrls = info.videoBackupUrls || []
             var audioBackupUrls = info.audioBackupUrls || []
             var backupIndex = pageRoot.playbackRetryCount % (backupUrls.length + 1)
-            
+
+            // 用户固定了视频源（设置里选了华为/腾讯/阿里）时**不要**轮换备份：
+            // info.videoUrl 已被 C++ 侧换成指定的 host，而 backupUrls 没走
+            // handleUrl（还是服务端原始顺序，可能含 cn-sccd/bcache 这类自建
+            // 节点）。换备份等于换 CDN，既违背"固定"的语义，也更容易踩到返回
+            // 内容不完整的坏节点 —— 2026-10-31 日志里正是轮到 bcache 后
+            // FFmpeg 报 partial file 直接 EOF，被判成播完、画面冻住。
+            var fixedCdn = PlayUrlManager.cdnVendorPreference() > 0
+
             if (info.flvUrl && info.flvUrl !== "") {
                 // FLV 格式：优先使用备选 URL
                 var flvBackupUrls = info.flvBackupUrls || []
-                if (pageRoot.playbackRetryCount > 0 && flvBackupUrls.length > 0) {
+                if (!fixedCdn && pageRoot.playbackRetryCount > 0 && flvBackupUrls.length > 0) {
                     var flvBackupIndex = (pageRoot.playbackRetryCount - 1) % flvBackupUrls.length
                     mpvPlayer.source = flvBackupUrls[flvBackupIndex]
                 } else {
@@ -2298,11 +2306,11 @@ Rectangle {
                 var finalVideoUrl = videoUrl
                 var finalAudioUrl = audioUrl
                 
-                if (pageRoot.playbackRetryCount > 0 && backupUrls.length > 0) {
+                if (!fixedCdn && pageRoot.playbackRetryCount > 0 && backupUrls.length > 0) {
                     finalVideoUrl = backupUrls[(pageRoot.playbackRetryCount - 1) % backupUrls.length]
                 }
 
-                if (pageRoot.playbackRetryCount > 0 && audioBackupUrls.length > 0) {
+                if (!fixedCdn && pageRoot.playbackRetryCount > 0 && audioBackupUrls.length > 0) {
                     finalAudioUrl = audioBackupUrls[(pageRoot.playbackRetryCount - 1) % audioBackupUrls.length]
                 }
                 
@@ -8034,6 +8042,42 @@ Rectangle {
                         clickListener: function() {
                             pageRoot.miniProgressEnabled = !pageRoot.miniProgressEnabled
                             savePlayerSettings()
+                        }
+                    }
+                }
+
+                // 视频源（CDN）。默认固定华为云。
+                //
+                // 为什么要让用户固定：长视频是单条 HTTP 连接流式读取整个 m4s，
+                // 连接得活十几分钟，中途被 CDN 回收很常见。重连若轮换到
+                // cn-sccd / bcache 这类自建节点，它返回的流不完整（FFmpeg 报
+                // "partial file" 后直接 EOF），会被判定成"视频正常播完"、
+                // 画面冻住 —— 比单纯断一下严重得多（2026-10-31 日志实证）。
+                // 固定单 CDN 后重连始终回同一家，不会漂到坏节点。
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 12
+
+                    FluText {
+                        text: "视频源"
+                        font: FluTextStyle.Body
+                        color: FluTheme.fontPrimaryColor
+                        Layout.fillWidth: true
+                        wrapMode: Text.Wrap
+                    }
+
+                    FluComboBox {
+                        id: cdnVendorCombo
+                        Layout.preferredWidth: 132
+                        model: ["自动", "华为云", "腾讯云", "阿里云"]
+                        // 函数不是属性，绑定不会自动更新，这里只取一次初值
+                        Component.onCompleted: {
+                            var v = PlayUrlManager.cdnVendorPreference()
+                            if (v >= 0 && v < model.length) currentIndex = v
+                        }
+                        onActivated: function(index) {
+                            PlayUrlManager.setCdnVendorPreference(index)
+                            pageInfoBar.showInfo("已切换视频源，重新打开视频生效")
                         }
                     }
                 }

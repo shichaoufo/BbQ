@@ -72,9 +72,58 @@ PlayUrlManager::PlayUrlManager(QObject *parent)
     if (appSettings) {
         m_cdnReplaceMode = appSettings->getInt("cdnReplaceMode", 0);
         m_cdnServer = appSettings->getString("cdnServer", "upos-sz-mirrorhwo1.bilivideo.com");
-        qDebug() << "[PlayUrlManager] CDN settings loaded: mode=" << m_cdnReplaceMode 
-                 << "server=" << m_cdnServer;
+        // 视频源（固定 CDN）优先：有 cdnVendor 就按它覆盖 mode/server，
+        // 免得用户选过"华为"、下次启动又回到"自动"
+        m_cdnVendor = appSettings->getInt("cdnVendor", 1);
+        applyCdnVendor(m_cdnVendor);
+        qDebug() << "[PlayUrlManager] CDN settings loaded: vendor=" << m_cdnVendor
+                 << "mode=" << m_cdnReplaceMode << "server=" << m_cdnServer;
     }
+}
+
+// 视频源偏好 → CDN 替换参数。
+//   0 = 自动：mode 归 0，handleUrl 走 pickPreferredCdn（华为>腾讯>阿里）
+//   1/2/3 = 固定：mode 设 1（全部替换），host 换成对应云厂商
+// 固定档会把 URL 的 host 换掉，B 站 upsig 不绑 host（与 PiliPlus 同法），
+// 签名仍然有效。这样视频与备份列表里的节点都固定在同一家，重连不会漂到
+// cn-sccd/bcache 这类会返回不完整内容的节点。
+void PlayUrlManager::applyCdnVendor(int vendor)
+{
+    static const char *kHosts[4] = {
+        "",                                     // 0 自动
+        "upos-sz-mirrorhwo1.bilivideo.com",     // 1 华为云
+        "upos-sz-mirrorcos.bilivideo.com",      // 2 腾讯云
+        "upos-sz-mirrorali.bilivideo.com",      // 3 阿里云
+    };
+    if (vendor < 0 || vendor > 3) vendor = 1;
+    if (vendor == 0) {
+        m_cdnReplaceMode = 0;
+    } else {
+        m_cdnServer = QString::fromLatin1(kHosts[vendor]);
+        m_cdnReplaceMode = 1;
+    }
+}
+
+int PlayUrlManager::cdnVendorPreference() const
+{
+    return m_cdnVendor;
+}
+
+void PlayUrlManager::setCdnVendorPreference(int vendor)
+{
+    if (vendor < 0 || vendor > 3) vendor = 1;
+    m_cdnVendor = vendor;
+    applyCdnVendor(vendor);
+
+    AppSettings *s = AppSettings::instance();
+    if (s) {
+        s->setInt("cdnVendor", vendor);
+        // 同步写回老的两个键：别处（refreshCDNSettings / 设置面板）还在读它们
+        s->setInt("cdnReplaceMode", m_cdnReplaceMode);
+        s->setString("cdnServer", m_cdnServer);
+    }
+    qDebug() << "[PlayUrlManager] cdn vendor ->" << vendor
+             << "mode=" << m_cdnReplaceMode << "server=" << m_cdnServer;
 }
 
 PlayUrlManager::~PlayUrlManager()
@@ -302,8 +351,11 @@ void PlayUrlManager::refreshCDNSettings()
     if (appSettings) {
         m_cdnReplaceMode = appSettings->getInt("cdnReplaceMode", 0);
         m_cdnServer = appSettings->getString("cdnServer", "upos-sz-mirrorhwo1.bilivideo.com");
-        qDebug() << "[PlayUrlManager] CDN settings refreshed: mode=" << m_cdnReplaceMode 
-                 << "server=" << m_cdnServer;
+        // 视频源偏好优先级更高：否则刷新一次就把用户选的固定档冲回"自动"
+        m_cdnVendor = appSettings->getInt("cdnVendor", 1);
+        applyCdnVendor(m_cdnVendor);
+        qDebug() << "[PlayUrlManager] CDN settings refreshed: vendor=" << m_cdnVendor
+                 << "mode=" << m_cdnReplaceMode << "server=" << m_cdnServer;
     }
 }
 

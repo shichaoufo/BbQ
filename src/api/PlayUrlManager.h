@@ -106,6 +106,21 @@ public:
     // 下次打开视频走全新连接，等价重启客户端的连接层效果，规避 480P 降级
     Q_INVOKABLE void resetConnectionState();
 
+    // ===== 视频源（CDN）选择 =====
+    //
+    // 0=自动（按 华为 > 腾讯 > 阿里 的优先级从服务端下发的候选里挑一条原始
+    //   URL，不改 host），1=固定华为云、2=固定腾讯云、3=固定阿里云
+    // （固定档会把 URL 的 host 换掉；B 站 upsig 不绑 host，换 host 仍有效，
+    //  与 PiliPlus 同法）。
+    //
+    // 为什么要让用户固定：长视频是单条 HTTP 连接流式读取整个 m4s，连接要活
+    // 十几分钟；一旦被 CDN 回收，重连若轮换到 cn-sccd/bcache 这类自建节点，
+    // 它返回的流不完整（FFmpeg 报 "partial file" 后直接 EOF），比"断一下"
+    // 严重得多 —— 会被判定为视频正常播完，画面冻住。固定单 CDN 可以彻底
+    // 避免轮换到坏节点（2026-10-31 日志实证）。
+    Q_INVOKABLE int cdnVendorPreference() const;
+    Q_INVOKABLE void setCdnVendorPreference(int vendor);
+
     // 通过aid获取视频播放URL（简化接口）
     Q_INVOKABLE void getVideoUrlByAid(const QString &aid, const QString &overrideCid = QString());
 
@@ -678,6 +693,12 @@ private:
     // CDN 替换模式：0=不替换, 1=全部替换, 2=仅替换PCDN, 3=仅替换代理
     int m_cdnReplaceMode = 0;
     QString m_cdnServer = "upos-sz-mirrorhwo1.bilivideo.com";  // 默认华为云
+
+    // 视频源偏好：0=自动，1=华为，2=腾讯，3=阿里（见 cdnVendorPreference 注释）
+    int m_cdnVendor = 1;
+
+    // 把 m_cdnVendor 落到 m_cdnReplaceMode / m_cdnServer 上
+    void applyCdnVendor(int vendor);
 };
 
 #endif // PLAYURLMANAGER_H
