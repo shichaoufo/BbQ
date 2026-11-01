@@ -117,6 +117,11 @@ Rectangle {
     // 进度条拖动防抖：拖动中累积的目标位置，停手 180ms 才真正 seek
     // （拖动每像素一次 seek 会堵死两条 HTTP 流的 demuxer，见 progressSlider 注释）
     property int _seekPendingMs: 0
+    // 进度条显示值锁定：-1 表示跟随 mpvPlayer.position。
+    // 点击/拖动进度条后设为目标位置并锁定一段时间 —— 因为 seek 是异步的
+    // （180ms 防抖 + mpv 处理），期间 position 还是旧值，若 value 直接绑
+    // position，滑块会被拽回原位再跳过去，表现为"在点击处和原位之间来回闪"。
+    property int _seekDisplayMs: -1
     // seek 卡死看门狗的状态：最后一次 seek 的发起时间与目标位置。
     // 见 seekStallWatchdog
     property double _seekRequestedAt: 0
@@ -2289,7 +2294,8 @@ Rectangle {
             // 节点）。换备份等于换 CDN，既违背"固定"的语义，也更容易踩到返回
             // 内容不完整的坏节点 —— 2026-10-31 日志里正是轮到 bcache 后
             // FFmpeg 报 partial file 直接 EOF，被判成播完、画面冻住。
-            var fixedCdn = PlayUrlManager.cdnVendorPreference() > 0
+            // cdnMode: 0=默认(不干预) 1=自动 2/3/4=固定 → 只有 >=2 才锁死备份
+            var fixedCdn = PlayUrlManager.cdnMode() >= 2
 
             if (info.flvUrl && info.flvUrl !== "") {
                 // FLV 格式：优先使用备选 URL
@@ -2412,6 +2418,25 @@ Rectangle {
         onTriggered: {
             if (mpvPlayer.duration > 0 && pageRoot._seekPendingMs >= 0) {
                 pageRoot.doSeek(pageRoot._seekPendingMs)
+            }
+        }
+    }
+
+    // 进度条显示锁定的释放：position 追到目标附近（<1.5s）就立即解锁，
+    // 让滑块回到跟随真实位置；迟迟追不上（seek 被网络拖住）则 3 秒后解锁，
+    // 避免滑块长时间停在"并未真正到达"的位置上骗人。
+    Timer {
+        id: seekDisplayRelease
+        interval: 100
+        repeat: true
+        running: pageRoot._seekDisplayMs >= 0
+        property int ticks: 0
+        onTriggered: {
+            ticks += 1
+            var reached = Math.abs(mpvPlayer.position - pageRoot._seekDisplayMs) < 1500
+            if (reached || ticks > 30) {
+                pageRoot._seekDisplayMs = -1
+                ticks = 0
             }
         }
     }
@@ -3531,6 +3556,8 @@ Rectangle {
             // seek 看门狗复位（旧流上的 seek 目标对新流无意义）
             pageRoot._seekRequestedAt = 0
             pageRoot._seekPendingMs = 0
+            // 新流上进度条重新跟随真实位置（清掉上一条流遗留的显示锁定）
+            pageRoot._seekDisplayMs = -1
             // 播放停滞看门狗复位（新流重新计数）
             pageRoot._playbackStallTicks = 0
             pageRoot._lastPlaybackPos = -1
@@ -4813,7 +4840,10 @@ Rectangle {
                                 anchors.right: parent.right
                                 from: 0
                                 to: mpvPlayer.duration > 0 ? mpvPlayer.duration : (pageRoot.videoDuration > 0 ? pageRoot.videoDuration * 1000 : 1)
-                                value: mpvPlayer.position
+                                // 锁定期间（_seekDisplayMs >= 0）显示点击/拖动的目标位置，
+                                // 否则跟随真实播放位置。避免 seek 生效前被旧 position 拽回、
+                                // 表现为"滑块在点击处和原位之间来回闪"。
+                                value: pageRoot._seekDisplayMs >= 0 ? pageRoot._seekDisplayMs : mpvPlayer.position
                                 text: pageRoot.formatDuration(Math.floor(value / 1000))
                                 // 拖动中**不能**每次移动都 seek：DASH 是两条 HTTP
                                 // 流，每次 seek 都要中断 demuxer 重新定位并等网络，
@@ -4821,7 +4851,12 @@ Rectangle {
                                 // 表现为"进度条卡住、再拖也没反应"（2026-10-30 日志：
                                 // 22:39:32 起 28 秒空白，期间 seek 只能排 cascade）。
                                 // 改为防抖：拖动中只更新显示，停手 180ms 后才发一次。
-                                onMoved: { pageRoot._seekPendingMs = value; seekDebounce.restart() }
+                                onMoved: {
+                                    pageRoot._seekPendingMs = value
+                                    pageRoot._seekDisplayMs = value   // 锁住显示，别被旧 position 拽回
+                                    seekDisplayRelease.ticks = 0
+                                    seekDebounce.restart()
+                                }
 
                                 // 覆写背景：复刻 FluSlider 原样式（灰底槽 + 主题色
                                 // 已播放条）+ 章节刻度层。无章节时刻度层空转，
@@ -7639,10 +7674,16 @@ Rectangle {
                     Layout.fillWidth: true
                     from: 0
                     to: mpvPlayer.duration > 0 ? mpvPlayer.duration : (pageRoot.videoDuration > 0 ? pageRoot.videoDuration * 1000 : 1)
-                    value: mpvPlayer.position
+                    // 与主进度条同策略：锁定显示值防回弹（见 progressSlider 注释）
+                    value: pageRoot._seekDisplayMs >= 0 ? pageRoot._seekDisplayMs : mpvPlayer.position
                     text: pageRoot.formatDuration(Math.floor(value / 1000))
                     // 与主进度条同策略：防抖后再 seek（见 progressSlider 注释）
-                    onMoved: { pageRoot._seekPendingMs = value; seekDebounce.restart() }
+                    onMoved: {
+                        pageRoot._seekPendingMs = value
+                        pageRoot._seekDisplayMs = value
+                        seekDisplayRelease.ticks = 0
+                        seekDebounce.restart()
+                    }
                 }
 
                 FluText {
@@ -8069,14 +8110,15 @@ Rectangle {
                     FluComboBox {
                         id: cdnVendorCombo
                         Layout.preferredWidth: 132
-                        model: ["自动", "华为云", "腾讯云", "阿里云"]
+                        // 0=默认(不干预) 1=自动(按华为>腾讯>阿里挑) 2/3/4=固定厂商
+                        model: ["默认（不干预）", "自动", "华为云", "腾讯云", "阿里云"]
                         // 函数不是属性，绑定不会自动更新，这里只取一次初值
                         Component.onCompleted: {
-                            var v = PlayUrlManager.cdnVendorPreference()
+                            var v = PlayUrlManager.cdnMode()
                             if (v >= 0 && v < model.length) currentIndex = v
                         }
                         onActivated: function(index) {
-                            PlayUrlManager.setCdnVendorPreference(index)
+                            PlayUrlManager.setCdnMode(index)
                             pageInfoBar.showInfo("已切换视频源，重新打开视频生效")
                         }
                     }

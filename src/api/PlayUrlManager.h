@@ -108,18 +108,16 @@ public:
 
     // ===== 视频源（CDN）选择 =====
     //
-    // 0=自动（按 华为 > 腾讯 > 阿里 的优先级从服务端下发的候选里挑一条原始
-    //   URL，不改 host），1=固定华为云、2=固定腾讯云、3=固定阿里云
-    // （固定档会把 URL 的 host 换掉；B 站 upsig 不绑 host，换 host 仍有效，
-    //  与 PiliPlus 同法）。
-    //
-    // 为什么要让用户固定：长视频是单条 HTTP 连接流式读取整个 m4s，连接要活
-    // 十几分钟；一旦被 CDN 回收，重连若轮换到 cn-sccd/bcache 这类自建节点，
-    // 它返回的流不完整（FFmpeg 报 "partial file" 后直接 EOF），比"断一下"
-    // 严重得多 —— 会被判定为视频正常播完，画面冻住。固定单 CDN 可以彻底
-    // 避免轮换到坏节点（2026-10-31 日志实证）。
-    Q_INVOKABLE int cdnVendorPreference() const;
-    Q_INVOKABLE void setCdnVendorPreference(int vendor);
+    // 三种行为：
+    //   0 = 默认（不干预）：服务端给什么 URL 就用什么，不挑也不换 host。
+    //       用于排除"CDN 干预本身引入问题"的可能 —— 2026-11-01 发现固定
+    //       华为后 URL 仍是 os=bcache 参数，属于自造的不一致。
+    //   1 = 自动：从 baseUrl + 备份里按 华为 > 腾讯 > 阿里 挑一条**原始 URL**
+    //       （不改 host，参数天然匹配）。
+    //   2/3/4 = 固定华为 / 腾讯 / 阿里：优先在候选里挑该厂商的原始 URL；
+    //       服务端这次没给该厂商时，才退回"替换 host"兜底。
+    Q_INVOKABLE int cdnMode() const;
+    Q_INVOKABLE void setCdnMode(int mode);
 
     // 通过aid获取视频播放URL（简化接口）
     Q_INVOKABLE void getVideoUrlByAid(const QString &aid, const QString &overrideCid = QString());
@@ -663,7 +661,9 @@ private:
     // 从 baseUrl + backupUrls 里按该优先级挑第一条，挑不到返回空串。
     // 用的是服务端原始 URL（不改 host），签名天然有效；这里只影响"用哪个
     // 候选"，不做 host 替换（那是 m_cdnReplaceMode 的活）。
-    static QString pickPreferredCdn(const QString &baseUrl, const QList<QString> &backupUrls);
+    // onlyVendor：0 = 不限（按 华为>腾讯>阿里 挑）；1/2/3 = 只要该厂商的原始 URL
+    static QString pickPreferredCdn(const QString &baseUrl, const QList<QString> &backupUrls,
+                                    int onlyVendor = 0);
     // 该 host 属于哪一档优先级（0=华为, 1=腾讯, 2=阿里, -1=不参与优先级）
     static int cdnVendorRank(const QString &host);
     // 把备份列表按 CDN 优先级稳定排序（未知厂商排最后）。
@@ -694,11 +694,14 @@ private:
     int m_cdnReplaceMode = 0;
     QString m_cdnServer = "upos-sz-mirrorhwo1.bilivideo.com";  // 默认华为云
 
-    // 视频源偏好：0=自动，1=华为，2=腾讯，3=阿里（见 cdnVendorPreference 注释）
-    int m_cdnVendor = 1;
+    // 视频源偏好：0=默认(不干预) 1=自动(按优先级挑) 2=华为 3=腾讯 4=阿里
+    // （见 cdnMode 注释）
+    int m_cdnMode = 0;
+    // 内部用：0=不限厂商，1=华为，2=腾讯，3=阿里（固定档时由 m_cdnMode 推得）
+    int m_cdnVendor = 0;
 
-    // 把 m_cdnVendor 落到 m_cdnReplaceMode / m_cdnServer 上
-    void applyCdnVendor(int vendor);
+    // 把 m_cdnMode 落到 m_cdnReplaceMode / m_cdnServer / m_cdnVendor 上
+    void applyCdnMode(int mode);
 };
 
 #endif // PLAYURLMANAGER_H

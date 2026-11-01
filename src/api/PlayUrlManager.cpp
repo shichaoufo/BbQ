@@ -72,12 +72,13 @@ PlayUrlManager::PlayUrlManager(QObject *parent)
     if (appSettings) {
         m_cdnReplaceMode = appSettings->getInt("cdnReplaceMode", 0);
         m_cdnServer = appSettings->getString("cdnServer", "upos-sz-mirrorhwo1.bilivideo.com");
-        // 视频源（固定 CDN）优先：有 cdnVendor 就按它覆盖 mode/server，
-        // 免得用户选过"华为"、下次启动又回到"自动"
-        m_cdnVendor = appSettings->getInt("cdnVendor", 1);
-        applyCdnVendor(m_cdnVendor);
-        qDebug() << "[PlayUrlManager] CDN settings loaded: vendor=" << m_cdnVendor
-                 << "mode=" << m_cdnReplaceMode << "server=" << m_cdnServer;
+        // 视频源偏好优先，覆盖上面两个老键；出厂默认 0 = 不干预
+        //（旧键 cdnVendor 不再读取 —— 语义从"0=自动"改成"0=默认"，含义变了）
+        m_cdnMode = appSettings->getInt("cdnMode", 0);
+        applyCdnMode(m_cdnMode);
+        qDebug() << "[PlayUrlManager] CDN settings loaded: cdnMode=" << m_cdnMode
+                 << "vendor=" << m_cdnVendor
+                 << "replaceMode=" << m_cdnReplaceMode << "server=" << m_cdnServer;
     }
 }
 
@@ -87,43 +88,51 @@ PlayUrlManager::PlayUrlManager(QObject *parent)
 // 固定档会把 URL 的 host 换掉，B 站 upsig 不绑 host（与 PiliPlus 同法），
 // 签名仍然有效。这样视频与备份列表里的节点都固定在同一家，重连不会漂到
 // cn-sccd/bcache 这类会返回不完整内容的节点。
-void PlayUrlManager::applyCdnVendor(int vendor)
+void PlayUrlManager::applyCdnMode(int mode)
 {
     static const char *kHosts[4] = {
-        "",                                     // 0 自动
+        "",                                     // 0 占位（不限厂商）
         "upos-sz-mirrorhwo1.bilivideo.com",     // 1 华为云
         "upos-sz-mirrorcos.bilivideo.com",      // 2 腾讯云
         "upos-sz-mirrorali.bilivideo.com",      // 3 阿里云
     };
-    if (vendor < 0 || vendor > 3) vendor = 1;
-    if (vendor == 0) {
-        m_cdnReplaceMode = 0;
-    } else {
-        m_cdnServer = QString::fromLatin1(kHosts[vendor]);
+    if (mode < 0 || mode > 4) mode = 0;
+    m_cdnMode = mode;
+
+    if (mode >= 2) {
+        // 固定档：优先在候选里挑该厂商的原始 URL（handleUrl 步骤 0.5），
+        // 挑不到时才用"替换 host"兜底，所以这里仍把 host/mode 备好。
+        m_cdnVendor = mode - 1;
+        m_cdnServer = QString::fromLatin1(kHosts[m_cdnVendor]);
         m_cdnReplaceMode = 1;
+    } else {
+        // 默认 / 自动：都不改 host
+        m_cdnVendor = 0;
+        m_cdnReplaceMode = 0;
     }
 }
 
-int PlayUrlManager::cdnVendorPreference() const
+int PlayUrlManager::cdnMode() const
 {
-    return m_cdnVendor;
+    return m_cdnMode;
 }
 
-void PlayUrlManager::setCdnVendorPreference(int vendor)
+void PlayUrlManager::setCdnMode(int mode)
 {
-    if (vendor < 0 || vendor > 3) vendor = 1;
-    m_cdnVendor = vendor;
-    applyCdnVendor(vendor);
+    if (mode < 0 || mode > 4) mode = 0;
+    applyCdnMode(mode);
 
     AppSettings *s = AppSettings::instance();
     if (s) {
-        s->setInt("cdnVendor", vendor);
-        // 同步写回老的两个键：别处（refreshCDNSettings / 设置面板）还在读它们
+        s->setInt("cdnMode", mode);
+        // 同步写回老的两个键：refreshCDNSettings 等路径还在读它们
         s->setInt("cdnReplaceMode", m_cdnReplaceMode);
         s->setString("cdnServer", m_cdnServer);
     }
-    qDebug() << "[PlayUrlManager] cdn vendor ->" << vendor
-             << "mode=" << m_cdnReplaceMode << "server=" << m_cdnServer;
+    qDebug() << "[PlayUrlManager] cdn mode ->" << mode
+             << "vendor =" << m_cdnVendor
+             << "replaceMode =" << m_cdnReplaceMode
+             << "server =" << m_cdnServer;
 }
 
 PlayUrlManager::~PlayUrlManager()
@@ -192,7 +201,8 @@ int PlayUrlManager::cdnVendorRank(const QString &host)
     return -1;
 }
 
-QString PlayUrlManager::pickPreferredCdn(const QString &baseUrl, const QList<QString> &backupUrls)
+QString PlayUrlManager::pickPreferredCdn(const QString &baseUrl, const QList<QString> &backupUrls,
+                                         int onlyVendor)
 {
     // 候选：baseUrl 在前，备份按服务端给的顺序
     QList<QString> candidates;
@@ -202,16 +212,24 @@ QString PlayUrlManager::pickPreferredCdn(const QString &baseUrl, const QList<QSt
         if (!u.isEmpty()) candidates.append(u);
     }
 
+    // onlyVendor：0/缺省 = 不限（按 华为>腾讯>阿里 逐档扫）；1/2/3 = 只要该厂商。
+    // 用户固定了视频源时用它 —— 拿到的是候选里的**原始 URL**，host 与 URL 里的
+    // os/og/cdnid 参数天然匹配；而"替换 host"会把 bcache 之类的 URL 硬改成
+    // hwo1，参数仍写着 os=bcache，属于自造的不一致（2026-11-01 log118 实证）。
+    const int vendorIdx = (onlyVendor > 0) ? (onlyVendor - 1) : -1;
+
     // 按厂商逐档扫（把华为的所有候选都看完再轮到腾讯），保证"只要有华为
     // 节点就一定用华为"；同一档内保持服务端给的先后顺序。
     // 返回的是候选里的原始 URL —— 不改 host，签名天然有效。
     for (int rank = 0; rank < 3; ++rank) {
+        if (vendorIdx >= 0 && rank != vendorIdx) continue;
         for (const QString &u : candidates) {
             const QString host = QUrl(u).host().toLower();
             if (cdnVendorRank(host) == rank) {
                 if (u != baseUrl) {
                     qDebug() << "[PlayUrlManager] CDN priority pick, rank" << rank
-                             << "(0=hw 1=cos 2=ali):" << host;
+                             << "(0=hw 1=cos 2=ali):" << host
+                             << (vendorIdx >= 0 ? "(user-fixed)" : "");
                 }
                 return u;
             }
@@ -264,11 +282,29 @@ QString PlayUrlManager::handleUrl(const QString &baseUrl, const QList<QString> &
 {
     if (baseUrl.isEmpty()) return baseUrl;
 
+    // 默认档：完全不干预，服务端给什么 URL 就用什么（不挑候选、不改 host）。
+    // 用于排除"CDN 干预本身引入问题"的可能 —— 2026-11-01 发现固定华为后
+    // URL 的 host 被换成 hwo1、参数却仍是 os=bcache，属于自造的不一致。
+    if (m_cdnMode == 0) return baseUrl;
+
     // 步骤0：CDN 厂商优先级（华为 > 腾讯 > 阿里，不含海外节点）。
     // 从 baseUrl + backupUrls 里按该顺序挑一条原始 URL 直接用；挑不到才
     // 走后面的老逻辑。例外：用户手动开了"全部替换"并指定了服务器时，
     // 以手动手准（设置项优先级高于自动挑）。
     const bool manualOverride = (m_cdnReplaceMode == 1 && !m_cdnServer.isEmpty());
+
+    // 步骤0.5：用户固定了视频源时，**先只在该厂商的候选里挑原始 URL**。
+    // 命中就直接用 —— host 与 URL 里的 os/og/cdnid 参数一致，不会出现
+    // "host 是 hwo1、参数却写着 os=bcache" 这种自造的矛盾
+    // （2026-11-01 log118：固定华为后所有 URL 都是 hwo1 + os=bcache）。
+    // 挑不到（服务端这次没给该厂商的节点）才落到下面的"替换 host"兜底。
+    if (m_cdnVendor > 0) {
+        const QString fixedPick = pickPreferredCdn(baseUrl, backupUrls, m_cdnVendor);
+        if (!fixedPick.isEmpty()) return fixedPick;
+        qWarning() << "[PlayUrlManager] no candidate for fixed vendor" << m_cdnVendor
+                   << ", fallback to host replacement (URL params may mismatch)";
+    }
+
     if (!manualOverride) {
         const QString preferred = pickPreferredCdn(baseUrl, backupUrls);
         if (!preferred.isEmpty()) return preferred;
@@ -351,11 +387,12 @@ void PlayUrlManager::refreshCDNSettings()
     if (appSettings) {
         m_cdnReplaceMode = appSettings->getInt("cdnReplaceMode", 0);
         m_cdnServer = appSettings->getString("cdnServer", "upos-sz-mirrorhwo1.bilivideo.com");
-        // 视频源偏好优先级更高：否则刷新一次就把用户选的固定档冲回"自动"
-        m_cdnVendor = appSettings->getInt("cdnVendor", 1);
-        applyCdnVendor(m_cdnVendor);
-        qDebug() << "[PlayUrlManager] CDN settings refreshed: vendor=" << m_cdnVendor
-                 << "mode=" << m_cdnReplaceMode << "server=" << m_cdnServer;
+        // 视频源偏好优先级更高：否则刷新一次就把用户选的档位冲回默认
+        m_cdnMode = appSettings->getInt("cdnMode", 0);
+        applyCdnMode(m_cdnMode);
+        qDebug() << "[PlayUrlManager] CDN settings refreshed: cdnMode=" << m_cdnMode
+                 << "vendor=" << m_cdnVendor
+                 << "replaceMode=" << m_cdnReplaceMode << "server=" << m_cdnServer;
     }
 }
 
