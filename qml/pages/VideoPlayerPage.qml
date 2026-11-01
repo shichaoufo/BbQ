@@ -2297,6 +2297,12 @@ Rectangle {
             // cdnMode: 0=默认(不干预) 1=自动 2/3/4=固定 → 只有 >=2 才锁死备份
             var fixedCdn = PlayUrlManager.cdnMode() >= 2
 
+            // 断流重连：让新流直接从原位置起播（mpv loadfile 的 start= 选项）。
+            // 否则会先把第 0 秒的第一帧解出来、再 seek 回去，用户看到的就是
+            // 黑屏/闪跳（日志实证：restart complete @ 0.000000 之后才
+            // queuing seek to 763.329）。<=0 时内部忽略，不影响正常起播。
+            mpvPlayer.setPendingStart(pageRoot._savedPositionBeforeRetry / 1000.0)
+
             if (info.flvUrl && info.flvUrl !== "") {
                 // FLV 格式：优先使用备选 URL
                 var flvBackupUrls = info.flvBackupUrls || []
@@ -2325,7 +2331,9 @@ Rectangle {
             }
             
             mpvPlayer.play()
-            pageRoot._pendingSeek = pageRoot._savedPositionBeforeRetry
+            // 位置已由 loadfile 的 start= 处理，不再额外 seek（否则等于
+            // 白白多一次定位，还可能再把画面闪一下）
+            pageRoot._pendingSeek = 0
         }
     }
 

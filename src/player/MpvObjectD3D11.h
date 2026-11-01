@@ -153,6 +153,14 @@ private:
     void destroyMpv();
     void applyHttpHeaders();
     void loadFile(const QString &file);
+
+public:
+    // 断流重连用：让下一次 loadFile 直接从指定秒数起播（消掉"先播 0 秒
+    // 再 seek 回去"那一帧黑屏）。传 <=0 表示取消。一次性，用完自动清空。
+    Q_INVOKABLE void setPendingStart(double seconds);
+
+private:
+    double m_pendingStartSeconds = -1.0;
     // 真正交给 mpv 的 URL：音视频都在时用 EDL 把两条流拼成一个媒体
     //（对齐 PiliPlus），否则就是 m_source 本身。
     QString playbackMediaUrl() const;

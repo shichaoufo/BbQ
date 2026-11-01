@@ -504,63 +504,37 @@ void MpvObjectD3D11::applyCacheOptions()
         }
     };
 
-    // 网络层：与 cache 分档无关，直播/点播都适用；只在 initialize 前设置一次
-    // （stream-lavf-o 是 demuxer 启动期选项）。
-    if (!m_mpvInitialized) {
-        // "半死连接"（TCP 还在、服务器不再回数据）靠它暴露：默认没有读超时，
-        // mpv 会一直挂着，既不出 EOF 也不报错，应用层的两段式重连根本没机会触发。
-        mpv_set_option_string(m_mpv, "network-timeout", "6");
-        // FFmpeg 层自动续连：吸收瞬时抖动（连接被重置/读超时），省掉一次
-        // "重新请求 playurl + 重建 demuxer"。真断流、URL 过期仍由应用层处理。
-        //
-        // reconnect_at_eof 是关键补充（原先漏了）：B 站 m4s 带 Content-Length，
-        // 读到一半连接断了时 http 层常把"提前结束"当 EOF 返回，此时
-        // reconnect_streamed 不生效（它只管 filesize 未知的流式响应）、
-        // reconnect_ON_NETWORK_ERROR 也不一定命中 —— 结果 demuxer 认为这条
-        // 流正常播完，EDL 双流里音频那条就这样静默死掉：画面继续、声音没了。
-        // 打开后"提前 EOF（off < filesize）"也会重连；真播完（off==filesize）
-        // 不受影响，不会无限重连。
-        mpv_set_option_string(m_mpv, "stream-lavf-o",
-                              "reconnect=1,reconnect_streamed=1,"
-                              "reconnect_at_eof=1,reconnect_on_network_error=1,"
-                              "reconnect_delay_max=4,timeout=5000000");
-    }
+    // ===== 网络层：2026-11-01 实验期**全部走 mpv 默认** =====
+    //
+    // 目的：和 PiliPlus（PlayerConfiguration 里一个缓存/网络参数都不设，全走
+    // mpv 默认，长视频十几分钟完全不断流）做严格对照，先把"是不是我们自己
+    // 的参数导致的"这个问题一次性排除掉。
+    //
+    // 原本在这里设置（保留备查，实验有结论后决定恢复/替换）：
+    //   network-timeout = 6
+    //     —— "半死连接"（TCP 还在但服务器不再回数据）靠它暴露，默认没有
+    //        读超时，mpv 会一直挂着，既不出 EOF 也不报错。
+    //   stream-lavf-o = reconnect=1,reconnect_streamed=1,reconnect_at_eof=1,
+    //                   reconnect_on_network_error=1,reconnect_delay_max=4,
+    //                   timeout=5000000
+    //     —— FFmpeg 层自动续连，吸收瞬时抖动；reconnect_at_eof 兜"提前 EOF
+    //        被当成正常播完"（EDL 双流里音频静默死掉就是这种情况）。
+    //
+    // 去掉后的代价：断流后 FFmpeg 不再自动续，要靠应用层看门狗恢复；
+    // "半死连接"可能挂较久才被上层发现。这是控制变量必须接受的。
+    (void)0;
 
     if (m_liveMode) {
-        // 直播：小 cache 低延迟，避免延迟随播放时长累积
-        setOpt("cache", "yes");
-        setOpt("cache-secs", "10");
-        // 16M 是原值。master 上那次「调小缓存」的实验把它也降到了 10M，
-        // 但那 10 秒缓存最多也就用 5MB（1080p 直播约 500KB/s），
-        // 10M 和 16M 都不构成瓶颈、下调无收益，故恢复 16M
-        // （4K 直播约 1MB/s、10 秒要 10MB，16M 才留得住余量）
-        setOpt("demuxer-max-bytes", "16M");
-        // 直播不需要回看：回看缓存直接为 0（对齐 PiliPlus，省 8M 内存）
-        setOpt("demuxer-max-back-bytes", "0");
-        setOpt("demuxer-readahead-secs", "10");
-        // 前向缓存恢复到 cache-secs 的 2/3 才继续播，减少"刚缓过来又卡"的抖动
-        setOpt("demuxer-hysteresis-secs", "6.667");
+        // 直播：只留功能性滤镜设置。cache 相关（原 cache=yes / cache-secs=10
+        // / demuxer-max-bytes=16M / max-back-bytes=0 / readahead-secs=10 /
+        // hysteresis-secs=6.667）实验期一并走默认。
         setOpt("vf", "");
     } else {
-        // 视频点播：大 cache 抗网络抖动，避免 CDN 断流时 demuxer 缓存耗尽停住
-        //
-        // 注意 DASH 是**两路独立 demuxer**：视频（-30077/-30080）与音频
-        // （-30280）各一条 HTTP 连接、各一份缓存，CDN 掐其中一路时另一路照跑。
-        // 视频码率通常是音频的 10-20 倍，同样秒数吃掉的数据量完全不同，
-        // 所以"视频先断"是常态。
-        setOpt("cache", "yes");
-        // 折中档（2026-10-31）：原 45s/96M 偏奢侈，而实测把 cache 调小到
-        // 20s/10M 也并不能解决卡顿（卡顿根因是长断流，20s 和 45s 都撑不过，
-        // 见 playbackStallWatchdog 的注释）。取 30s/32M：1080p（约 400KB/s）
-        // 下 cache-secs 先到，32M 用不满；高码率 4K 则由 32M 兜底（约 16s）。
-        // 与看门狗的 buffering 容忍 30s 对齐，不会出现"缓存早空、看门狗还在等"。
-        setOpt("cache-secs", "30");
-        setOpt("demuxer-max-bytes", "32M");
-        // 回看 12M（约 25~30s）：5M 只有 10s 左右，稍微往回拖就必然走网络
-        setOpt("demuxer-max-back-bytes", "12M");
-        setOpt("demuxer-readahead-secs", "30");
+        // 点播：同上，cache 相关（原 cache-secs=5 / demuxer-max-bytes=16M /
+        // max-back-bytes=12M / readahead-secs=5）实验期走默认。
         setOpt("vf", "amf_frc");
     }
+
 }
 
 bool MpvObjectD3D11::liveMode() const
@@ -1251,8 +1225,33 @@ void MpvObjectD3D11::loadFile(const QString &file)
     mpv_command_async(m_mpv, 0, stopCmd);
 
     QByteArray fileData = file.toUtf8();
-    const char *cmd[] = {"loadfile", fileData.constData(), "replace", nullptr};
-    mpv_command_async(m_mpv, 0, cmd);
+
+    // 带起始位置加载（断流重连用）：mpv 的 loadfile 支持第 4 个参数传 per-file
+    // options，`start=<秒>` 会让它加载后直接定位到该位置起播，省掉"先播第 0 秒
+    // 再 seek 回去"那一帧（日志实证：restart complete @ 0.000000 之后才
+    // queuing seek to 763.329，中间那帧就是黑屏/闪跳的来源）。
+    // 只在这次加载生效，不影响后续 normal 的 loadFile。
+    QByteArray startOpt;
+    if (m_pendingStartSeconds >= 0) {
+        startOpt = "start=" + QByteArray::number(m_pendingStartSeconds, 'f', 3);
+        m_pendingStartSeconds = -1;
+        qWarning() << "[MpvObjectD3D11] loadFile with start =" << startOpt;
+    }
+
+    if (startOpt.isEmpty()) {
+        const char *cmd[] = {"loadfile", fileData.constData(), "replace", nullptr};
+        mpv_command_async(m_mpv, 0, cmd);
+    } else {
+        // 语法：loadfile <url> <flags> <index> <options>
+        const char *cmd[] = {"loadfile", fileData.constData(), "replace", "0",
+                             startOpt.constData(), nullptr};
+        mpv_command_async(m_mpv, 0, cmd);
+    }
+}
+
+void MpvObjectD3D11::setPendingStart(double seconds)
+{
+    m_pendingStartSeconds = (seconds > 0.0) ? seconds : -1.0;
 }
 
 QVariantMap MpvObjectD3D11::getVideoInfo()
