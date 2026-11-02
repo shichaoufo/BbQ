@@ -73,6 +73,22 @@ public:
         UserSailingCardbg cardbg;
     };
 
+    // 粉丝勋章（评论数据里的 member.fans_detail）。
+    //
+    // B 站评论接口只下发"颜色 + 名字 + 等级"，**没有任何图片 URL**（实测
+    // 297 条评论，guard_icon / honor_icon 恒为空字符串），官方网页端与 APP
+    // 同样是前端用圆角块 + 背景色 + 文字画出来的。所以客户端照抄配色即可
+    // 还原，不需要也不存在"官方勋章图片"。
+    struct Medal {
+        QString name;        // 勋章名（medal_name），如"雀巢"
+        int level = 0;       // 勋章等级（level），0 表示该用户没有勋章
+        QString bgColor;     // 背景色 "#AARRGGBB"（medal_color），已在 C++ 转好
+        QString nameColor;   // 勋章名文字色（medal_color_name）
+        QString levelColor;  // 等级数字色（medal_color_level），通常比名字亮
+        int guardLevel = 0;  // 大航海等级 1总督/2提督/3舰长；官方图标未开放，
+                             // 这里只保留数值，UI 不渲染舰队图标
+    };
+
     struct Comment {
         qint64 rpid;        // 评论ID（64位，避免溢出）
         qint64 oid;         // 视频aid
@@ -122,6 +138,8 @@ public:
         bool hasCollect = false;
         // 硬核会员（member.is_senior_member==1）：等级标用 LV6 带闪电（user-lv6p.svg）
         bool isSeniorMember = false;
+        // 粉丝勋章（member.fans_detail），level==0 表示没有
+        Medal medal;
     };
 
     explicit CommentManager(QObject *parent = nullptr);

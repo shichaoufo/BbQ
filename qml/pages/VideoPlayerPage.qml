@@ -6268,6 +6268,19 @@ Rectangle {
                                                             asynchronous: true
                                                         }
 
+                                                        // 粉丝勋章：胶囊底 + 名字 + 等级，配色全部来自
+                                                        // 接口的 fans_detail。与 UP 标签**同显** —— UP 主本人
+                                                        // 也可能佩戴粉丝牌，接口是把两者一起下发的
+                                                        CommentMedal {
+                                                            medalName: model.medalName || ""
+                                                            medalLevel: model.medalLevel || 0
+                                                            bgColorHex: model.medalBgColor || ""
+                                                            nameColorHex: model.medalNameColor || ""
+                                                            levelColorHex: model.medalLevelColor || ""
+                                                            anchors.verticalCenter: parent.verticalCenter
+                                                            visible: medalLevel > 0
+                                                        }
+
                                                         Image {
                                                             source: "qrc:/BiliQt/icons/level/user-up.svg"
                                                             width: 32
@@ -6681,6 +6694,17 @@ Rectangle {
                                                             anchors.verticalCenter: parent.verticalCenter
                                                             visible: modelData.level > 0
                                                             asynchronous: true
+                                                        }
+
+                                                        // 粉丝勋章（与 UP 标签同显，理由同上）
+                                                        CommentMedal {
+                                                            medalName: modelData.medalName || ""
+                                                            medalLevel: modelData.medalLevel || 0
+                                                            bgColorHex: modelData.medalBgColor || ""
+                                                            nameColorHex: modelData.medalNameColor || ""
+                                                            levelColorHex: modelData.medalLevelColor || ""
+                                                            anchors.verticalCenter: parent.verticalCenter
+                                                            visible: medalLevel > 0
                                                         }
 
                                                         Image {

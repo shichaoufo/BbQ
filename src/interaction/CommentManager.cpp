@@ -30,6 +30,22 @@ static bool jsonFlag(const QJsonObject &obj, const QString &key, bool defaultVal
     return defaultValue;
 }
 
+// 接口里的颜色字段（medal_color / medal_color_name / medal_color_level）是
+// **十进制 ARGB**，例如 4294503408 == 0xFFF8EBF0。
+//
+// 两个必须注意的点：
+//   1) 这些值普遍大于 INT32_MAX（4294503408 > 2147483647），
+//      QJsonValue::toInt() 在越界时**直接返回默认值 0**，颜色会全变黑。
+//      调用方必须用 toDouble() 取原始 double 再传进来。
+//   2) QColor / QML 认的是 "#AARRGGBB"，这里统一转成 8 位十六进制字符串，
+//      QML 侧直接赋给 color 属性即可，不必再做位运算。
+static QString argbToCss(double argb)
+{
+    if (argb <= 0) return QString();
+    const quint32 v = static_cast<quint32>(static_cast<qint64>(argb));
+    return QStringLiteral("#%1").arg(v, 8, 16, QChar('0')).toUpper();
+}
+
 // 用户主动发起的评论动作（点赞 / 取消赞 / 点踩 / 取消踩 / 删评论）统一走
 // actionSuccess 回执；列表拉取（get_comments / get_sub_comments）与评论发送
 // （send_comment）各有自己的信号，不在此列。
@@ -659,6 +675,22 @@ CommentManager::Comment CommentManager::parseCommentObject(const QJsonObject &ob
     // 硬核会员：等级标显示 LV6 带闪电（user-lv6p.svg）
     comment.isSeniorMember = (member["is_senior_member"].toInt() == 1);
 
+    // 粉丝勋章。没有勋章的用户，接口下发的 fans_detail 是 null（不是空对象），
+    // 所以要先判 isObject。
+    // 不解析 is_receive：实测佩戴中的勋章也会下发 0，语义不明确，
+    // 拿它做"未点亮变灰"会误伤。
+    const QJsonValue fansDetailVal = member["fans_detail"];
+    if (fansDetailVal.isObject()) {
+        const QJsonObject fd = fansDetailVal.toObject();
+        comment.medal.name = fd["medal_name"].toString();
+        comment.medal.level = fd["level"].toInt();
+        comment.medal.guardLevel = fd["guard_level"].toInt();
+        // 颜色用 toDouble()：十进制 ARGB 常超过 int32 上限，toInt() 会返回 0
+        comment.medal.bgColor = argbToCss(fd["medal_color"].toDouble());
+        comment.medal.nameColor = argbToCss(fd["medal_color_name"].toDouble());
+        comment.medal.levelColor = argbToCss(fd["medal_color_level"].toDouble());
+    }
+
     QJsonObject content = obj["content"].toObject();
     comment.content = content["message"].toString();
 
@@ -930,6 +962,14 @@ QVariantMap CommentManager::commentToMap(const Comment &comment) const
 
     // 硬核会员（LV6 闪电等级标）
     map["isSeniorMember"] = comment.isSeniorMember;
+
+    // 粉丝勋章：QML 侧 medalLevel > 0 才渲染胶囊
+    map["medalName"] = comment.medal.name;
+    map["medalLevel"] = comment.medal.level;
+    map["medalBgColor"] = comment.medal.bgColor;
+    map["medalNameColor"] = comment.medal.nameColor;
+    map["medalLevelColor"] = comment.medal.levelColor;
+    map["medalGuardLevel"] = comment.medal.guardLevel;
 
     return map;
 }
