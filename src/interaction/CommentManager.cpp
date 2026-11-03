@@ -657,6 +657,11 @@ CommentManager::Comment CommentManager::parseCommentObject(const QJsonObject &ob
     QJsonObject cardbgFan = cardbg["fan"].toObject();
     comment.userSailing.cardbg.fanNumDesc = cardbgFan["num_desc"].toString();
     comment.userSailing.cardbg.fanColor = cardbgFan["color"].toString();
+    // 装扮类型决定编号前缀：suit/vip_suit → "NO."（个性装扮粉丝编号），
+    // collect_card → "CD."（收藏集卡片编号）。接口只给纯数字 num_desc，
+    // 前缀是客户端自己加的（实测 BV1Vu4y177KJ：「美依礼芽勋章」type=collect_card，
+    // num_desc=000092；「2233夏日摇滚派对」type=suit，num_desc=000102）
+    comment.userSailing.cardbg.cardType = cardbg["type"].toString();
     comment.userSailing.cardbg.show = !comment.userSailing.cardbg.fanNumDesc.isEmpty();
 
     // 解析头像框
@@ -948,6 +953,7 @@ QVariantMap CommentManager::commentToMap(const Comment &comment) const
     cardbgMap["image"] = comment.userSailing.cardbg.image;
     cardbgMap["fanNumDesc"] = comment.userSailing.cardbg.fanNumDesc;
     cardbgMap["fanColor"] = comment.userSailing.cardbg.fanColor;
+    cardbgMap["cardType"] = comment.userSailing.cardbg.cardType;
     cardbgMap["show"] = comment.userSailing.cardbg.show;
     map["cardbg"] = cardbgMap;
 

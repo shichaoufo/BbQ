@@ -66,6 +66,9 @@ public:
         QString image;       // 背景图片 URL
         QString fanNumDesc;  // 粉丝编号描述，如 "1234"
         QString fanColor;    // 粉丝编号颜色（十六进制字符串）
+        // 装扮类型：suit / vip_suit = 个性装扮（官方编号前缀 "NO."）；
+        // collect_card = 收藏集卡片（官方编号前缀 "CD."，编号是"第几张/共几张"）
+        QString cardType;
         bool show = false;   // 是否展示（依据 num_desc 是否非空）
     };
 

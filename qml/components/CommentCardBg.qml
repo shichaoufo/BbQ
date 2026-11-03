@@ -10,6 +10,11 @@ Item {
     property var cardbg: null
     // 是否显示 NO. 前缀：默认 true（评论区原样）；动态页单独传 false
     property bool showNoPrefix: true
+    // 编号前缀：个性装扮是 "NO."，收藏集卡片是 "CD."（收藏集编号）。
+    // 接口只下发纯数字（num_desc），前缀由客户端按 cardbg.type 决定：
+    //   suit / vip_suit → NO.（粉丝编号）
+    //   collect_card    → CD.（收藏集卡片编号，官方也是这样显示的）
+    readonly property string numPrefix: (cardbg && cardbg.cardType === "collect_card") ? "CD." : "NO."
     // 数字相对装饰图的位置：
     //   "right" → 默认（评论区原样，装饰图在左，数字在右，1:1还原老项目）
     //   "left"  → 动态页定制，数字在装饰图左侧
@@ -89,7 +94,7 @@ Item {
 
             FluText {
                 visible: root.showNoPrefix
-                text: "NO."
+                text: root.numPrefix
                 font.pixelSize: root._noFontSize
                 color: root.cardbg && root.cardbg.fanColor ? root.cardbg.fanColor : "#FB7299"
                 horizontalAlignment: Text.AlignLeft

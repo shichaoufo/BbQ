@@ -682,7 +682,9 @@ FluPage {
                         show: showDecorate,
                         image: cardImage,
                         fanNumDesc: dcardFan.num_desc || "",
-                        fanColor: dcardFan.color || "#FB7299"
+                        fanColor: dcardFan.color || "#FB7299",
+                        // 编号前缀靠它区分：suit/vip_suit → NO.，collect_card → CD.
+                        cardType: dcard.card_type || ""
                     }
                 } else {
                     // 优先级 2：旧 user_sailing.cardbg / module_author.cardbg（与评论区一致）
@@ -694,6 +696,7 @@ FluPage {
                             image: cardbg.image || "",
                             fanNumDesc: fan.num_desc || "",
                             fanColor: fan.color || "#FB7299",
+                            cardType: cardbg.type || "",
                             show: !!(fan.num_desc && fan.num_desc !== "")
                         }
                     } else if (authorData.cardbg) {
@@ -703,6 +706,7 @@ FluPage {
                             image: bg.image || "",
                             fanNumDesc: fan2.num_desc || "",
                             fanColor: fan2.color || "#FB7299",
+                            cardType: bg.type || "",
                             show: !!(fan2.num_desc && fan2.num_desc !== "")
                         }
                     }
