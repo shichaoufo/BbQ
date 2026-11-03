@@ -1141,8 +1141,9 @@ Rectangle {
     // 与 CommentPanel.qml 中的同名函数保持一致，改动请两边同步。
     // ============================================================
     // 对齐 PiliPlus：列数（4 张 2 列 / 其余多图 3 列）、单图按原始宽高比不裁剪、
-    // 长图裁剪锚点改为顶部。有意保留的差异：圆角 6、间距 8、4 张时单元格取半宽。
-    readonly property int commentImageSpacing: 8
+    // 长图裁剪锚点改为顶部。有意保留的差异：圆角 6、4 张时单元格取半宽。
+    // 间距取 4，与动态正文的 dynamicImageSpacing 一致（原来 8 偏大）
+    readonly property int commentImageSpacing: 4
     readonly property real commentImageMaxRatio: 2.6
 
     // 网格列数。PiliPlus 内部把「2 张」的 column 记作 3、再单独把单元格取成半宽，

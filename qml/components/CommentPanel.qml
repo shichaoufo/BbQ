@@ -384,10 +384,11 @@ Item {
     // 有意保留的差异：
     //   ① 圆角沿用本项目评论图片的 6（PiliPlus 是 10），且每张图独立圆角，
     //      不用 PiliPlus 那种「只圆整块外圈」的拼图式圆角；
-    //   ② 间距沿用本项目的 8（PiliPlus 是 5）；
+    //   ② 间距取 4（对齐动态正文的 dynamicImageSpacing；原来 8 在评论卡片里
+    //      显得行间距、列间距都偏大，同一行两张图之间空得有点开）；
     //   ③ 4 张时的单元格取「半宽」而不是 PiliPlus 的「1/3 宽」：后者会让 2x2 只占
     //      正文列宽的 2/3，右边空一大块，在评论卡片里观感像没排好。
-    readonly property int commentImageSpacing: 8
+    readonly property int commentImageSpacing: 4
     readonly property real commentImageMaxRatio: 2.6
 
     // 网格列数。PiliPlus 内部把「2 张」的 column 记作 3、再单独把单元格取成半宽，
