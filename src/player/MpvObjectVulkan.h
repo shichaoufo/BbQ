@@ -75,6 +75,9 @@ signals:
     void hasVideoChanged();
     void seekableChanged();
     void errorOccurred(const QString &error);
+    // 点播流自然播完（EOF）：互动视频靠它判断"本片段放完，该弹分支选项了"。
+    // 用户 stop()/切源产生的是 STOP reason，不会触发。
+    void playbackFinished();
 
 protected:
     void geometryChange(const QRectF &newGeometry, const QRectF &oldGeometry) override;

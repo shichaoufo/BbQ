@@ -1892,6 +1892,11 @@ void MpvObject::onMpvEvents()
                 // QML（LivePlayerPage）据此触发指数退避的自动重连。
                 qWarning() << "[MpvObject] live stream EOF, notifying QML for reconnect";
                 emit liveStreamEof();
+            } else if (ef && ef->reason == MPV_END_FILE_REASON_EOF) {
+                // 点播自然播完：互动视频据此判断该弹分支选项了。
+                // 只认 EOF —— 用户 stop()/换源是 STOP，重试失败是 ERROR，都不该触发。
+                qWarning() << "[MpvObject] playback finished (EOF)";
+                emit playbackFinished();
             }
             break;
         }

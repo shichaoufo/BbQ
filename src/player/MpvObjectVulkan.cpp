@@ -564,6 +564,10 @@ void MpvObjectVulkan::onMpvEvents()
                 QString err = QString::fromUtf8(mpv_error_string(ef->error));
                 qWarning() << "[MpvObjectVulkan] playback error:" << err;
                 emit errorOccurred(err);
+            } else if (ef && ef->reason == MPV_END_FILE_REASON_EOF) {
+                // 点播自然播完：互动视频据此判断该弹分支选项了
+                qWarning() << "[MpvObjectVulkan] playback finished (EOF)";
+                emit playbackFinished();
             }
             break;
         }

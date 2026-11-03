@@ -136,6 +136,9 @@ signals:
     // 直播流自然结束（EOF）：主播推流中断/断流。仅 liveMode 下发出，
     // QML 层据此触发自动重连（视频点播的 EOF 无此语义）
     void liveStreamEof();
+    // 点播流自然播完（EOF，且非直播、非用户 stop/切源）：
+    // 互动视频靠它判断"本片段放完，该弹分支选项了"。
+    void playbackFinished();
     // 跨窗口迁移后视频链 verify 存活时发出：QML 层据此恢复播放
     // （迁移期间整体暂停以避免音画错位，见 LivePlayerPage/VideoPlayerPage）
     void videoChainRestored();

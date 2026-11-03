@@ -578,6 +578,15 @@ void PlayUrlManager::parsePlayUrlData(const QByteArray &data, int quality, const
     
     QJsonObject dataObj = root["data"].toObject();
     qDebug() << "[PlayUrlManager] parsePlayUrlData data keys:" << dataObj.keys() << "requested quality:" << quality;
+
+    // 互动视频：data.interaction.graph_version 是图谱版本，非互动视频没有
+    // 这个字段（interaction 缺失或 null）。取到后要一路带到 playUrlReady，
+    // QML 靠它去请求分支节点；切清晰度走缓存时也不能丢（见 applyFromCache）。
+    QString graphVersion;
+    if (dataObj["interaction"].isObject()) {
+        graphVersion = dataObj["interaction"].toObject()["graph_version"].toString();
+        qDebug() << "[PlayUrlManager] interactive video, graph_version:" << graphVersion;
+    }
     qDebug() << "[PlayUrlManager] parsePlayUrlData has support_formats:" << dataObj.contains("support_formats");
     qDebug() << "[PlayUrlManager] parsePlayUrlData has dash:" << dataObj.contains("dash");
     qDebug() << "[PlayUrlManager] parsePlayUrlData has durl:" << dataObj.contains("durl");
@@ -1049,6 +1058,9 @@ void PlayUrlManager::parsePlayUrlData(const QByteArray &data, int quality, const
 
     // 保存用户请求的清晰度，供 onPlayUrlLoaded 使用
     result.requestedQuality = quality;
+    // 互动视频图谱版本：同时写进缓存结果与本次下发，QML 才拿得到
+    result.graphVersion = graphVersion;
+    playInfo.graphVersion = graphVersion;
 
     // 把本次 dash.audio 的档位告诉 QML（设置面板的"选择音质"下拉）。
     // 没有 dash（FLV 单流 / 番剧）时也发，列表为空，QML 把整行隐藏
@@ -1257,6 +1269,10 @@ void PlayUrlManager::applyFromCache(int videoQualityId, int audioId)
         playInfo.audioId = audio.qualityId;
     }
 
+    // 切清晰度/音质不改变稿件，图谱版本要跟着缓存带出来，
+    // 否则 QML 切一次清晰度就丢掉"这是互动视频"的上下文
+    playInfo.graphVersion = m_cachedVideoUrlResult.graphVersion;
+
     qDebug() << "[PlayUrlManager] applyFromCache done, videoUrl:" << playInfo.videoUrl.left(80)
              << "qualityId:" << playInfo.qualityId << "audioUrl:" << playInfo.audioUrl.left(80);
     emit playUrlReady(playUrlInfoToMap(playInfo));
@@ -1437,6 +1453,8 @@ QVariantMap PlayUrlManager::videoDetailToMap(const VideoDetail &detail) const
     map["description"] = detail.description;
     map["argueMsg"] = detail.argueMsg;
     map["noReprint"] = detail.noReprint;
+    // 互动视频标记（仅作提示，QML 真正的判断依据是 playUrlReady 的 graphVersion）
+    map["isSteinGate"] = detail.isSteinGate;
     // QVariant 不接受 QList<QVariantMap>，转成 QVariantList 再交给 QML
     QVariantList staffList;
     staffList.reserve(detail.staff.size());
@@ -1538,6 +1556,8 @@ QVariantMap PlayUrlManager::playUrlInfoToMap(const PlayUrlInfo &info) const
     map["duration"] = info.duration;
     map["segmentBaseInitialization"] = info.segmentBaseInitialization;
     map["segmentBaseIndexRange"] = info.segmentBaseIndexRange;
+    // 互动视频图谱版本；非互动视频为空串，QML 据此决定要不要拉分支节点
+    map["graphVersion"] = info.graphVersion;
     
     // 添加备选 URL 列表（用于 CDN 切换或重试）
     QVariantList videoBackupList;
@@ -1700,6 +1720,9 @@ void PlayUrlManager::getVideoUrlByAid(const QString &aid, const QString &overrid
         detail.argueMsg = dataObj["argue_info"].toObject()["argue_msg"].toString();
         // 版权标志：1 = 显示"未经作者授权 禁止转载"
         detail.noReprint = dataObj["rights"].toObject()["no_reprint"].toInt() == 1;
+        // 互动视频标记（rights.is_stein_gate == 1）。只作为"要不要去请求
+        // edgeinfo"的前置条件，真正的图谱版本在 playurl 的 interaction 里
+        detail.isSteinGate = dataObj["rights"].toObject()["is_stein_gate"].toInt() == 1;
         detail.pubdate = dataObj["pubdate"].toVariant().toLongLong();
 
         QJsonObject owner = dataObj["owner"].toObject();
@@ -1867,6 +1890,9 @@ void PlayUrlManager::getVideoUrlByBvid(const QString &bvid, const QString &overr
         detail.argueMsg = dataObj["argue_info"].toObject()["argue_msg"].toString();
         // 版权标志：1 = 显示"未经作者授权 禁止转载"
         detail.noReprint = dataObj["rights"].toObject()["no_reprint"].toInt() == 1;
+        // 互动视频标记（rights.is_stein_gate == 1）。只作为"要不要去请求
+        // edgeinfo"的前置条件，真正的图谱版本在 playurl 的 interaction 里
+        detail.isSteinGate = dataObj["rights"].toObject()["is_stein_gate"].toInt() == 1;
         detail.pubdate = dataObj["pubdate"].toVariant().toLongLong();
 
         QJsonObject owner = dataObj["owner"].toObject();
@@ -2125,6 +2151,213 @@ QString PlayUrlManager::formatOnlineCount(const QString &raw)
     if (s.contains(QStringLiteral("人正在看")))
         return s;
     return s + QStringLiteral("人正在看");
+}
+
+// ===========================================================================
+// 互动视频：拉取某个节点的分支选项
+//
+// GET https://api.bilibili.com/x/stein/edgeinfo_v2?bvid=&graph_version=&edge_id=
+//   · 不带 edge_id → 起点节点（刚进入视频时用）
+//   · 带 edge_id   → 该边指向的下一节点（用户选了哪个选项就传它的 id）
+//
+// 响应结构（data.edges.questions[].choices[]）：
+//   id     —— 边 ID，选完拿它当下次请求的 edge_id
+//   cid    —— 目标片段的分P cid，播放器切到这个 cid 即可
+//   option —— 选项文案
+//
+// PiliPlus 只取 questions[0]，连续追问会丢；这里把 questions 全部保留，
+// 由 QML 依次展示。失败/无分支时发空数组，让 QML 结束"等选项"状态。
+// ===========================================================================
+void PlayUrlManager::getSteinEdgeInfo(const QString &bvid, const QString &graphVersion, int edgeId)
+{
+    if (bvid.isEmpty() || graphVersion.isEmpty()) {
+        emit steinEdgeInfoReady(QVariantList());
+        return;
+    }
+
+    // bvid / graph_version / edge_id 都是安全字符（字母数字），直接拼即可
+    QString url = QString("https://api.bilibili.com/x/stein/edgeinfo_v2?bvid=%1&graph_version=%2")
+                      .arg(bvid, graphVersion);
+    if (edgeId > 0) {
+        url += QString("&edge_id=%1").arg(edgeId);
+    }
+
+    QNetworkRequest request{QUrl(url)};
+    request.setRawHeader("User-Agent", USER_AGENT.toUtf8());
+    request.setRawHeader("Referer", (QString("https://www.bilibili.com/video/%1").arg(bvid)).toUtf8());
+    request.setRawHeader("Origin", ORIGIN.toUtf8());
+    QString cookies = LoginManager::instance()->getCookies();
+    if (!cookies.isEmpty()) {
+        request.setRawHeader("Cookie", cookies.toUtf8());
+    }
+
+    qDebug() << "[PlayUrlManager] getSteinEdgeInfo:" << url;
+    // 一次性 QNAM：理由同 getSteinGraphVersion —— 不能污染 playurl 的共享
+    // 连接池，否则切片段后的 playurl 会被按游客处理（480P）
+    QNetworkAccessManager *manager = new QNetworkAccessManager(this);
+    QNetworkReply *reply = manager->get(request);
+    connect(reply, &QNetworkReply::finished, this, [this, reply, manager]() {
+        manager->deleteLater();
+        reply->deleteLater();
+        if (reply->error() != QNetworkReply::NoError) {
+            qWarning() << "[PlayUrlManager] stein edgeinfo network error:" << reply->errorString();
+            emit steinEdgeInfoReady(QVariantList());
+            return;
+        }
+
+        const QByteArray data = reply->readAll();
+        QJsonDocument doc = QJsonDocument::fromJson(data);
+        if (!doc.isObject()) {
+            qWarning() << "[PlayUrlManager] stein edgeinfo response is not JSON object";
+            emit steinEdgeInfoReady(QVariantList());
+            return;
+        }
+
+        const QJsonObject root = doc.object();
+        if (root["code"].toInt() != 0) {
+            qWarning() << "[PlayUrlManager] stein edgeinfo API error code:" << root["code"].toInt()
+                       << "message:" << root["message"].toString();
+            emit steinEdgeInfoReady(QVariantList());
+            return;
+        }
+
+        const QJsonArray questions =
+            root["data"].toObject()["edges"].toObject()["questions"].toArray();
+
+        QVariantList out;
+        for (const QJsonValue &qv : questions) {
+            const QJsonObject qObj = qv.toObject();
+            const QJsonArray choices = qObj["choices"].toArray();
+            QVariantList choiceList;
+            for (const QJsonValue &cv : choices) {
+                const QJsonObject c = cv.toObject();
+                const int choiceId = c["id"].toInt();
+                // cid 是 JSON 数字且可能超过 int32，必须走 toDouble 再转字符串，
+                // 直接 toString() 对数字返回空串
+                const QString choiceCid = QString::number(static_cast<qint64>(c["cid"].toDouble()));
+                const QString option = c["option"].toString();
+                // 只校验 id/cid：自动跳转节点的 option 可能只是占位（"A "），
+                // 甚至是空串，不能因为文案为空就把整条边丢掉
+                if (choiceId <= 0 || choiceCid.isEmpty())
+                    continue;
+
+                QVariantMap choice;
+                choice["id"] = choiceId;
+                choice["cid"] = choiceCid;
+                choice["option"] = option;
+                // is_default==1：官方不弹卡片、自动跳到 cid 的节点
+                // （这类节点的 question 里只有一个占位选项，option 形如 "A "）
+                choice["isDefault"] = (c["is_default"].toInt() == 1);
+                choiceList.append(choice);
+            }
+            // 空问题直接丢弃（接口有时会塞空的占位节点）
+            if (choiceList.isEmpty())
+                continue;
+            QVariantMap question;
+            question["choices"] = choiceList;
+            // type：1 = 有选项的问句（官方暂停并弹出选项）；
+            //       0 = 没有选项的过场边，官方不弹卡片、直接续播下一段。
+            // **判断"要不要自动跳"只认它**：过场边和"只剩最后一个真实选项"的
+            // 问句在数据上都是"单选项 + is_default=1"，只有 type 能区分
+            // （实测 BV1S7aZ6ZEGJ：过场边 type=0 且无 start_time_r、pause_video=0；
+            //   "只剩一个选项"的问句 type=1、start_time_r=300、pause_video=1）
+            question["type"] = qObj["type"].toInt();
+            // start_time_r 是"从本片段开头算的帧号"：官方播放器播到这一帧就
+            // 暂停并弹选项，**不是等整段播完**。QML 用 fps 换算成毫秒做定时。
+            // pause_video=0 的问题不暂停，选项直接浮在画面上继续播
+            question["startTimeR"] = qObj["start_time_r"].toInt();
+            question["pauseVideo"] = (qObj["pause_video"].toInt() == 1);
+            question["title"] = qObj["title"].toString();
+
+            // 诊断日志：每组边逐条打出来。判断"该不该自动跳转"靠的是
+            // type 和 option 文案，出问题时对照这行就能定位是哪一条
+            QString dbg;
+            for (const QVariant &v : choiceList) {
+                const QVariantMap m = v.toMap();
+                dbg += QString(" | id=%1 cid=%2 opt=[%3] def=%4")
+                           .arg(m["id"].toInt())
+                           .arg(m["cid"].toString())
+                           .arg(m["option"].toString())
+                           .arg(m["isDefault"].toBool() ? 1 : 0);
+            }
+            qWarning() << "[PlayUrlManager] stein question: type=" << qObj["type"].toInt()
+                       << "pause=" << qObj["pause_video"].toInt()
+                       << "startR=" << qObj["start_time_r"].toInt()
+                       << "title=[" << qObj["title"].toString() << "]" << dbg;
+
+            out.append(question);
+        }
+
+        qWarning() << "[PlayUrlManager] stein edgeinfo questions:" << out.size();
+        emit steinEdgeInfoReady(out);
+    });
+}
+
+// ===========================================================================
+// 互动视频：取剧情图版本号（graph_version）
+//
+// 实测结论（2026-11-02，BV1S7aZ6ZEGJ）：
+//   · `/x/player/wbi/playurl` 的 data 里**没有** interaction 字段 ——
+//     游客、APP 风格参数（appkey + platform=pc）、fnval 各种组合都试过，
+//     data keys 只有 accept_*/dash/durl/support_formats 这些；
+//   · `/x/player/v2?cid=&bvid=` 的 data.interaction.graph_version 才有值
+//     （JSON 数字，如 1746314），游客态也能拿到。
+// 所以互动视频必须问 player 接口，不能指望 playurl。
+// ===========================================================================
+void PlayUrlManager::getSteinGraphVersion(const QString &bvid, const QString &cid)
+{
+    if (bvid.isEmpty() || cid.isEmpty()) {
+        emit steinGraphVersionReady(QString());
+        return;
+    }
+
+    const QString url = QString("https://api.bilibili.com/x/player/v2?cid=%1&bvid=%2").arg(cid, bvid);
+    QNetworkRequest request{QUrl(url)};
+    request.setRawHeader("User-Agent", USER_AGENT.toUtf8());
+    request.setRawHeader("Referer", (QString("https://www.bilibili.com/video/%1").arg(bvid)).toUtf8());
+    request.setRawHeader("Origin", ORIGIN.toUtf8());
+    QString cookies = LoginManager::instance()->getCookies();
+    if (!cookies.isEmpty()) {
+        request.setRawHeader("Cookie", cookies.toUtf8());
+    }
+
+    qDebug() << "[PlayUrlManager] getSteinGraphVersion:" << url;
+    // 一次性 QNAM：互动请求绝不能碰 playurl 的共享池。
+    // B 站的 480P 降级是按连接维度标记的（项目里踩过：同一条连接上的后续
+    // 请求会被静默按游客处理），而这条请求没有 playurl 那套 buvid 指纹头，
+    // 一旦复用共享池，紧接着的 playurl 就会拿到 mid=0 的 480P 流。
+    // 与 getPlayerDetailImpl 同样的处理方式。
+    QNetworkAccessManager *manager = new QNetworkAccessManager(this);
+    QNetworkReply *reply = manager->get(request);
+    connect(reply, &QNetworkReply::finished, this, [this, reply, manager]() {
+        manager->deleteLater();
+        reply->deleteLater();
+        QString gv;
+        if (reply->error() != QNetworkReply::NoError) {
+            qWarning() << "[PlayUrlManager] stein graph_version network error:" << reply->errorString();
+            emit steinGraphVersionReady(gv);
+            return;
+        }
+        const QJsonDocument doc = QJsonDocument::fromJson(reply->readAll());
+        if (doc.isObject()) {
+            const QJsonObject root = doc.object();
+            if (root["code"].toInt() == 0) {
+                const QJsonValue iv = root["data"].toObject()["interaction"];
+                if (iv.isObject()) {
+                    // graph_version 是 JSON 数字，可能超 int32 —— 走 toDouble
+                    const double n = iv.toObject()["graph_version"].toDouble();
+                    if (n > 0)
+                        gv = QString::number(static_cast<qint64>(n));
+                }
+            } else {
+                qWarning() << "[PlayUrlManager] stein graph_version API code:" << root["code"].toInt()
+                           << "msg:" << root["message"].toString();
+            }
+        }
+        // 用 WARN 级：日志处理器只记 WARN 及以上，这条要能在 BbQ.log 里看到
+        qWarning() << "[PlayUrlManager] stein graph_version:" << gv;
+        emit steinGraphVersionReady(gv);
+    });
 }
 
 void PlayUrlManager::getArchiveRelation(const QString &aid, const QString &bvid)

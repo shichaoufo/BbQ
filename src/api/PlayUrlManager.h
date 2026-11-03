@@ -47,6 +47,9 @@ public:
         int duration;
         QString segmentBaseInitialization;
         QString segmentBaseIndexRange;
+        // 互动视频的图谱版本（playurl 响应的 data.interaction.graph_version）。
+        // 非互动视频为空串。每次解析 playurl 都会重新写，切换分支片段时也一致。
+        QString graphVersion;
     };
 
     struct VideoUrlResult {
@@ -55,6 +58,9 @@ public:
         QList<PlayUrlInfo> dashAudioUrls;
         int requestedQuality = 0;     // 用户请求的视频清晰度（0表示自动）
         int requestedAudioQuality = 0; // 用户请求的音频质量（0表示自动/最高码率）
+        // 互动视频图谱版本（本次响应的 data.interaction.graph_version）。
+        // 缓存这份结果后，切清晰度/切音质不会丢掉"这是互动视频"的信息
+        QString graphVersion;
     };
 
     // 直播清晰度信息
@@ -176,6 +182,10 @@ public:
         // "未经作者授权 禁止转载"（B 站投稿时默认勾选，命中率不低）。
         // 语义是"1 = 显示禁止转载"，不是"1 = 允许转载"，别取反。
         bool noReprint = false;
+        // 互动视频标记：view 接口 data.rights.is_stein_gate == 1。
+        // 仅表示"这个稿件是互动视频"，真正的图谱版本在图谱接口/playurl 里，
+        // 所以这里只当"要不要去问 edgeinfo"的前置判断，不参与播放逻辑。
+        bool isSteinGate = false;
 
         // 联合投稿（staff）。B站"联合投稿"视频的每个参与者都在这份数组里，
         // 每项含 mid / name / face / title（身份，如 UP主、参演、配音）。
@@ -307,6 +317,21 @@ signals:
     // 所以切音质不需要重新请求接口，直接用缓存里的音频 URL 换轨
     void audioQualityListReady(const QVariantList &list);
 
+    // 互动视频的节点数据（/x/stein/edgeinfo_v2）。
+    //
+    // 结构：[ { choices: [ {id, cid, option}, ... ] }, ... ]
+    //   · questions 数组**全部保留**（PiliPlus 只取第一个，连续追问会丢）；
+    //   · 每项只有 choices，question 自身的标题/类型接口里也没给；
+    //   · 返回空数组表示该节点之后没有分支（互动到此结束）。
+    //
+    // 请求失败也会发一次空数组，让 QML 能收尾（不显示选项、继续正常播放），
+    // 不会卡在"等选项"的状态里。
+    void steinEdgeInfoReady(const QVariantList &questions);
+
+    // 剧情图版本号（来自 /x/player/v2 的 data.interaction.graph_version）。
+    // 空串表示该视频不是互动视频，或 player 接口没给（此时 QML 放弃互动逻辑）
+    void steinGraphVersionReady(const QString &graphVersion);
+
     // 视频信息已获取（包含cid，可用于加载弹幕等）
     void videoInfoReady(const QString &aid, const QString &bvid, const QString &cid, const QString &title);
 
@@ -396,6 +421,20 @@ public:
     // 避免二次 playerDetailReady 把 QML 侧章节覆盖成空列表
     void getHistoryProgress(const QString &aid, const QString &cid,
                             const QVariantList &viewPoints = QVariantList());
+
+    // 互动视频：拉取某个节点的分支选项。
+    //   bvid / graphVersion 必填；edgeId 为 0 时拉"起点"（第一次进入用），
+    //   否则拉该边指向的下一个节点（用户选了哪个选项就传它的 id）。
+    Q_INVOKABLE void getSteinEdgeInfo(const QString &bvid, const QString &graphVersion,
+                                      int edgeId = 0);
+
+    // 互动视频：取剧情图版本号（graph_version）。
+    //
+    // **不要从 playurl 取**：实测 `/x/player/wbi/playurl` 的 data 里根本没有
+    // interaction 字段（游客与 APP 风格参数都试过）。真正的来源是
+    // `/x/player/v2?cid=&bvid=` 的 data.interaction.graph_version（数字）。
+    // 调用方在 detail.is_stein_gate==1 时问一次即可，拿到后走 steinGraphVersionReady。
+    Q_INVOKABLE void getSteinGraphVersion(const QString &bvid, const QString &cid);
 
     // history/cursor 分页抓取（getHistoryProgress 内部用）：
     // 目标视频可能不在最近一页（ps=30），最多翻 maxPages 页

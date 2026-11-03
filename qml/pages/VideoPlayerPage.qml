@@ -135,6 +135,14 @@ Rectangle {
     // 除了转发给 mpv，还记录"发起的时刻 + 目标位置"，供 seekStallWatchdog
     // 判断这次 seek 是否被卡住。
     function doSeek(ms) {
+        // 用户/自动跳转把位置拉回中段：互动片段先前的"已播完"状态作废，
+        // 否则进度条会一直被钉在结尾（displayPositionMs 的钳制）看着骗人
+        if (pageRoot._steinSegmentEnded && mpvPlayer.duration > 0
+                && ms < mpvPlayer.duration - 1500) {
+            pageRoot._steinSegmentEnded = false
+            pageRoot._steinLastPos = -1
+            pageRoot._steinStallTicks = 0
+        }
         pageRoot._seekTargetMs = ms
         pageRoot._seekRequestedAt = Date.now()
         mpvPlayer.seek(ms)
@@ -622,6 +630,49 @@ Rectangle {
     property bool isMiniWindow: false   // 小窗播放：播放器迁入独立置顶窗口，主窗口隐藏
     property bool controlsVisible: false
     property bool cursorHidden: false   // 鼠标在播放区静止3秒后自动隐藏指针
+
+    // ===== 互动视频（/x/stein/edgeinfo_v2）=====
+    // 图谱版本，来自 playurl 的 data.interaction.graph_version；空串 = 普通视频。
+    // 同一视频的所有分支片段共用同一个值，所以它也是"是不是换了视频"的判据
+    property string steinGraphVersion: ""
+    // **当前片段**待答的问题队列，每项 { choices: [{id, cid, option, isDefault}] }。
+    // 切片段时整体清空 —— 收敛结构里"回到上一个分支、已看过的选项少一个"的
+    // 题目属于新片段，只有当新片段播完才会被消费
+    property var steinQuestions: []
+    // 当前展示中的那组选项
+    property var steinCurrentChoices: []
+    property bool steinOptionsVisible: false
+    // 本稿件是否互动视频（view 的 rights.is_stein_gate）。
+    // 只有为真才去问剧情图版本——图谱版本 playurl 不下发，要单独请求 player 接口
+    property bool isSteinGate: false
+    property bool _steinGraphFetching: false
+    // 切片段后等新流就绪：期间 position/duration 还是上一段的，
+    // 用它挡住"已经播过触发点/已到结尾"的误判
+    property bool _steinAwaitingStream: false
+    // 当前片段是否已经播到结尾。**只有它为真才允许弹选项**。
+    // 不能靠 position/duration 现算：刚切到新片段的一小段时间里，这两个值
+    // 还是上一段的（而上一段正好停在结尾），会把"刚起播"误判成"已播完"，
+    // 表现就是选完选项后分支片段根本没播、立刻又弹一遍选项
+    property bool _steinSegmentEnded: false
+    // 进入本片段的时刻（毫秒），切流后残留的旧 position/duration 要在这段时间内忽略
+    property double _steinSegmentEnteredAt: 0
+    // 结尾检测的辅助状态：上一次看到的位置、以及"位置连续没动"的 tick 数。
+    // 用来兜住"position 永远差几百毫秒到不了 duration"的片源，
+    // 这样主判据可以卡在真正的结尾（进度条走到 100%），不必提前 1 秒就暂停
+    property int _steinLastPos: -1
+    property int _steinStallTicks: 0
+    // 进度条显示位置（滑块 + 时间数字都用它）：
+    // 拖动/seek 锁定期间用锁定值；互动片段已播完时钉到片段结尾 ——
+    // 片尾 position 常常停在 duration 前几百毫秒，若不钉住滑块会停在 99%，
+    // 而选项卡片已经弹出来了，看着就像没播完。用户往后拖动会清掉
+    // _steinSegmentEnded（见 doSeek），所以不会长期骗人
+    readonly property int displayPositionMs: {
+        if (_seekDisplayMs >= 0)
+            return _seekDisplayMs
+        if (_steinSegmentEnded)
+            return Math.max(mpvPlayer.position, mpvPlayer.duration)
+        return mpvPlayer.position
+    }
     // 指针隐藏走应用级 override cursor（App.setPlayerCursorHidden）：
     // MouseArea.cursorShape 依赖叠层光标解析，控制栏 visible 切换后
     // 静止鼠标下窗口光标不会重新求值，会出现指针残留不隐藏的问题
@@ -679,6 +730,53 @@ Rectangle {
             var progress = Math.floor(mpvPlayer.position / 1000)
             if (progress <= 0) return
             doReportHistory(progress, false)
+        }
+    }
+
+    // 互动视频：检测片段是否播到结尾。
+    //
+    // **不能只靠 mpv 的 END_FILE**：libmpv 设了 keep-open=yes，播放结束时文件
+    // 并不真正关闭，end-file 事件会被推迟到"切源/停止"时才发，正常播完根本
+    // 收不到（playbackFinished 信号因此不触发）。这里直接看 position/duration。
+    // 只要在互动视频里、且本片段还没判过结尾就一直盯着——不能等 steinQuestions
+    // 到齐才启动：题目数据比播放进度晚到时会漏掉结尾判定
+    Timer {
+        id: steinEndTimer
+        interval: 400
+        repeat: true
+        running: pageRoot.steinGraphVersion !== ""
+                 && !pageRoot.steinOptionsVisible
+                 && !pageRoot._steinAwaitingStream
+                 && !pageRoot._steinSegmentEnded
+        onTriggered: {
+            if (!mpvPlayer) return
+            var d = mpvPlayer.duration
+            if (d <= 1000) return
+            // 切片段后的 1.5s 内 duration/position 可能还是上一段的（停在结尾），
+            // 直接比较会把刚起播判成已播完，先让新流把这两个值接管过来
+            if (Date.now() - pageRoot._steinSegmentEnteredAt < 1500) return
+            var p = mpvPlayer.position
+
+            // 主判据：位置真的贴到结尾（留 60ms 容差 ≈ 一到两帧）。
+            // 以前留 1.2s 余量，代价是进度条滑块会停在结尾前 1 秒多，
+            // 和官方"走到头才弹选项"对不上；现在只看有没有到末尾
+            if (p >= d - 60) {
+                pageRoot.markSteinSegmentEnded()
+                return
+            }
+
+            // 兜底：个别片源的音视频轨终点差几百毫秒，position 可能永远到不了 d。
+            // 条件收紧到最后 3 秒内 + 正在播 + 没在缓冲 + 位置连续两拍没动，
+            // 避免把"卡缓冲"或"用户暂停"误判成播完
+            var sameAsLast = (p === pageRoot._steinLastPos)
+            pageRoot._steinLastPos = p
+            if (sameAsLast && mpvPlayer.playing && !mpvPlayer.buffering && p >= d - 3000) {
+                pageRoot._steinStallTicks += 1
+                if (pageRoot._steinStallTicks >= 2)
+                    pageRoot.markSteinSegmentEnded()
+            } else if (!sameAsLast) {
+                pageRoot._steinStallTicks = 0
+            }
         }
     }
 
@@ -3068,6 +3166,149 @@ Rectangle {
         loadData()
     }
 
+    // ===== 互动视频 =====
+    //
+    // 数据链路：view 的 rights.is_stein_gate → playurl 的 interaction.graph_version
+    //          → /x/stein/edgeinfo_v2 拿 choices → 选项带 cid 直接切片段
+    // 每个分支片段本身就是一个普通分P，所以切片段 = 换 cid 重新取流，
+    // 和切分P同一条路，只是不重载简介/评论。
+
+    // 进入新图谱时拉起点节点；同一视频切片段（graphVersion 不变）不重复拉。
+    // 切到普通视频（空串）时同样走这里，把旧互动状态清干净
+    function syncSteinGraph(graphVersion) {
+        var gv = graphVersion || ""
+        if (pageRoot.steinGraphVersion === gv) return
+        pageRoot.steinGraphVersion = gv
+        pageRoot.steinQuestions = []
+        pageRoot.steinCurrentChoices = []
+        pageRoot.steinOptionsVisible = false
+        pageRoot._steinSegmentEnded = false
+        pageRoot._steinSegmentEnteredAt = 0
+        pageRoot._steinLastPos = -1
+        pageRoot._steinStallTicks = 0
+        if (gv === "") return
+        PlayUrlManager.getSteinEdgeInfo(pageRoot.bvid, gv, 0)
+    }
+
+    // 互动视频的图谱版本要问 player 接口（playurl 不下发 interaction），
+    // 只在 is_stein_gate 为真、还没拿到版本、且没有正在请求时才发一次
+    function maybeFetchSteinGraph() {
+        if (!pageRoot.isSteinGate) return
+        if (pageRoot.steinGraphVersion !== "") return
+        if (pageRoot._steinGraphFetching) return
+        if (pageRoot.bvid === "" || pageRoot.cid === "") return
+        pageRoot._steinGraphFetching = true
+        PlayUrlManager.getSteinGraphVersion(pageRoot.bvid, pageRoot.cid)
+    }
+
+    // 按题目的 start_time_r（帧号）算出该弹题的毫秒位置。
+    // 官方实测是**整段播完**才给选项，不看 start_time_r，所以这里不计算位置，
+    // 只保留 pause_video 语义：接口说不暂停时，选项浮在画面上继续播。
+    // （保留函数是为了以后遇到"边播边问"的互动视频时能快速接回来）
+    function steinPauseOnShowOf(question) {
+        return !(question && question.pauseVideo === false)
+    }
+
+    // 过场边（接口 type=0）：没有选项、官方不弹卡片直接续播下一段。
+    //
+    // **判断绝不能看"选项数量"或 is_default / 文案**：过场边是"单选项 +
+    // is_default=1 + option 只有占位 'A '"，但收敛结构里"分支只剩最后一个
+    // 真实选项"的问句长得一模一样（实测 BV1S7aZ6ZEGJ 的 'A 娜妃'），官方
+    // 照样弹出来让人点。唯一可靠的区分是 type：
+    //   type=1 → 有选项的问句（start_time_r 有值、pause_video=1）
+    //   type=0 → 过场边（无 start_time_r、pause_video=0）
+    function steinIsAutoAdvance(question) {
+        if (!question || !question.choices || question.choices.length <= 0) return false
+        if (question.type === 1) return false
+        if (question.type === 0) return true
+        // 老图谱没下发 type：退化为"单选项 + 接口说不暂停"
+        return question.choices.length === 1 && question.pauseVideo === false
+    }
+
+    // 判定"本片段播完"：置位 + 弹题（题目还没到就等 onSteinEdgeInfoReady 补弹）。
+    // 结尾检测有两个来源（计时器看到位置到末尾 / 真 EOF），统一走这里
+    function markSteinSegmentEnded() {
+        if (pageRoot._steinSegmentEnded) return
+        pageRoot._steinSegmentEnded = true
+        pageRoot._steinStallTicks = 0
+        pageRoot.showSteinQuestion()
+    }
+
+    // 弹出一个问题：队列里有就停住等用户选。
+    // **只有本片段真的播完才允许弹**（_steinSegmentEnded）。这条是硬约束：
+    // 分支片段之间是"回到上一个分支、已看过的选项消失"的收敛结构，切段后
+    // 新片段自带的题目会立刻到达；一旦提前弹出来，用户就会看到"选完又被问一遍"
+    function showSteinQuestion() {
+        if (!pageRoot._steinSegmentEnded) return
+        if (pageRoot.steinOptionsVisible) return
+        if (pageRoot.steinQuestions.length <= 0) return
+        var next = pageRoot.steinQuestions[0]
+        pageRoot.steinQuestions = pageRoot.steinQuestions.slice(1)
+
+        // 自动跳转节点：不弹卡片，直接切到目标片段并拉下一个节点
+        if (steinIsAutoAdvance(next)) {
+            var auto = next.choices[0]
+            console.warn("[Stein] auto advance to cid:", auto.cid)
+            PlayUrlManager.getSteinEdgeInfo(pageRoot.bvid, pageRoot.steinGraphVersion, auto.id)
+            pageRoot.playSteinSegment(auto.cid)
+            return
+        }
+
+        // 停在最后一帧等选择（libmpv 已设 keep-open=yes，EOF 后画面不会黑）；
+        // 接口 pause_video=0 的题不暂停，选项浮在画面上、视频继续播
+        if (steinPauseOnShowOf(next) && mpvPlayer) mpvPlayer.pause()
+        pageRoot.steinCurrentChoices = (next && next.choices) ? next.choices : []
+        pageRoot.steinOptionsVisible = pageRoot.steinCurrentChoices.length > 0
+        // WARN 级：日志只记 WARN 及以上，这条用来确认"到底弹了没有"
+        console.warn("[Stein] show question, choices:", pageRoot.steinCurrentChoices.length,
+                     "remaining:", pageRoot.steinQuestions.length)
+    }
+
+    // 选中一个选项：直接切到该选项指向的片段。
+    // **不在这里就地消费 steinQuestions**：收敛结构（分支片段播完回到上一个
+    // 分支、已看过的选项减少一个）的那组题目属于**新片段**，必须等新片段
+    // 播完再弹。finish 后顺序是：切流 → 新片段播完 → 弹剩余的选项
+    function selectSteinChoice(choice) {
+        if (!choice || !choice.cid) return
+        pageRoot.steinOptionsVisible = false
+        pageRoot.steinCurrentChoices = []
+        // 带本次选中的 edge_id 去问下一个节点的题目（接口会据此返回
+        // "回到分支后剩余的选项"，已选过的那个自然消失）
+        PlayUrlManager.getSteinEdgeInfo(pageRoot.bvid, pageRoot.steinGraphVersion, choice.id)
+        pageRoot.playSteinSegment(choice.cid)
+    }
+
+    // 切到互动片段：只换流，不重载简介/评论/UP 信息。
+    // 与 switchPage 的差别就在这里——switchPage 走 loadData() 会把整页重来一遍
+    function playSteinSegment(cid) {
+        if (!cid) return
+        // 清掉上一段的所有互动状态：选项面板、题目队列、结尾标记。
+        // 题目队列必须清，否则上一段剩下的题目会被当成新片段的题目提前弹出
+        pageRoot.steinOptionsVisible = false
+        pageRoot.steinCurrentChoices = []
+        pageRoot.steinQuestions = []
+        pageRoot._steinSegmentEnded = false
+        pageRoot._steinSegmentEnteredAt = Date.now()
+        pageRoot._steinLastPos = -1
+        pageRoot._steinStallTicks = 0
+        // 同一 cid 也是有可能的（某些剧情图的分支会指回当前片段），
+        // 这种情况也要从 0 重播，所以不做 cid 相同就跳过的短路
+        pageRoot.cid = cid
+        pageRoot._steinAwaitingStream = true
+        danmakuTimer.stop()
+        pageRoot.danmakuList.clear()
+        pageRoot.danmakuIndex = 0
+        pageRoot.lastDanmakuTime = 0
+        if (videoDanmakuOverlay) videoDanmakuOverlay.clear()
+        scheduleDanmakuRequest(cid)
+        var q = pageRoot.currentQualityId > 0 ? pageRoot.currentQualityId : Settings.defaultQuality()
+        // 480P 防线：B 站的降级按"连接"标记，切流前把共享池里的空闲连接清掉，
+        // 保证这次 playurl 走全新连接（与"关掉视频再打开就恢复清晰度"同一手段）。
+        // 互动请求本身已改成一次性 QNAM，这里是双保险
+        PlayUrlManager.resetConnectionState()
+        PlayUrlManager.getPlayUrl(pageRoot.aid, cid, q)
+    }
+
     function getLevelColor(level) {
         switch (level) {
             case 0:
@@ -3314,6 +3555,22 @@ Rectangle {
             }
             
             pageRoot.cid = finalCid
+            // 互动视频标记（view 的 rights.is_stein_gate）。只有为真才去问
+            // 剧情图版本——普通视频不该多发一次 player 请求
+            pageRoot.isSteinGate = detail.isSteinGate === true
+            pageRoot._steinGraphFetching = false
+            // 打开/换视频：不论是不是互动视频都把上一份互动状态清干净。
+            // 图谱版本也置空，让 syncSteinGraph 重新拉一次起点节点——同一个
+            // 互动视频重新打开时旧题目不能留在队列里（否则会立刻弹出来）
+            pageRoot.steinGraphVersion = ""
+            pageRoot.steinQuestions = []
+            pageRoot.steinCurrentChoices = []
+            pageRoot.steinOptionsVisible = false
+            pageRoot._steinSegmentEnded = false
+            pageRoot._steinSegmentEnteredAt = 0
+            pageRoot._steinLastPos = -1
+            pageRoot._steinStallTicks = 0
+            pageRoot.maybeFetchSteinGraph()
             pageRoot.mid = detail.ownerMid || ""
             pageRoot.videoTitle = detail.title || ""
             pageRoot.upName = detail.ownerName || ""
@@ -3551,6 +3808,11 @@ Rectangle {
             // 实际生效的音频档位：下拉框按它选中，用户才能看到"现在是多少 K"
             pageRoot.currentAudioId = info.audioId || 0
             if (audioQualityCombo) audioQualityCombo.syncIndex()
+            // 新流就绪：互动片段切换完成，此后 position/duration 才是本片段的
+            pageRoot._steinAwaitingStream = false
+            // 互动视频：playurl 不下发图谱版本（实测没有 interaction 字段），
+            // 这里只触发一次 player 接口查询，拿到版本后再开始互动逻辑
+            pageRoot.maybeFetchSteinGraph()
             pageRoot.videoDuration = info.duration || 0
             // 新流准备就绪，重置播放级重试状态
             pageRoot.playbackRetryCount = 0
@@ -3601,6 +3863,28 @@ Rectangle {
                 // 启动心跳定时器，持续同步播放进度
                 heartbeatTimer.start()
             }
+        }
+        // 剧情图版本号（来自 player 接口）。空串 = 不是互动视频 / 接口没给，
+        // 直接放弃互动逻辑，按普通视频播
+        function onSteinGraphVersionReady(graphVersion) {
+            pageRoot._steinGraphFetching = false
+            var gv = graphVersion || ""
+            if (gv === "") {
+                pageRoot.steinGraphVersion = ""
+                return
+            }
+            pageRoot.syncSteinGraph(gv)
+        }
+        // 互动节点数据到达。这批题目属于**当前正在播的片段**（切片段时就是拿
+        // 它的 incoming edge 去问的），只有该片段播完才允许弹——不能再用
+        // position/duration 现判：切流后的一小段时间里这两个值还是上一段的
+        // （停在结尾），会把刚起播误判成已播完，表现就是"选完立刻又弹一遍选项"。
+        // 数据比结尾判定晚到时在这里补弹
+        function onSteinEdgeInfoReady(questions) {
+            pageRoot.steinQuestions = questions || []
+            if (pageRoot._steinAwaitingStream) return
+            if (!pageRoot._steinSegmentEnded) return
+            pageRoot.showSteinQuestion()
         }
         function onRelatedVideosReady(videos) {
             // 如果普通视频推荐返回0，但当前是番剧模式，则改用番剧推荐API重试
@@ -4073,6 +4357,16 @@ Rectangle {
                     id: mpvPlayer
                     anchors.fill: parent
                     volume: pageRoot.volume
+                    // 点播片段自然播完（EOF）。互动视频据此停住并弹分支选项；
+                    // 普通视频这里是空操作，EOF 后本来就停在结尾。
+                    // 切片段瞬间旧流的 EOF 要忽略，否则会拿上一段的题目弹出来
+                    onPlaybackFinished: {
+                        if (pageRoot._steinAwaitingStream) return
+                        if (pageRoot.steinGraphVersion === "") return
+                        // EOF 是权威的"本片段播完"（keep-open 下通常收不到，
+                        // 计时器会兜住），两条路统一走 markSteinSegmentEnded
+                        pageRoot.markSteinSegmentEnded()
+                    }
                     onPlayingChanged: {
                         pageRoot.isPlaying = playing
                         // 播放期间阻止系统息屏/自动睡眠（暂停、结束、关闭都会走到
@@ -4805,6 +5099,81 @@ Rectangle {
                     }
                 }
 
+                // 互动视频分支选项：片段播完时浮在控制栏上方，选项多时自动换行。
+                // 高度比控制栏高，不遮挡播放/进度等操作
+                Rectangle {
+                    id: steinChoiceBar
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    anchors.bottom: parent.bottom
+                    anchors.bottomMargin: 130          // 控制栏 118 + 12
+                    width: Math.min(parent.width - 48, 560)
+                    height: steinColumn.implicitHeight + 28
+                    radius: 8
+                    color: FluTheme.dark ? Qt.rgba(32 / 255, 32 / 255, 32 / 255, 0.92)
+                                         : Qt.rgba(1, 1, 1, 0.96)
+                    border.width: 1
+                    border.color: FluTheme.dividerColor
+                    visible: pageRoot.steinOptionsVisible
+                             && pageRoot.steinCurrentChoices.length > 0
+                    z: 40
+
+                    FluShadow { radius: 8 }
+
+                    Column {
+                        id: steinColumn
+                        anchors.horizontalCenter: parent.horizontalCenter
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: parent.width - 24
+                        spacing: 10
+
+                        FluText {
+                            anchors.horizontalCenter: parent.horizontalCenter
+                            text: "请选择后续剧情"
+                            font: FluTextStyle.Caption
+                            color: FluTheme.fontSecondaryColor
+                        }
+
+                        Flow {
+                            id: steinFlow
+                            width: steinColumn.width
+                            spacing: 10
+
+                            Repeater {
+                                model: pageRoot.steinCurrentChoices
+
+                                delegate: Rectangle {
+                                    width: choiceLabel.width + 32
+                                    height: 36
+                                    radius: 18
+                                    color: choiceMouse.containsMouse
+                                           ? (FluTheme.dark ? "#3D3D3D" : "#E8E8E8")
+                                           : (FluTheme.dark ? "#2E2E2E" : "#F2F2F2")
+                                    border.width: 1
+                                    border.color: FluTheme.dividerColor
+
+                                    FluText {
+                                        id: choiceLabel
+                                        anchors.centerIn: parent
+                                        width: Math.min(implicitWidth, 440)
+                                        text: modelData.option || ""
+                                        font: FluTextStyle.Body
+                                        elide: Text.ElideRight
+                                        color: FluTheme.fontPrimaryColor
+                                    }
+
+                                    MouseArea {
+                                        id: choiceMouse
+                                        anchors.fill: parent
+                                        hoverEnabled: true
+                                        cursorShape: Qt.ArrowCursor
+                                        onClicked: pageRoot.selectSteinChoice(modelData)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // 播放控制栏
                 // radius 使底部两角为圆角（与 videoContainer 圆角一致）；
                 // 顶部两角处于渐变透明区（0~55% 全透明），圆角裁切不可见，
@@ -4851,7 +5220,7 @@ Rectangle {
                                 // 锁定期间（_seekDisplayMs >= 0）显示点击/拖动的目标位置，
                                 // 否则跟随真实播放位置。避免 seek 生效前被旧 position 拽回、
                                 // 表现为"滑块在点击处和原位之间来回闪"。
-                                value: pageRoot._seekDisplayMs >= 0 ? pageRoot._seekDisplayMs : mpvPlayer.position
+                                value: pageRoot.displayPositionMs
                                 text: pageRoot.formatDuration(Math.floor(value / 1000))
                                 // 拖动中**不能**每次移动都 seek：DASH 是两条 HTTP
                                 // 流，每次 seek 都要中断 demuxer 重新定位并等网络，
@@ -5040,7 +5409,9 @@ Rectangle {
                             }
 
                             FluText {
-                                text: (mpvPlayer.position > 0 ? pageRoot.formatDuration(Math.floor(mpvPlayer.position / 1000)) : "0:00")
+                                // 与滑块同源取显示位置：互动片段播完时数字也走到结尾，
+                                // 不会出现"卡片已弹出、数字还差 1 秒"
+                                text: (pageRoot.displayPositionMs > 0 ? pageRoot.formatDuration(Math.floor(pageRoot.displayPositionMs / 1000)) : "0:00")
                                       + " / " + (mpvPlayer.duration > 0 ? pageRoot.formatDuration(Math.floor(mpvPlayer.duration / 1000))
                                                 : (pageRoot.videoDuration > 0 ? pageRoot.formatDuration(pageRoot.videoDuration) : "--:--"))
                                 font: FluTextStyle.Caption
@@ -7707,7 +8078,7 @@ Rectangle {
                     from: 0
                     to: mpvPlayer.duration > 0 ? mpvPlayer.duration : (pageRoot.videoDuration > 0 ? pageRoot.videoDuration * 1000 : 1)
                     // 与主进度条同策略：锁定显示值防回弹（见 progressSlider 注释）
-                    value: pageRoot._seekDisplayMs >= 0 ? pageRoot._seekDisplayMs : mpvPlayer.position
+                    value: pageRoot.displayPositionMs
                     text: pageRoot.formatDuration(Math.floor(value / 1000))
                     // 与主进度条同策略：防抖后再 seek（见 progressSlider 注释）
                     onMoved: {
@@ -7719,7 +8090,7 @@ Rectangle {
                 }
 
                 FluText {
-                    text: pageRoot.formatDuration(Math.floor(mpvPlayer.position / 1000))
+                    text: pageRoot.formatDuration(Math.floor(pageRoot.displayPositionMs / 1000))
                           + " / "
                           + pageRoot.formatDuration(mpvPlayer.duration > 0 ? Math.floor(mpvPlayer.duration / 1000)
                                 : (pageRoot.videoDuration > 0 ? pageRoot.videoDuration : 0))
