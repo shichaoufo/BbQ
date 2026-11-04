@@ -7,6 +7,7 @@
 #include <QString>
 #include <QList>
 #include <QMap>
+#include <QHash>
 #include <QVariantMap>
 #include <QVariantList>
 
@@ -37,6 +38,10 @@ public:
         // 码率（bps）。dash.audio 每项都带 bandwidth，用来生成"64K/132K/192K"
         // 之外的兜底标签，也用于"自动"档按实际码率挑最高，而不是只比 id
         int bandwidth = 0;
+        // 视频轨码率（bps，取 dash.video[].bandwidth）。
+        // P1a 的 CDN 打分要用它：实测下载速度长期低于"码率 × 1.15"就判这条
+        // 线路跑不动（能起播但一直缓冲的场景，P0 的首帧看门狗抓不到）
+        int videoBandwidth = 0;
         // 实际选中的音频档位 id（30216/30232/30280/30250/30251）。
         // qualityId 是视频清晰度，两者不能共用一个字段：QML 的"选择音质"
         // 下拉要显示真正生效的档位，而不是用户的偏好值
@@ -701,6 +706,7 @@ private:
     // 用的是服务端原始 URL（不改 host），签名天然有效；这里只影响"用哪个
     // 候选"，不做 host 替换（那是 m_cdnReplaceMode 的活）。
     // onlyVendor：0 = 不限（按 华为>腾讯>阿里 挑）；1/2/3 = 只要该厂商的原始 URL
+    // **自动档会自动跳过"退避中"的坏节点**（见 CDN 健康表），固定档不跳
     static QString pickPreferredCdn(const QString &baseUrl, const QList<QString> &backupUrls,
                                     int onlyVendor = 0);
     // 该 host 属于哪一档优先级（0=华为, 1=腾讯, 2=阿里, -1=不参与优先级）
@@ -728,6 +734,49 @@ private:
     
     // 获取可用的 CDN 服务器列表
     Q_INVOKABLE QVariantList getAvailableCDNServers() const;
+
+    // ===== CDN 健康表（跨视频、跨启动持久化）=====
+    //
+    // 问题：自动档按固定优先级挑（华为>腾讯>阿里），某台机器上如果到某家 CDN
+    // 的链路就是不通，每次打开视频都要先撞一次墙再重试换源。这里把"哪个 host
+    // 坏过"记下来，下次直接排到队尾。
+    //
+    // QML 在起播阶段上报：
+    //   ok=true                 → 该 host 起播成功（首帧已出），失败计数清零
+    //   ok=false, bytesReceived=0 → 一个字节都没拿到（连接失败/403/超时），
+    //                               才计一次失败；收到过字节的中断不算
+    // 失败后按 3s → 6s → 12s → 24s → 60s 指数退避，退避期内跳过该 host；
+    // 全都退避时回退完整列表（不让视频没地址可用）。固定档（用户指定厂商）
+    // 不受影响 —— 用户的选择优先。
+    Q_INVOKABLE void reportCdnResult(const QString &url, bool ok, int bytesReceived);
+    // 该地址所在 host 当前是否处于退避期（QML 轮换备份时用来跳过坏节点）
+    Q_INVOKABLE bool cdnHostBlocked(const QString &url) const;
+
+    // 播放中吞吐采样打分（P1a）：QML 每 2 秒取一次实测下载速度，和视频码率比。
+    //   observedBps >= requiredBps * 1.15 → 判为健康（清 slow 计数）
+    //   连续 2 次不达标 → soft block 5 分钟（不当作"坏"，只是排到队尾）
+    // 和 reportCdnResult 的区别：那个管"能不能起播"（硬失败），这个管
+    // "起播了但跑不动"（软降权，5 分钟自动恢复）
+    Q_INVOKABLE void reportCdnThroughput(const QString &url, int observedBps, int requiredBps);
+
+    struct HostHealth {
+        int fails = 0;
+        qint64 blockedUntil = 0;
+        qint64 lastOkAt = 0;
+        // 吞吐不达标的连续次数与软降权截止时间
+        int slowHits = 0;
+        qint64 slowUntil = 0;
+        qint64 lastSlowAt = 0;
+    };
+    // 从"URL 或裸 host"里取 host（QML 两处都会传：起播上报传 host 字符串，
+    // 轮换候选时传完整 URL）。取不到返回空串
+    static QString cdnHostOf(const QString &urlOrHost);
+    static QHash<QString, HostHealth> s_hostHealth;
+    static bool s_hostHealthLoaded;
+    static void loadCdnHealth();
+    static void saveCdnHealth();
+    // 该 host 当前是否处于退避期
+    static bool isHostBlocked(const QString &host);
     
     // CDN 替换模式：0=不替换, 1=全部替换, 2=仅替换PCDN, 3=仅替换代理
     int m_cdnReplaceMode = 0;

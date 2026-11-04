@@ -94,6 +94,10 @@ public:
     Q_INVOKABLE void updatePosition();
     Q_INVOKABLE QVariantMap getVideoInfo();
 
+    // 采样当前网络下载速率（bytes/s，-1 = 未知）。与 MpvObject 同签名同语义：
+    // QML 每 2 秒调一次做 CDN 吞吐打分（P1a）
+    Q_INVOKABLE qreal sampleDownloadBps();
+
     // 已渲染帧计数（单调递增）。
     // 给 QML 的"音频在走、画面卡住"看门狗用：只在 renderMpv() 里 +1，
     // 所以"数值不变"就等于"确实没有新画面输出"（暂停/正常播放都会变，
@@ -220,6 +224,9 @@ private:
     bool m_audioCdnAlign = true;
     // paused-for-cache：mpv 因缓存不足主动暂停
     bool m_buffering = false;
+    // sampleDownloadBps() 的采样基线（fw-bytes 差分用）
+    qint64 m_bpsLastBytes = -1;
+    qint64 m_bpsLastAt = 0;
     // positionChanged 信号节流：time-pos 以视频帧率上报（30fps 视频即
     // 30 次/秒），每次 emit 都驱动 QML 进度条绑定更新 → 整窗合成。
     // pacer tick 与 mpv 事件到达相位错开时各自触发独立呈现（关弹幕

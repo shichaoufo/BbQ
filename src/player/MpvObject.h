@@ -85,6 +85,13 @@ public:
     // 获取实际播放的视频参数（宽、高、codec、fps、bitrate 等），用于验证当前流的真实画质
     Q_INVOKABLE QVariantMap getVideoInfo();
 
+    // 采样当前网络下载速率（bytes/s，返回 -1 表示"未知"）。
+    // QML 每 2 秒调一次，用于 CDN 吞吐打分（P1a）：实测速度长期低于
+    // 视频码率 × 1.15 就把这条线路软降权。优先取 mpv 的
+    // demuxer-cache-state/raw-input-rate，缺这个字段时退回 fw-bytes 差分
+    // （缓存写满后 fw-bytes 不再增长，此时返回 -1 而不是 0）
+    Q_INVOKABLE qreal sampleDownloadBps();
+
     // 已渲染帧计数（单调递增）。与 D3D11 实现同签名同语义，
     // QML 的画面卡死看门狗直接调用，不做平台分支。
     Q_INVOKABLE qint64 renderedFrameCount() const;
@@ -210,6 +217,9 @@ private:
     // 音频 CDN 跟随视频（见 MpvObjectD3D11.cpp 的 alignAudioHostToVideo 注释）
     bool m_audioCdnAlign = true;
     bool m_buffering = false;
+    // sampleDownloadBps() 的采样基线（fw-bytes 差分用）
+    qint64 m_bpsLastBytes = -1;
+    qint64 m_bpsLastAt = 0;
     // positionChanged 信号节流：time-pos 以视频帧率上报（30fps 视频即
     // 30 次/秒），每次 emit 都驱动 QML 进度条绑定更新 → 整窗合成。
     // pacer tick 与 mpv 事件到达相位错开时各自触发独立呈现（关弹幕

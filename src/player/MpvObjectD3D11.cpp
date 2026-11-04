@@ -12,6 +12,7 @@
 #include <QTime>
 #include <QElapsedTimer>
 #include <QTimer>
+#include <QDateTime>
 // 字幕下载与解析：一次性 QNAM + bcc JSON
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
@@ -1252,6 +1253,41 @@ void MpvObjectD3D11::loadFile(const QString &file)
 void MpvObjectD3D11::setPendingStart(double seconds)
 {
     m_pendingStartSeconds = (seconds > 0.0) ? seconds : -1.0;
+}
+
+// CDN 吞吐采样（P1a）：优先用 mpv 自己估的网络输入速率；
+// 老版本没有 raw-input-rate 时退回 fw-bytes 差分，并在缓存写满时返回 -1
+qreal MpvObjectD3D11::sampleDownloadBps()
+{
+    if (!m_mpv) return -1;
+
+    int64_t rawRate = 0;
+    if (mpv_get_property(m_mpv, "demuxer-cache-state/raw-input-rate",
+                         MPV_FORMAT_INT64, &rawRate) >= 0 && rawRate > 0) {
+        return static_cast<qreal>(rawRate);
+    }
+
+    int64_t fw = 0;
+    if (mpv_get_property(m_mpv, "demuxer-cache-state/fw-bytes",
+                         MPV_FORMAT_INT64, &fw) < 0) {
+        return -1;
+    }
+    double cacheSecs = 0.0;
+    mpv_get_property(m_mpv, "demuxer-cache-state/cache-duration",
+                     MPV_FORMAT_DOUBLE, &cacheSecs);
+
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    qreal bps = -1;
+    if (m_bpsLastBytes >= 0 && now > m_bpsLastAt && fw >= m_bpsLastBytes) {
+        const qint64 dt = now - m_bpsLastAt;
+        const qint64 dBytes = fw - m_bpsLastBytes;
+        // 缓存已经堆满（>10s）且没有新字节：这是"下载停了"，不是"慢"
+        if (dt > 0 && (dBytes > 0 || cacheSecs < 10.0))
+            bps = dBytes * 1000.0 / dt;
+    }
+    m_bpsLastBytes = fw;
+    m_bpsLastAt = now;
+    return bps;
 }
 
 QVariantMap MpvObjectD3D11::getVideoInfo()

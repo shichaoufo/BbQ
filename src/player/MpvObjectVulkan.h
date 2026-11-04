@@ -64,6 +64,10 @@ public:
     Q_INVOKABLE void updatePosition();
     Q_INVOKABLE QVariantMap getVideoInfo();
 
+    // 采样当前网络下载速率（bytes/s，-1 = 未知）。与 MpvObject 同签名同语义：
+    // QML 每 2 秒调一次做 CDN 吞吐打分（P1a）
+    Q_INVOKABLE qreal sampleDownloadBps();
+
 signals:
     void sourceChanged();
     void audioSourceChanged();
@@ -114,6 +118,10 @@ private:
     bool m_hasVideo = false;
     bool m_seekable = false;
     bool m_paused = true;
+
+    // sampleDownloadBps() 的采样基线（fw-bytes 差分用）
+    qint64 m_bpsLastBytes = -1;
+    qint64 m_bpsLastAt = 0;
 
     QQuickWindow *m_window = nullptr;
     QTimer *m_renderTimer = nullptr;

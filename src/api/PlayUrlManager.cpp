@@ -226,6 +226,11 @@ QString PlayUrlManager::pickPreferredCdn(const QString &baseUrl, const QList<QSt
         for (const QString &u : candidates) {
             const QString host = QUrl(u).host().toLower();
             if (cdnVendorRank(host) == rank) {
+                // 自动档要避开"最近判定为坏"的节点；固定档以用户选择为准，不跳过
+                if (vendorIdx < 0 && isHostBlocked(host)) {
+                    qWarning() << "[CDN] skip blocked host:" << host;
+                    continue;
+                }
                 if (u != baseUrl) {
                     qDebug() << "[PlayUrlManager] CDN priority pick, rank" << rank
                              << "(0=hw 1=cos 2=ali):" << host
@@ -242,8 +247,14 @@ void PlayUrlManager::sortBackupsByCdnPriority(QList<QString> &urls)
 {
     // stable_sort：同档位内保持服务端给的原始顺序
     std::stable_sort(urls.begin(), urls.end(), [](const QString &a, const QString &b) {
-        const int ra = cdnVendorRank(QUrl(a).host().toLower());
-        const int rb = cdnVendorRank(QUrl(b).host().toLower());
+        const QString ha = QUrl(a).host().toLower();
+        const QString hb = QUrl(b).host().toLower();
+        // 退避中的坏节点一律排最后（运行期轮换备份时也跟着避开）
+        const bool ba = isHostBlocked(ha);
+        const bool bb = isHostBlocked(hb);
+        if (ba != bb) return !ba;
+        const int ra = cdnVendorRank(ha);
+        const int rb = cdnVendorRank(hb);
         // 不参与优先级的（PCDN/海外/未知）排最后
         const int ka = (ra < 0) ? 99 : ra;
         const int kb = (rb < 0) ? 99 : rb;
@@ -256,6 +267,165 @@ bool PlayUrlManager::isPCDN(const QString &url)
     // PCDN 节点是不包含官方 CDN 域名的节点
     if (url.isEmpty()) return false;
     return !isOfficialCDN(url);
+}
+
+// ===========================================================================
+// CDN 健康表：host → 失败计数 / 退避截止时间 / 最近成功时间
+//
+// 持久化到 AppSettings 的 "cdnHostHealth"（JSON）。跨视频、跨启动生效：
+// 某台机器到某家 CDN 的链路长期不通时，下次打开视频会直接跳过它，而不是
+// 每次都先撞一次墙。
+// ===========================================================================
+QHash<QString, PlayUrlManager::HostHealth> PlayUrlManager::s_hostHealth;
+bool PlayUrlManager::s_hostHealthLoaded = false;
+
+void PlayUrlManager::loadCdnHealth()
+{
+    if (s_hostHealthLoaded) return;
+    s_hostHealthLoaded = true;
+    AppSettings *s = AppSettings::instance();
+    if (!s) return;
+    const QString raw = s->getString("cdnHostHealth", QString());
+    if (raw.isEmpty()) return;
+    const QJsonDocument doc = QJsonDocument::fromJson(raw.toUtf8());
+    if (!doc.isObject()) return;
+    const QJsonObject obj = doc.object();
+    for (auto it = obj.constBegin(); it != obj.constEnd(); ++it) {
+        const QJsonObject o = it.value().toObject();
+        HostHealth h;
+        h.fails = o["fails"].toInt();
+        h.blockedUntil = static_cast<qint64>(o["blockedUntil"].toDouble());
+        h.lastOkAt = static_cast<qint64>(o["lastOkAt"].toDouble());
+        h.slowHits = o["slowHits"].toInt();
+        h.slowUntil = static_cast<qint64>(o["slowUntil"].toDouble());
+        h.lastSlowAt = static_cast<qint64>(o["lastSlowAt"].toDouble());
+        s_hostHealth.insert(it.key(), h);
+    }
+    qDebug() << "[CDN] health table loaded, hosts:" << s_hostHealth.size();
+}
+
+void PlayUrlManager::saveCdnHealth()
+{
+    AppSettings *s = AppSettings::instance();
+    if (!s) return;
+    QJsonObject obj;
+    for (auto it = s_hostHealth.constBegin(); it != s_hostHealth.constEnd(); ++it) {
+        QJsonObject o;
+        o["fails"] = it.value().fails;
+        o["blockedUntil"] = static_cast<double>(it.value().blockedUntil);
+        o["lastOkAt"] = static_cast<double>(it.value().lastOkAt);
+        o["slowHits"] = it.value().slowHits;
+        o["slowUntil"] = static_cast<double>(it.value().slowUntil);
+        o["lastSlowAt"] = static_cast<double>(it.value().lastSlowAt);
+        obj.insert(it.key(), o);
+    }
+    s->setString("cdnHostHealth",
+                 QString::fromUtf8(QJsonDocument(obj).toJson(QJsonDocument::Compact)));
+}
+
+bool PlayUrlManager::isHostBlocked(const QString &host)
+{
+    if (host.isEmpty()) return false;
+    loadCdnHealth();
+    const auto it = s_hostHealth.constFind(host.toLower());
+    if (it == s_hostHealth.constEnd()) return false;
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    // 硬失败（连不上/零字节）与软降权（跑不动，P1a 打分）都算"先用别人"
+    return it.value().blockedUntil > now || it.value().slowUntil > now;
+}
+
+void PlayUrlManager::reportCdnThroughput(const QString &url, int observedBps, int requiredBps)
+{
+    if (requiredBps <= 0 || observedBps <= 0) return;
+    const QString host = cdnHostOf(url);
+    if (host.isEmpty()) return;
+
+    loadCdnHealth();
+    HostHealth h = s_hostHealth.value(host);
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+
+    // 1.15 倍余量：刚好跟得上码率也会周期性卡顿，要留一点缓冲空间
+    const bool healthy = (observedBps >= requiredBps * 1.15);
+    if (healthy) {
+        if (h.slowHits == 0 && h.slowUntil == 0) return;   // 一直是好的，不写盘
+        h.slowHits = 0;
+        h.slowUntil = 0;
+        qWarning() << "[CDN] host throughput recovered:" << host
+                   << "observed(kbps):" << observedBps / 1000;
+        s_hostHealth.insert(host, h);
+        saveCdnHealth();
+        return;
+    }
+
+    // 10 分钟没再出现慢样本 → 旧计数自动衰减，避免"上次慢"永久影响
+    if (h.lastSlowAt > 0 && now - h.lastSlowAt > 600000)
+        h.slowHits = 0;
+    h.slowHits += 1;
+    h.lastSlowAt = now;
+    if (h.slowHits >= 2) {
+        // 软降权 5 分钟：不当作"坏节点"，只是在下一次挑源时排到后面
+        h.slowUntil = now + 300000;
+        qWarning() << "[CDN] host underperforming:" << host
+                   << "observed(kbps):" << observedBps / 1000
+                   << "required(kbps):" << requiredBps / 1000
+                   << "soft-blocked 5min";
+    }
+    s_hostHealth.insert(host, h);
+    saveCdnHealth();
+}
+
+QString PlayUrlManager::cdnHostOf(const QString &urlOrHost)
+{
+    const QString s = urlOrHost.trimmed().toLower();
+    if (s.isEmpty()) return QString();
+    const QString h = QUrl(s).host();
+    if (!h.isEmpty()) return h;
+    // 裸 host（QML 上报时传的就是 mpvPlayer.source 解析出来的 host）
+    QString bare = s;
+    const int slash = bare.indexOf('/');
+    if (slash >= 0) bare = bare.left(slash);
+    return bare.contains('.') ? bare : QString();
+}
+
+bool PlayUrlManager::cdnHostBlocked(const QString &url) const
+{
+    return isHostBlocked(cdnHostOf(url));
+}
+
+void PlayUrlManager::reportCdnResult(const QString &url, bool ok, int bytesReceived)
+{
+    const QString host = cdnHostOf(url);
+    if (host.isEmpty()) return;
+
+    loadCdnHealth();
+    HostHealth h = s_hostHealth.value(host);
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+
+    if (ok) {
+        // 本来就没失败过：只更新成功时间，不写盘（避免每次起播都写设置）
+        const bool dirty = (h.fails != 0 || h.blockedUntil != 0);
+        h.fails = 0;
+        h.blockedUntil = 0;
+        h.lastOkAt = now;
+        if (!dirty) {
+            s_hostHealth.insert(host, h);
+            return;
+        }
+        qWarning() << "[CDN] host recovered:" << host;
+    } else {
+        // 只有"一个字节都没拿到"才算线路坏：中途断开（收到过字节）不惩罚，
+        // 否则一次缓冲抖动就会把好节点拉黑
+        if (bytesReceived > 0) return;
+        h.fails += 1;
+        const int exp = qMin(h.fails - 1, 4);
+        const qint64 backoff = qMin<qint64>(60000, 3000LL << exp);
+        h.blockedUntil = now + backoff;
+        qWarning() << "[CDN] host unhealthy:" << host << "fails:" << h.fails
+                   << "blocked for(ms):" << backoff;
+    }
+
+    s_hostHealth.insert(host, h);
+    saveCdnHealth();
 }
 
 QString PlayUrlManager::getOfficialCDNFromBackups(const QString &baseUrl, const QList<QString> &backupUrls)
@@ -806,6 +976,8 @@ void PlayUrlManager::parsePlayUrlData(const QByteArray &data, int quality, const
                 
                 info.qualityId = video["id"].toInt();
                 info.codec = video["codecs"].toString();
+                // 视频轨码率：P1a 的吞吐打分要拿它当"够不够快"的基准
+                info.videoBandwidth = video["bandwidth"].toInt();
                 info.mimeType = video["mimeType"].toString();
                 info.duration = playInfo.duration;
 
@@ -1551,6 +1723,9 @@ QVariantMap PlayUrlManager::playUrlInfoToMap(const PlayUrlInfo &info) const
     map["qualityName"] = info.qualityName;
     // 实际生效的音频档位（QML 的"选择音质"下拉按它显示当前音质）
     map["audioId"] = info.audioId;
+    // 音频/视频码率（bps）：CDN 吞吐打分用视频那份当基准
+    map["bandwidth"] = info.bandwidth;
+    map["videoBandwidth"] = info.videoBandwidth;
     map["codec"] = info.codec;
     map["mimeType"] = info.mimeType;
     map["duration"] = info.duration;

@@ -100,6 +100,23 @@ Rectangle {
     property bool wasClosed: false
     property string loadingBvid: ""
     property int playbackRetryCount: 0
+    // ===== CDN 健康/逃生（见 PlayUrlManager.reportCdnResult 的注释）=====
+    // 当前这次流用的是哪个 host（首帧看门狗上报成功/失败时用）
+    property string _cdnHostInUse: ""
+    // 本次流是否已经出过首帧（fileLoaded）。false 且 3 秒仍未出 → 判该线路不通
+    property bool _firstFrameSeen: false
+    // 本次加载累计"因首帧超时换源"的次数；到 3 就认为是签名/风控问题而不是节点
+    property int _cdnFailoverCount: 0
+    // 换过一轮签名（重新请求 playurl）没有；每个视频只换一次，避免死循环
+    property bool _cdnSignatureRefreshed: false
+    // ===== CDN 吞吐打分（P1a）=====
+    // 本次视频轨码率（bps，来自 dash.video[].bandwidth）。为 0 时（如纯 FLV）
+    // 无法判断"够不够快"，直接不打分
+    property int _videoBandwidth: 0
+    // 连续不达标的采样次数（每 2 秒一次），满 3 次才记一次"跑不动"
+    property int _cdnSlowSamples: 0
+    // 记录没有达标过、但也没到"记一次"的中间态，用于日志
+    property int _cdnLastSampleBps: 0
     // 音轨丢失单独计数：它在"重开成功"后不会像 playbackRetryCount 那样在
     // fileLoaded 里清零，否则流本身一直坏会变成每 2 秒无限重开。
     property int _audioLossRetries: 0
@@ -130,6 +147,24 @@ Rectangle {
     property int _playbackStallTicks: 0
     property int _lastPlaybackPos: -1
     property int _playbackStallRecoverCount: 0
+
+    // 从播放地址里取 host（CDN 健康表上报用）
+    function urlHostOf(u) {
+        var m = /^[a-zA-Z][a-zA-Z0-9+.\-]*:\/\/([^\/?#]+)/.exec(u || "")
+        return m ? m[1].toLowerCase() : ""
+    }
+
+    // 从候选列表里挑一个"当前未处于退避期"的地址：从 startIdx 起找一圈，
+    // 全都在退避就退回 startIdx 那个（宁可试一次，也别没得播）
+    function pickCdnCandidate(list, startIdx) {
+        if (!list || list.length === 0) return ""
+        var n = list.length
+        for (var i = 0; i < n; ++i) {
+            var idx = (startIdx + i) % n
+            if (!PlayUrlManager.cdnHostBlocked(list[idx])) return list[idx]
+        }
+        return list[startIdx % n]
+    }
 
     // 所有 seek 的统一入口（进度条 / 键盘 / 时间戳跳转 / 章节…）。
     // 除了转发给 mpv，还记录"发起的时刻 + 目标位置"，供 seekStallWatchdog
@@ -2333,6 +2368,8 @@ Rectangle {
         mpvPlayer.source = ""
         mpvPlayer.audioSource = ""
         playbackRetryTimer.stop()
+        firstFrameWatchdog.stop()
+        pageRoot._firstFrameSeen = false
         // 清理弹幕数据
         danmakuTimer.stop()
         pageRoot.danmakuList.clear()
@@ -2431,11 +2468,103 @@ Rectangle {
         }
     }
 
+    // ===== 首帧看门狗：3 秒还不出画面就换下一个 CDN =====
+    //
+    // 背景：自动档按 华为>腾讯>阿里 挑节点，但某台机器到某家 CDN 的链路可能
+    // 就是不通/极慢。mpv 这种情况要么报 loading failed（走 playbackRetryTimer，
+    // 但带 2 秒退避、且要等它自己超时），要么干脆一直不出画面（永远不重试）。
+    // 这里用"起播 3 秒仍没有 fileLoaded/首帧"统一兜住：直接跳到下一个候选，
+    // 不发任何额外探测请求，正常网络下零开销（fileLoaded 一到就 stop）。
+    Timer {
+        id: firstFrameWatchdog
+        interval: 3000
+        repeat: false
+        onTriggered: {
+            if (pageRoot.wasClosed || pageRoot.bvid === "") return
+            if (pageRoot._firstFrameSeen) return
+            if (mpvPlayer.source === "") return
+            if (mpvPlayer.hasVideo || mpvPlayer.playing) return
+
+            // 一个字节都没拿到 → 记为线路坏（中途断开有字节的不算，见 C++ 注释）
+            PlayUrlManager.reportCdnResult(pageRoot._cdnHostInUse, false, 0)
+            pageRoot._cdnFailoverCount += 1
+            console.warn("[CDN] first frame timeout, host:", pageRoot._cdnHostInUse,
+                         "failover:", pageRoot._cdnFailoverCount)
+
+            if (pageRoot._cdnFailoverCount >= 3) {
+                // 番剧走的是另一套 playurl 参数（epId/seasonId），这里不重复请求，
+                // 交给原有的错误重试链路
+                if (pageRoot._cdnSignatureRefreshed || pageRoot.isBangumi) {
+                    console.warn("[CDN] all candidates failed, stop failover (bangumi:",
+                                 pageRoot.isBangumi, ")")
+                    return
+                }
+                // 三个候选都不出画面：大概率不是节点问题，而是这批签名/风控/权限
+                // 有问题 → 重新请求 playurl 拿新签名再来一轮（每个视频只做一次）
+                pageRoot._cdnSignatureRefreshed = true
+                pageRoot._cdnFailoverCount = 0
+                pageRoot.playbackRetryCount = 0
+                console.warn("[CDN] refresh playurl signatures and retry")
+                var q = pageRoot.currentQualityId > 0 ? pageRoot.currentQualityId : Settings.defaultQuality()
+                PlayUrlManager.getPlayUrl(pageRoot.aid, pageRoot.cid, q)
+                return
+            }
+
+            // 复用现有的"换备份 URL 重开"通路，把 2 秒退避压到 150ms
+            pageRoot.playbackRetryCount += 1
+            pageRoot._retryingPlayback = true
+            playbackRetryTimer.interval = 150
+            playbackRetryTimer.start()
+        }
+    }
+
+    // ===== CDN 吞吐打分（P1a，只在自动档生效）=====
+    //
+    // 每 2 秒采一次实测下载速度（mpv demuxer-cache-state），和本次视频轨码率比：
+    //   · 连续 3 个采样都低于「码率 × 1.15」→ 记一次"跑不动"
+    //   · 同一 host 累计 2 次 → 软降权 5 分钟（下次挑源排到后面），
+    //     但**不打断当前播放**（P1b 才做当场切换）
+    // 判据留 1.15 倍余量：刚好跟得上码率也会周期性卡顿，要一点缓冲空间。
+    // 采样值 <= 0 表示"未知"（缓存已满、mpv 没给 raw-input-rate），跳过不判。
+    Timer {
+        id: cdnScoreTimer
+        interval: 2000
+        repeat: true
+        running: pageRoot.isPlaying && pageRoot._firstFrameSeen
+                 && pageRoot._videoBandwidth > 0
+                 && PlayUrlManager.cdnMode() === 1
+        onTriggered: {
+            if (!mpvPlayer || !mpvPlayer.hasVideo || mpvPlayer.buffering) return
+            var bps = mpvPlayer.sampleDownloadBps()
+            if (bps <= 0) return
+            pageRoot._cdnLastSampleBps = Math.round(bps)
+            var required = pageRoot._videoBandwidth
+            if (bps < required * 1.15) {
+                pageRoot._cdnSlowSamples += 1
+                if (pageRoot._cdnSlowSamples >= 3) {
+                    pageRoot._cdnSlowSamples = 0
+                    console.warn("[CDN] throughput below bitrate:", pageRoot._cdnLastSampleBps,
+                                 "B/s vs required:", required, "host:", pageRoot._cdnHostInUse)
+                    PlayUrlManager.reportCdnThroughput(pageRoot._cdnHostInUse, bps, required)
+                }
+            } else {
+                if (pageRoot._cdnSlowSamples > 0)
+                    console.warn("[CDN] throughput recovered:", pageRoot._cdnLastSampleBps,
+                                 "B/s host:", pageRoot._cdnHostInUse)
+                pageRoot._cdnSlowSamples = 0
+                // 好样本也上报一次：让 C++ 侧把该 host 的软降权清掉（无历史时直接返回）
+                PlayUrlManager.reportCdnThroughput(pageRoot._cdnHostInUse, bps, required)
+            }
+        }
+    }
+
     Timer {
         id: playbackRetryTimer
         interval: 2000
         repeat: false
         onTriggered: {
+            // 首帧看门狗会把间隔临时压到 150ms，这里恢复默认的错误重试退避
+            interval = 2000
             pageRoot._retryingPlayback = false
             if (pageRoot.wasClosed || pageRoot.bvid === "") {
                 return
@@ -2477,7 +2606,7 @@ Rectangle {
                 var flvBackupUrls = info.flvBackupUrls || []
                 if (!fixedCdn && pageRoot.playbackRetryCount > 0 && flvBackupUrls.length > 0) {
                     var flvBackupIndex = (pageRoot.playbackRetryCount - 1) % flvBackupUrls.length
-                    mpvPlayer.source = flvBackupUrls[flvBackupIndex]
+                    mpvPlayer.source = pageRoot.pickCdnCandidate(flvBackupUrls, flvBackupIndex)
                 } else {
                     mpvPlayer.source = info.flvUrl
                 }
@@ -2488,17 +2617,25 @@ Rectangle {
                 var finalAudioUrl = audioUrl
                 
                 if (!fixedCdn && pageRoot.playbackRetryCount > 0 && backupUrls.length > 0) {
-                    finalVideoUrl = backupUrls[(pageRoot.playbackRetryCount - 1) % backupUrls.length]
+                    finalVideoUrl = pageRoot.pickCdnCandidate(
+                                backupUrls, (pageRoot.playbackRetryCount - 1) % backupUrls.length)
                 }
 
                 if (!fixedCdn && pageRoot.playbackRetryCount > 0 && audioBackupUrls.length > 0) {
-                    finalAudioUrl = audioBackupUrls[(pageRoot.playbackRetryCount - 1) % audioBackupUrls.length]
+                    finalAudioUrl = pageRoot.pickCdnCandidate(
+                                audioBackupUrls, (pageRoot.playbackRetryCount - 1) % audioBackupUrls.length)
                 }
                 
                 mpvPlayer.source = finalVideoUrl
                 mpvPlayer.audioSource = finalAudioUrl
             }
             
+            // 记录本次实际使用的 CDN host，并启动首帧看门狗：
+            // 3 秒还不出画面就判定这条线路不通，直接换下一个候选（不发探测请求）
+            pageRoot._cdnHostInUse = pageRoot.urlHostOf(mpvPlayer.source)
+            pageRoot._firstFrameSeen = false
+            firstFrameWatchdog.restart()
+
             mpvPlayer.play()
             // 位置已由 loadfile 的 start= 处理，不再额外 seek（否则等于
             // 白白多一次定位，还可能再把画面闪一下）
@@ -3362,6 +3499,11 @@ Rectangle {
         pageRoot._steinSegmentEnteredAt = Date.now()
         pageRoot._steinLastPos = -1
         pageRoot._steinStallTicks = 0
+        // 换片段 = 换一次加载，CDN 逃生计数重新起算
+        pageRoot._cdnFailoverCount = 0
+        pageRoot._cdnSignatureRefreshed = false
+        pageRoot._cdnSlowSamples = 0
+        pageRoot.playbackRetryCount = 0
         // 同一 cid 也是有可能的（某些剧情图的分支会指回当前片段），
         // 这种情况也要从 0 重播，所以不做 cid 相同就跳过的短路
         pageRoot.cid = cid
@@ -3644,6 +3786,10 @@ Rectangle {
             pageRoot._mediaEnded = false
             pageRoot._mediaLastPos = -1
             pageRoot._mediaStallTicks = 0
+            // CDN 逃生计数按视频重置（换过签名/换过几个候选是"这次加载"的事）
+            pageRoot._cdnFailoverCount = 0
+            pageRoot._cdnSignatureRefreshed = false
+            pageRoot._cdnSlowSamples = 0
             pageRoot.maybeFetchSteinGraph()
             pageRoot.mid = detail.ownerMid || ""
             pageRoot.videoTitle = detail.title || ""
@@ -3934,6 +4080,14 @@ Rectangle {
                 console.warn("[DIAG][onPlayUrlReady] EMPTY stream! flvUrl empty + videoUrl empty, qualityId:",
                              info.qualityId, "cid:", pageRoot.cid, "isBangumi:", pageRoot.isBangumi)
             }
+            // 记录本次实际使用的 CDN host，并启动首帧看门狗：
+            // 3 秒还不出画面就判这条线路不通，直接换下一个候选（不发探测请求）
+            pageRoot._cdnHostInUse = pageRoot.urlHostOf(mpvPlayer.source)
+            pageRoot._firstFrameSeen = false
+            // 码率基准 + 打分计数都按本次流重置（P1a）
+            pageRoot._videoBandwidth = info.videoBandwidth || 0
+            pageRoot._cdnSlowSamples = 0
+            firstFrameWatchdog.restart()
             mpvPlayer.play()
             if (Login.isLoggedIn && pageRoot.aid !== "" && pageRoot.cid !== "") {
                 // 不再上报 progress=0：它会覆盖服务器存储的历史进度（上次看到
@@ -4497,6 +4651,10 @@ Rectangle {
                                         || errStr.indexOf("connection") >= 0
                                         || errStr.indexOf("tls") >= 0
                         if (isLoadError && !pageRoot.wasClosed && !pageRoot._retryingPlayback) {
+                            // 加载失败 = 一个字节都没拿到：记进 CDN 健康表，
+                            // 下次打开视频直接跳过这条线路
+                            firstFrameWatchdog.stop()
+                            PlayUrlManager.reportCdnResult(pageRoot._cdnHostInUse, false, 0)
                             pageRoot.playbackRetryCount += 1
                             if (pageRoot.playbackRetryCount <= 5) {
                                 // 保存当前位置，重试恢复
@@ -4518,6 +4676,10 @@ Rectangle {
                     }
                     onAudioLost: pageRoot.handleAudioLost()
                     onFileLoaded: {
+                        // 首帧已出：停掉首帧看门狗，并把这条 CDN 记为"可用"
+                        pageRoot._firstFrameSeen = true
+                        firstFrameWatchdog.stop()
+                        PlayUrlManager.reportCdnResult(pageRoot._cdnHostInUse, true, 1)
                         // 文件加载成功后重置播放级重试状态
                         if (pageRoot._retryingPlayback) {
                             pageRoot._retryingPlayback = false
