@@ -12,7 +12,46 @@
 #include <QNetworkRequest>
 #include <QUrl>
 #include <QUrlQuery>
+#include <QUuid>
 #include <algorithm>
+
+// ===========================================================================
+// 分类约束表（B 站版 12 类）
+//
+// 数组顺序即提交面板的下拉顺序；actions 用 '|' 分隔，第一个就是默认行为。
+// 这份表是**唯一真值**：QML 的分类下拉、时间框禁用逻辑、以及 C++ 构造请求
+// 前的校验都从这里取，避免两套规则漂移。
+// ===========================================================================
+namespace {
+
+struct CategoryRule {
+    const char *key;
+    const char *actions;
+};
+
+const CategoryRule kCategoryRules[] = {
+    { "sponsor",          "skip|mute|full" },   // 恰饭
+    { "selfpromo",        "skip|mute|full" },   // 自我推广
+    { "exclusive_access", "full"            },   // 品牌合作（只能整段）
+    { "interaction",      "skip|mute"       },   // 互动提醒
+    { "poi_highlight",    "poi"             },   // 高能点（时间点）
+    { "intro",            "skip|mute"       },   // 片头
+    { "outro",            "skip|mute"       },   // 片尾
+    { "preview",          "skip|mute"       },   // 回顾
+    { "padding",          "skip"            },   // 黑屏填充
+    { "filler",           "skip|mute"       },   // 无意义内容
+    { "music_offtopic",   "skip"            },   // 非音乐部分
+    { "jumpscare",        "mute"            },   // 惊吓（只能静音）
+};
+
+// userAgent / x-ext-version 用的版本串（applicationVersion 可能为空）
+QString clientVersionTag()
+{
+    const QString v = QCoreApplication::applicationVersion();
+    return v.isEmpty() ? QStringLiteral("1.0") : v;
+}
+
+}   // namespace
 
 SponsorBlockManager *SponsorBlockManager::s_instance = nullptr;
 
@@ -226,4 +265,331 @@ void SponsorBlockManager::reportViewed(const QString &uuid)
     // fire-and-forget：失败忽略（上报失败不计数，避免干扰会话禁用判定）
     QNetworkReply *reply = m_nam.post(req, QJsonDocument(body).toJson(QJsonDocument::Compact));
     connect(reply, &QNetworkReply::finished, reply, &QObject::deleteLater);
+}
+
+// ===========================================================================
+// 分类：唯一真值在文件头的 kCategoryRules
+// ===========================================================================
+
+QStringList SponsorBlockManager::categories() const
+{
+    QStringList out;
+    for (const CategoryRule &r : kCategoryRules)
+        out << QString::fromLatin1(r.key);
+    return out;
+}
+
+QStringList SponsorBlockManager::allowedActions(const QString &category) const
+{
+    for (const CategoryRule &r : kCategoryRules) {
+        if (category == QLatin1String(r.key)) {
+            return QString::fromLatin1(r.actions)
+                .split(QLatin1Char('|'), Qt::SkipEmptyParts);
+        }
+    }
+    return {};
+}
+
+QString SponsorBlockManager::defaultAction(const QString &category) const
+{
+    const QStringList actions = allowedActions(category);
+    return actions.isEmpty() ? QString() : actions.first();
+}
+
+// ===========================================================================
+// 提交身份（私人 ID）
+//
+// 服务器不保存明文：丢了就永久找不回此前的提交归属。所以生成后立刻写设置，
+// 且**不暴露给 QML**（少一个泄漏面 —— 它等同于密码）。
+// ===========================================================================
+
+QString SponsorBlockManager::ensureUserID()
+{
+    if (!m_userID.isEmpty())
+        return m_userID;
+
+    AppSettings *st = AppSettings::instance();
+    if (st)
+        m_userID = st->getString(QStringLiteral("sponsor/userID")).trimmed();
+
+    if (m_userID.size() < 30) {
+        // Id128 = 32 位小写 hex（无连字符），满足官方的「≥30 字符」要求
+        m_userID = QUuid::createUuid().toString(QUuid::Id128);
+        if (st)
+            st->setString(QStringLiteral("sponsor/userID"), m_userID);
+        qInfo() << "[SponsorBlock] 已生成本机提交身份 ID"
+                << "（私人 ID，相当于密码；丢失后此前提交无法找回）";
+    }
+    return m_userID;
+}
+
+QString SponsorBlockManager::httpStatusMessage(int st)
+{
+    switch (st) {
+    case 0:   return QStringLiteral("网络错误，请检查网络后重试");
+    case 400: return QStringLiteral("参数不合法：请检查片段的时间范围");
+    case 403: return QStringLiteral("被服务器自动审核拒绝，请确认片段标注准确");
+    case 404: return QStringLiteral("接口不存在，请检查 bsb.conf 中的地址");
+    case 409: return QStringLiteral("该片段已存在（可能已被提交过）");
+    case 429: return QStringLiteral("提交太频繁，请稍后再试");
+    default:
+        if (st >= 500)
+            return QStringLiteral("服务器错误（HTTP %1），请稍后重试").arg(st);
+        return QStringLiteral("提交失败（HTTP %1）").arg(st);
+    }
+}
+
+void SponsorBlockManager::emitSubmitFailure(int httpStatus, const QString &message)
+{
+    emit submitFinished(false, httpStatus, message, {});
+}
+
+void SponsorBlockManager::submitSegments(const QString &bvid, const QString &cid,
+                                         double durationSec, const QVariantList &segments)
+{
+    // ---- 本地前置校验（不发请求）----
+    if (!available())
+        return emitSubmitFailure(0, QStringLiteral("空降助手未启用"));
+    if (m_submitting)
+        return emitSubmitFailure(0, QStringLiteral("上一次提交还在进行中"));
+    if (!bvid.startsWith(QStringLiteral("BV")))
+        return emitSubmitFailure(0, QStringLiteral("仅支持普通投稿视频提交片段"));
+    if (!(durationSec > 0))
+        return emitSubmitFailure(0, QStringLiteral("视频时长未就绪，请稍候再试"));
+    if (segments.isEmpty())
+        return emitSubmitFailure(0, QStringLiteral("请至少添加一个片段"));
+
+    QJsonArray segArr;
+    QVariantList normalized;   // 与 segArr 同序：服务器不回 actionType，靠它回填
+
+    for (const QVariant &v : segments) {
+        const QVariantMap s = v.toMap();
+        const QString category = s.value(QStringLiteral("category")).toString();
+        QString action = s.value(QStringLiteral("actionType")).toString();
+        double start = s.value(QStringLiteral("start")).toDouble();
+        double end = s.value(QStringLiteral("end")).toDouble();
+
+        const QStringList allowed = allowedActions(category);
+        if (allowed.isEmpty())
+            return emitSubmitFailure(0, QStringLiteral("未知片段分类：%1").arg(category));
+        if (!allowed.contains(action))
+            return emitSubmitFailure(
+                0, QStringLiteral("分类 %1 不支持行为 %2").arg(category, action));
+
+        if (action == QLatin1String("full")) {
+            // 整段：服务端要求 start=0
+            start = 0.0;
+            end = durationSec;
+        } else if (action == QLatin1String("poi")) {
+            // 高能点：时间点，end==start
+            end = start;
+        } else if (end <= start) {
+            return emitSubmitFailure(0, QStringLiteral("片段结束时间必须大于开始时间"));
+        }
+        if (start < 0.0 || start > durationSec + 0.5 || end > durationSec + 0.5)
+            return emitSubmitFailure(0, QStringLiteral("片段超出视频时长范围"));
+
+        QJsonArray pair;
+        pair.append(start);
+        pair.append(end);
+
+        QJsonObject o;
+        o[QStringLiteral("segment")] = pair;
+        o[QStringLiteral("category")] = category;
+        o[QStringLiteral("actionType")] = action;
+        segArr.append(o);
+
+        QVariantMap n;
+        n[QStringLiteral("start")] = start;
+        n[QStringLiteral("end")] = end;
+        n[QStringLiteral("category")] = category;
+        n[QStringLiteral("actionType")] = action;
+        normalized.append(n);
+    }
+
+    QJsonObject body;
+    body[QStringLiteral("videoID")] = bvid;
+    body[QStringLiteral("cid")] = cid;          // 字符串：不传会落到第一 P
+    body[QStringLiteral("userID")] = ensureUserID();
+    body[QStringLiteral("userAgent")] = QStringLiteral("BbQ/") + clientVersionTag();
+    body[QStringLiteral("videoDuration")] = durationSec;
+    body[QStringLiteral("segments")] = segArr;
+
+    // 元数据同时放进 query 与 body：
+    // 服务端 postSkipSegments 取的是 `req.query.x || req.body.x`（segments 只从
+    // body 读），两处都带一份就不会因为 fork 改了读取方式而失败。
+    // 另外这个服务器对 POST 的 body 解析并不总是可用（setUsername 就完全
+    // 只读 query），冗余一份最稳。
+    QUrl url(m_baseUrl + QStringLiteral("/skipSegments"));
+    QUrlQuery query;
+    query.addQueryItem(QStringLiteral("videoID"), bvid);
+    query.addQueryItem(QStringLiteral("cid"), cid);
+    query.addQueryItem(QStringLiteral("userID"), body[QStringLiteral("userID")].toString());
+    query.addQueryItem(QStringLiteral("userAgent"), body[QStringLiteral("userAgent")].toString());
+    query.addQueryItem(QStringLiteral("videoDuration"), QString::number(durationSec, 'f', 3));
+    url.setQuery(query);
+
+    QNetworkRequest req(url);
+    req.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
+    req.setRawHeader("origin", "BbQ");
+    req.setRawHeader("x-ext-version", clientVersionTag().toUtf8());
+    req.setTransferTimeout(8000);   // 比 GET 宽：POST 可能被限流排队
+    req.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
+                     QNetworkRequest::NoLessSafeRedirectPolicy);
+
+    m_submitting = true;
+    emit submittingChanged();
+
+    QNetworkReply *reply = m_nam.post(req, QJsonDocument(body).toJson(QJsonDocument::Compact));
+    connect(reply, &QNetworkReply::finished, this, [this, reply, normalized]() {
+        reply->deleteLater();
+        m_submitting = false;
+        emit submittingChanged();
+
+        const int httpStatus = reply->attribute(
+            QNetworkRequest::HttpStatusCodeAttribute).toInt();
+
+        if (reply->error() != QNetworkReply::NoError && httpStatus == 0) {
+            emit submitFinished(false, 0, httpStatusMessage(0), {});
+            return;
+        }
+        if (httpStatus != 200) {
+            // 注意：**不调用 noteResult()** —— 用户输错/重复提交/被限流都不该
+            // 让整个空降助手在本会话被禁用
+            emit submitFinished(false, httpStatus, httpStatusMessage(httpStatus), {});
+            return;
+        }
+
+        const QJsonDocument doc = QJsonDocument::fromJson(reply->readAll());
+        if (!doc.isArray()) {
+            emit submitFinished(false, 0, QStringLiteral("服务器返回格式异常"), {});
+            return;
+        }
+
+        const QJsonArray arr = doc.array();
+        QVariantList out;
+        for (int i = 0; i < arr.size() && i < normalized.size(); ++i) {
+            const QJsonObject o = arr.at(i).toObject();
+            QVariantMap m = normalized.at(i).toMap();   // 回填 actionType
+            const QJsonArray seg = o.value(QStringLiteral("segment")).toArray();
+            if (seg.size() == 2) {
+                m[QStringLiteral("start")] = seg.at(0).toDouble();
+                m[QStringLiteral("end")] = seg.at(1).toDouble();
+            }
+            const QString category = o.value(QStringLiteral("category")).toString();
+            if (!category.isEmpty())
+                m[QStringLiteral("category")] = category;
+            const QString uuid = o.value(QStringLiteral("UUID")).toString();
+            if (uuid.isEmpty())
+                continue;
+            m[QStringLiteral("uuid")] = uuid;
+            out.append(m);
+        }
+
+        const int n = out.size();
+        emit submitFinished(true, 200,
+                            n > 0 ? QStringLiteral("提交成功") : QStringLiteral("已提交"),
+                            out);
+    });
+}
+
+// ===========================================================================
+// 排行榜昵称
+// ===========================================================================
+
+void SponsorBlockManager::fetchUsername()
+{
+    if (!available() || m_userNameFetched)
+        return;
+
+    const QString uid = ensureUserID();
+    if (uid.isEmpty())
+        return;
+    m_userNameFetched = true;   // 每会话只尝试一次，失败也不再重试
+
+    QUrl url(m_baseUrl + QStringLiteral("/getUsername"));
+    QUrlQuery query;
+    query.addQueryItem(QStringLiteral("userID"), uid);
+    url.setQuery(query);
+
+    QNetworkRequest req(url);
+    req.setRawHeader("origin", "BbQ");
+    req.setRawHeader("x-ext-version", clientVersionTag().toUtf8());
+    req.setTransferTimeout(6000);
+
+    QNetworkReply *reply = m_nam.get(req);
+    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        reply->deleteLater();
+        if (reply->error() != QNetworkReply::NoError)
+            return;
+        const QJsonDocument doc = QJsonDocument::fromJson(reply->readAll());
+        if (!doc.isObject())
+            return;
+        const QString name = doc.object().value(QStringLiteral("userName")).toString();
+        if (name.isEmpty() || name == m_userName)
+            return;
+        m_userName = name;
+        emit userNameChanged();
+    });
+}
+
+void SponsorBlockManager::setUsername(const QString &name)
+{
+    if (!available())
+        return emit usernameResult(false, QStringLiteral("空降助手未启用"));
+
+    const QString trimmed = name.trimmed();
+    if (trimmed.isEmpty())
+        return emit usernameResult(false, QStringLiteral("昵称不能为空"));
+
+    // ★ 参数必须放在 **query string**，不能放 JSON body。
+    // 服务端 setUsername 只读 req.query（见 SponsorBlockServer 的
+    // src/routes/setUsername.ts：const userIDInput = req.query.userID），
+    // 发 body 时它拿不到参数，一律回 400 Bad Request —— 表现为"怎么填都非法"。
+    // （同服务器的 postSkipSegments 是 req.query.x || req.body.x，body 可用，
+    //   所以只有这一个接口要特殊处理。）
+    QUrl url(m_baseUrl + QStringLiteral("/setUsername"));
+    QUrlQuery query;
+    query.addQueryItem(QStringLiteral("userID"), ensureUserID());   // 唯一凭证
+    query.addQueryItem(QStringLiteral("username"), trimmed);
+    url.setQuery(query);
+
+    QNetworkRequest req(url);
+    // 不带 body，但仍要 POST；Content-Type 留给 Qt（空 body 无需声明）
+    req.setRawHeader("origin", "BbQ");
+    req.setRawHeader("x-ext-version", clientVersionTag().toUtf8());
+    req.setTransferTimeout(8000);
+
+    QNetworkReply *reply = m_nam.post(req, QByteArray());
+    connect(reply, &QNetworkReply::finished, this, [this, reply, trimmed]() {
+        reply->deleteLater();
+        const int httpStatus = reply->attribute(
+            QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        const bool ok = (reply->error() == QNetworkReply::NoError
+                         && httpStatus >= 200 && httpStatus < 300);
+
+        // 服务端在非 2xx 时会用纯文本回一句中文原因（如 429 "只能每分钟修改
+        // 一次用户名"），比我们自己的兜底文案准确，能用就用
+        QString serverMsg = QString::fromUtf8(reply->readAll()).trimmed();
+        if (serverMsg == QLatin1String("Bad Request") || serverMsg.size() > 120)
+            serverMsg.clear();
+
+        if (!ok) {
+            QString msg;
+            if (httpStatus == 403)
+                msg = QStringLiteral("没有权限修改该昵称");
+            else if (!serverMsg.isEmpty())
+                msg = serverMsg;                 // 429/400 时以服务端文案为准
+            else if (httpStatus == 400)
+                msg = QStringLiteral("昵称不合法（可能过长或含非法字符）");
+            else
+                msg = httpStatusMessage(httpStatus);
+            emit usernameResult(false, msg);
+            return;
+        }
+        m_userName = trimmed;
+        m_userNameFetched = true;
+        emit userNameChanged();
+        emit usernameResult(true, QStringLiteral("昵称已更新"));
+    });
 }

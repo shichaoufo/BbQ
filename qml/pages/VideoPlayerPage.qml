@@ -1666,9 +1666,29 @@ Rectangle {
         applyDrawerGeometry()
         // 抽屉是常驻实例，下拉框不会自己跟着状态变：每次打开同步一次
         settingsSheet.syncCombos()
+        // 空降昵称：拉一次服务器上的当前值（C++ 内部每会话只请求一次），
+        // 再用缓存值回填输入框（用户上次改过就一直显示）
+        SponsorBlockManager.fetchUsername()
+        if (sponsorNameField) sponsorNameField.text = SponsorBlockManager.userName
+        // 提交表单：已填的起止时间原样保留（用户会在两次打开之间拖进度取终点）
+        settingsSheet.prepareSponsorForm()
         settingsSheet.open(FluSheetType.Right)
         settingsSheet.height = pageRoot.height
         settingsSheet.y = pageRoot.mapToItem(null, 0, 0).y
+    }
+
+    // 保存排行榜昵称（空降助手社区服务器侧的显示名，与 B 站账号无关）
+    function saveSponsorName() {
+        var name = sponsorNameField.text.trim()
+        if (name === "") {
+            pageInfoBar.showInfo("留空将保持默认名（公开 ID）")
+            return
+        }
+        if (name.length > 32) {
+            pageInfoBar.showWarning("昵称最多 32 个字符")
+            return
+        }
+        SponsorBlockManager.setUsername(name)
     }
 
     function closePopups() {
@@ -2266,6 +2286,9 @@ Rectangle {
         pageRoot.sponsorSegments = []
         pageRoot._sponsorFetchedKey = ""
         pageRoot._sponsorSkipGuardMs = 0
+        // 提交表单里存着上一个视频的起止时间：必须清空，否则会把片段提交到
+        // 新视频上（表单在设置抽屉里常驻，不会自己重置）
+        if (settingsSheet) settingsSheet.resetSponsorForm()
         pageRoot._historyRestored = false
         pageRoot._lastReportedProgress = -1
         pageRoot._pendingSeek = 0
@@ -3212,6 +3235,11 @@ Rectangle {
         case "preview": return "预告"
         case "poi_highlight": return "高能点"
         case "filler": return "无意义内容"
+        // 以下 4 类原先缺失（服务器已会下发，只是显示成原始 key）
+        case "exclusive_access": return "品牌合作"
+        case "padding": return "黑屏填充"
+        case "music_offtopic": return "非音乐部分"
+        case "jumpscare": return "惊吓"
         default: return cat
         }
     }
@@ -3225,8 +3253,43 @@ Rectangle {
         case "interaction": return "#66BB6A"
         case "preview": return "#8D6E63"
         case "poi_highlight": return "#EF5350"
+        // 新增 4 类用官方色（与浏览器扩展一致）
+        case "exclusive_access": return "#008a5c"
+        case "padding": return "#222222"
+        case "music_offtopic": return "#ff9900"
+        case "jumpscare": return "#e53935"
         default: return "#90A4AE"
         }
+    }
+    // 提交成功的片段并入本地色带。
+    // ★ 只收 actionType === "skip"：sponsorSegments 的隐式不变量就是"只装跳过
+    // 片段"，混进 mute/poi 会被 onPositionChanged 当跳过直接 seek。
+    // 返回实际新增的条数（覆盖同起点同分类视为替换，不计数）。
+    function mergeSponsorSegments(newSegs) {
+        if (!newSegs || newSegs.length === 0) return 0
+        var list = (pageRoot.sponsorSegments || []).slice()
+        var added = 0
+        for (var i = 0; i < newSegs.length; ++i) {
+            var n = newSegs[i]
+            if (!n || (n.actionType && n.actionType !== "skip")) continue
+            var replaced = false
+            for (var j = 0; j < list.length; ++j) {
+                if (list[j].category === n.category
+                        && Math.abs(list[j].start - n.start) < 0.5) {
+                    list[j] = n
+                    replaced = true
+                    break
+                }
+            }
+            if (!replaced) {
+                list.push(n)
+                added++
+            }
+        }
+        // 必须按 start 重排：跳过逻辑假定升序；且必须整体赋值才会触发色带重绘
+        list.sort(function(a, b) { return a.start - b.start })
+        pageRoot.sponsorSegments = list
+        return added
     }
     // 跳过提示：视频区顶部短暂浮现"已跳过 恰饭 1:30-2:30"
     function showSponsorSkip(seg) {
@@ -4508,6 +4571,16 @@ Rectangle {
             if (bvid !== pageRoot.bvid || cid !== pageRoot.cid) return
             pageRoot.sponsorSegments = segments || []
         }
+        // 排行榜昵称从服务器取回（或本地改成功后）：回填设置抽屉里的输入框。
+        // 用户正在输入时不抢焦点里的内容
+        function onUserNameChanged() {
+            if (sponsorNameField && !sponsorNameField.activeFocus)
+                sponsorNameField.text = SponsorBlockManager.userName
+        }
+        function onUsernameResult(ok, message) {
+            if (ok) pageInfoBar.showSuccess(message)
+            else pageInfoBar.showWarning(message)
+        }
     }
 
     // 监听 App 的 bangumiOpenRequested：推荐卡片点击后，在当前播放器页切换到新番剧
@@ -5228,6 +5301,10 @@ Rectangle {
                             height: parent.height
                             radius: height / 2
                             color: pageRoot.sponsorCategoryColor(modelData.category)
+                            // 极深色带（如黑屏填充 #222222）在深色轨道上会"隐身"，
+                            // 用 1px 半透明白描边保证可辨
+                            border.width: 1
+                            border.color: Qt.rgba(1, 1, 1, 0.25)
                             visible: modelData.end > modelData.start
                                      && mpvPlayer.duration > 0
                         }
@@ -5528,6 +5605,9 @@ Rectangle {
                                             radius: 2
                                             opacity: 0.85
                                             color: pageRoot.sponsorCategoryColor(modelData.category)
+                                            // 同迷你进度条：深色带加 1px 描边，避免在深色轨道上看不见
+                                            border.width: 1
+                                            border.color: Qt.rgba(1, 1, 1, 0.25)
                                         }
                                     }
 
@@ -8449,6 +8529,179 @@ Rectangle {
             audioQualityCombo.syncIndex()
         }
 
+        // ===== 空降助手 · 提交片段（内联表单）=====
+        // 状态放在抽屉自己身上：抽屉是常驻实例，收起再打开时输入框内容原样保留，
+        // 不会把用户刚取的起点冲掉。只有换视频才调用 resetSponsorForm()。
+        property int sponsorCategoryIndex: 0
+        readonly property var _sbCategoryKeys: SponsorBlockManager.categories() || []
+        readonly property string _sbCategory:
+            (sponsorCategoryIndex >= 0 && sponsorCategoryIndex < _sbCategoryKeys.length)
+            ? _sbCategoryKeys[sponsorCategoryIndex] : ""
+        // 该分类实际提交的 actionType（skip / mute / full / poi），由 C++ 的
+        // 分类约束表决定，界面不单独提供"行为"下拉
+        readonly property string _sbAction: SponsorBlockManager.defaultAction(_sbCategory)
+        readonly property bool _sbFull: _sbAction === "full"
+        readonly property bool _sbPoi: _sbAction === "poi"
+
+        property bool _sbBusy: false
+        property string _sbError: ""
+        property int _sbCooldown: 0
+
+        function sponsorCategoryLabel(key) {
+            switch (key) {
+            case "sponsor": return "恰饭"
+            case "selfpromo": return "自我推广"
+            case "exclusive_access": return "品牌合作"
+            case "interaction": return "互动提醒"
+            case "poi_highlight": return "高能点"
+            case "intro": return "片头"
+            case "outro": return "片尾"
+            case "preview": return "预告"
+            case "padding": return "黑屏填充"
+            case "filler": return "无意义内容"
+            case "music_offtopic": return "非音乐部分"
+            case "jumpscare": return "惊吓"
+            default: return key
+            }
+        }
+
+        // "90" / "1:30" / "01:02:03" → 秒；非法返回 NaN
+        function sponsorParseTime(text) {
+            var t = String(text).trim()
+            if (t === "") return NaN
+            var parts = t.split(":")
+            if (parts.length > 3) return NaN
+            var sec = 0
+            for (var i = 0; i < parts.length; ++i) {
+                var p = parts[i].trim()
+                if (!/^\d+$/.test(p)) return NaN
+                sec = sec * 60 + Number(p)
+            }
+            return sec
+        }
+
+        // 分类切换后按 actionType 调整时间框：
+        //   full → 整段（0 ~ 总时长，两个框都禁用）
+        //   poi  → 时间点（结束框禁用，提交时 end = start）
+        function applySponsorCategoryDefaults() {
+            if (_sbFull) {
+                sponsorStartField.text = "00:00"
+                sponsorEndField.text = pageRoot.formatDuration(Math.floor(mpvPlayer.duration / 1000))
+            } else if (_sbPoi) {
+                sponsorEndField.text = sponsorStartField.text
+            }
+        }
+
+        // 换视频时清空表单（旧区间对新视频毫无意义，还可能误提交到别的视频上）
+        function resetSponsorForm() {
+            sponsorCategoryIndex = 0
+            // 用户点过下拉后 currentIndex 的声明式绑定就被打断，
+            // 只改 sponsorCategoryIndex 不会回写控件，这里显式同步一次
+            if (sponsorCategoryCombo) sponsorCategoryCombo.currentIndex = 0
+            sponsorStartField.text = "00:00"
+            sponsorEndField.text = ""
+            _sbError = ""
+            _sbCooldown = 0
+        }
+
+        // 打开抽屉时调用：只在"结束时间还空着"时用当前播放位置兜个底，
+        // 已经填过的值一律不动 —— 这正是"关掉面板调进度再回来接着填"能成立的前提
+        function prepareSponsorForm() {
+            if (SponsorBlockManager.available && pageRoot.bvid.indexOf("BV") === 0
+                    && sponsorEndField.text === "" && mpvPlayer.position > 1000) {
+                sponsorEndField.text =
+                    pageRoot.formatDuration(Math.floor(mpvPlayer.position / 1000))
+            }
+        }
+
+        function submitSponsorSegment() {
+            if (_sbBusy || _sbCooldown > 0 || SponsorBlockManager.submitting) return
+
+            if (pageRoot.bvid.indexOf("BV") !== 0) {
+                _sbError = "仅支持普通投稿视频提交片段"
+                return
+            }
+            // cid 必须带上：不传服务端会按第一 P 记账，多 P / 互动视频就记错位置
+            if (pageRoot.cid === "") {
+                _sbError = "视频信息未就绪，请稍候再试"
+                return
+            }
+            // 时长必须真实（服务端拿它判断是否换源，误差 <2s）；传 0 最坏会让
+            // 该视频已提交的片段被判成过期
+            var durSec = mpvPlayer.duration > 0 ? mpvPlayer.duration / 1000
+                                                : pageRoot.videoDuration
+            if (!(durSec > 0)) {
+                _sbError = "视频时长未就绪，请稍候再试"
+                return
+            }
+            if (_sbCategory === "") {
+                _sbError = "请选择片段分类"
+                return
+            }
+
+            var s = sponsorParseTime(sponsorStartField.text)
+            if (isNaN(s)) {
+                _sbError = "开始时间格式不正确（支持 1:30 或 90）"
+                return
+            }
+            var e = _sbPoi ? s : sponsorParseTime(sponsorEndField.text)
+            if (isNaN(e)) {
+                _sbError = "结束时间格式不正确（支持 1:30 或 90）"
+                return
+            }
+            if (!_sbFull && !_sbPoi && e <= s) {
+                _sbError = "结束时间必须大于开始时间"
+                return
+            }
+            if (e > durSec + 0.5 || s > durSec + 0.5) {
+                _sbError = "片段超出视频时长范围"
+                return
+            }
+            if (_sbFull) {
+                s = 0
+                e = durSec
+            }
+
+            _sbError = ""
+            _sbBusy = true
+            SponsorBlockManager.submitSegments(pageRoot.bvid, pageRoot.cid, durSec,
+                                               [{ "start": s, "end": e,
+                                                  "category": _sbCategory,
+                                                  "actionType": _sbAction }])
+        }
+
+        // 提交结果（成功/失败都在这里收口，面板内显示错误，不弹窗）
+        Connections {
+            target: SponsorBlockManager
+            function onSubmitFinished(ok, httpStatus, message, segments) {
+                settingsSheet._sbBusy = false
+                if (ok) {
+                    // 只把 skip 类并入色带（静音/高光点混进去会被当跳过直接 seek）
+                    var added = pageRoot.mergeSponsorSegments(segments)
+                    if (added > 0)
+                        pageInfoBar.showSuccess("已提交 " + added + " 个片段，已加入进度条色带")
+                    else
+                        pageInfoBar.showSuccess("已提交（静音/高光点类型不会自动跳过）")
+                    // 提交成功后把结束时间清空：下一个片段从头取，起点也归零
+                    sponsorStartField.text = "00:00"
+                    sponsorEndField.text = ""
+                    return
+                }
+                settingsSheet._sbError = message
+                // 429 是"等一下就好"，与 409（内容重复，等也没用）区分开
+                if (httpStatus === 429)
+                    settingsSheet._sbCooldown = 30
+                console.warn("[SponsorBlock] submit failed, status:", httpStatus, message)
+            }
+        }
+
+        Timer {
+            interval: 1000
+            repeat: true
+            running: settingsSheet._sbCooldown > 0
+            onTriggered: settingsSheet._sbCooldown -= 1
+        }
+
         // 背景与视频简介抽屉完全一致：只圆左侧两角（右边缘贴着窗口边，
         // 右上/右下若也圆会露出下面的遮罩），阴影半径跟着圆角走
         background: Rectangle {
@@ -8692,16 +8945,25 @@ Rectangle {
                     color: FluTheme.dividerColor
                 }
 
-                // ---------- 播放行为 / 轨选择 ----------
-                // 空降助手开关：自动跳过社区标注的恰饭/片头等片段。
-                // bsb.conf 缺失或本会话被自动禁用时整体隐藏（功能不存在）
+                // ---------- 空降助手 ----------
+                // 与「弹幕」组同款：上面那条分隔线（上一组结束时画的）当作组的
+                // 上边界，标题用 Subtitle 字号；组内所有设置项都归在这条线下面，
+                // 末尾再补一条分隔线收口。bbs.conf 缺失时整组消失（功能不存在）
+                FluText {
+                    visible: SponsorBlockManager.available
+                    text: "空降助手"
+                    font: FluTextStyle.Subtitle
+                    color: FluTheme.fontPrimaryColor
+                }
+
+                // 自动跳过：进入片段自动跳到结尾
                 RowLayout {
                     Layout.fillWidth: true
                     spacing: 12
                     visible: SponsorBlockManager.available
 
                     FluText {
-                        text: "空降助手（跳过恰饭）"
+                        text: "自动跳过（恰饭、片头等）"
                         font: FluTextStyle.Body
                         color: FluTheme.fontPrimaryColor
                         Layout.fillWidth: true
@@ -8715,6 +8977,198 @@ Rectangle {
                             savePlayerSettings()
                         }
                     }
+                }
+
+                // 提交片段：表单直接内联，不再另开抽屉。
+                // 表单内容不随抽屉开合重置（只在换视频时清空）——用户常常
+                // "播到开头取起点 → 收起面板 → 播到结尾 → 再打开取终点"。
+                // 番剧假 bvid（bangumi_ 前缀）在社区服务器没有对应 videoID，
+                // 整块不显示
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    spacing: 8
+                    visible: SponsorBlockManager.available
+                             && pageRoot.bvid.indexOf("BV") === 0
+
+                    FluText {
+                        Layout.fillWidth: true
+                        Layout.topMargin: 4
+                        text: "标注当前视频的恰饭/片头等区间，提交后所有人都会自动跳过。"
+                        font: FluTextStyle.Caption
+                        color: FluTheme.fontSecondaryColor
+                        wrapMode: Text.Wrap
+                    }
+
+                    // 分类（12 类；actionType 由分类自动决定，不单独选）
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 8
+
+                        FluText {
+                            text: "分类"
+                            font: FluTextStyle.Body
+                            color: FluTheme.fontPrimaryColor
+                            Layout.fillWidth: true
+                        }
+
+                        FluComboBox {
+                            id: sponsorCategoryCombo
+                            Layout.preferredWidth: 150
+                            model: {
+                                var keys = SponsorBlockManager.categories() || []
+                                var out = []
+                                for (var i = 0; i < keys.length; ++i)
+                                    out.push(settingsSheet.sponsorCategoryLabel(keys[i]))
+                                return out
+                            }
+                            currentIndex: settingsSheet.sponsorCategoryIndex
+                            onActivated: function(index) {
+                                settingsSheet.sponsorCategoryIndex = index
+                                settingsSheet._sbError = ""
+                                settingsSheet.applySponsorCategoryDefaults()
+                            }
+                        }
+                    }
+
+                    // 起止时间：手输 mm:ss 或点「取当前」直接填播放位置
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 8
+
+                        FluText {
+                            text: "开始"
+                            font: FluTextStyle.Body
+                            color: FluTheme.fontPrimaryColor
+                            Layout.fillWidth: true
+                        }
+
+                        FluTextBox {
+                            id: sponsorStartField
+                            Layout.preferredWidth: 88
+                            placeholderText: "0:00"
+                            disabled: settingsSheet._sbFull
+                            onEditingFinished: {
+                                var v = settingsSheet.sponsorParseTime(text)
+                                if (!isNaN(v)) text = pageRoot.formatDuration(Math.floor(v))
+                                if (settingsSheet._sbPoi) sponsorEndField.text = text
+                            }
+                        }
+
+                        FluTextButton {
+                            text: "取当前"
+                            font: FluTextStyle.Caption
+                            disabled: settingsSheet._sbFull
+                            onClicked: {
+                                sponsorStartField.text =
+                                    pageRoot.formatDuration(Math.floor(mpvPlayer.position / 1000))
+                                if (settingsSheet._sbPoi) sponsorEndField.text = sponsorStartField.text
+                            }
+                        }
+                    }
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 8
+
+                        FluText {
+                            text: "结束"
+                            font: FluTextStyle.Body
+                            color: FluTheme.fontPrimaryColor
+                            Layout.fillWidth: true
+                        }
+
+                        FluTextBox {
+                            id: sponsorEndField
+                            Layout.preferredWidth: 88
+                            placeholderText: "未填"
+                            disabled: settingsSheet._sbFull || settingsSheet._sbPoi
+                            onEditingFinished: {
+                                var v = settingsSheet.sponsorParseTime(text)
+                                if (!isNaN(v))
+                                    text = pageRoot.formatDuration(Math.floor(v))
+                            }
+                        }
+
+                        FluTextButton {
+                            text: "取当前"
+                            font: FluTextStyle.Caption
+                            disabled: settingsSheet._sbFull || settingsSheet._sbPoi
+                            onClicked: {
+                                sponsorEndField.text =
+                                    pageRoot.formatDuration(Math.floor(mpvPlayer.position / 1000))
+                            }
+                        }
+                    }
+
+                    // 特殊分类的时间语义说明（full / poi 时时间框会自动禁用）
+                    FluText {
+                        Layout.fillWidth: true
+                        visible: settingsSheet._sbFull || settingsSheet._sbPoi
+                        text: settingsSheet._sbFull
+                              ? "该分类标注整段视频，时间不用填。"
+                              : "该分类只标注一个时间点，填开始时间即可。"
+                        font: FluTextStyle.Caption
+                        color: FluTheme.fontSecondaryColor
+                        wrapMode: Text.Wrap
+                    }
+
+                    FluText {
+                        Layout.fillWidth: true
+                        visible: settingsSheet._sbError !== ""
+                        text: settingsSheet._sbError
+                        font: FluTextStyle.Caption
+                        color: "#e53935"
+                        wrapMode: Text.Wrap
+                    }
+
+                    FluButton {
+                        Layout.fillWidth: true
+                        text: settingsSheet._sbBusy || SponsorBlockManager.submitting
+                              ? "提交中…"
+                              : settingsSheet._sbCooldown > 0
+                                ? ("请稍候 " + settingsSheet._sbCooldown + "s")
+                                : "提交片段"
+                        disabled: settingsSheet._sbBusy || SponsorBlockManager.submitting
+                                  || settingsSheet._sbCooldown > 0
+                        onClicked: settingsSheet.submitSponsorSegment()
+                    }
+                }
+
+                // 排行昵称：社区服务器排行榜/统计里显示的名字（不设置就是公开 ID）
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 8
+                    visible: SponsorBlockManager.available
+
+                    FluText {
+                        text: "排行昵称"
+                        font: FluTextStyle.Body
+                        color: FluTheme.fontPrimaryColor
+                        Layout.fillWidth: true
+                        wrapMode: Text.Wrap
+                    }
+
+                    FluTextBox {
+                        id: sponsorNameField
+                        Layout.preferredWidth: 120
+                        placeholderText: "未设置"
+                        maximumLength: 32
+                        onAccepted: pageRoot.saveSponsorName()
+                    }
+
+                    FluTextButton {
+                        text: "保存"
+                        font: FluTextStyle.Caption
+                        onClicked: pageRoot.saveSponsorName()
+                    }
+                }
+
+                // 空降助手组的下边界（不可用时不需要，否则会和上一条线连成双线）
+                Rectangle {
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 1
+                    visible: SponsorBlockManager.available
+                    color: FluTheme.dividerColor
                 }
 
                 // 常驻 mini 进度条开关：控制栏隐藏后底部显示无滑块进度细条
