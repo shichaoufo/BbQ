@@ -135,13 +135,19 @@ Rectangle {
     // 除了转发给 mpv，还记录"发起的时刻 + 目标位置"，供 seekStallWatchdog
     // 判断这次 seek 是否被卡住。
     function doSeek(ms) {
-        // 用户/自动跳转把位置拉回中段：互动片段先前的"已播完"状态作废，
-        // 否则进度条会一直被钉在结尾（displayPositionMs 的钳制）看着骗人
-        if (pageRoot._steinSegmentEnded && mpvPlayer.duration > 0
-                && ms < mpvPlayer.duration - 1500) {
-            pageRoot._steinSegmentEnded = false
-            pageRoot._steinLastPos = -1
-            pageRoot._steinStallTicks = 0
+        // 往回拖到中段：之前判定的"已播完"作废，否则进度条会一直被钉在结尾
+        // （displayPositionMs 的钳制）看着骗人
+        if (mpvPlayer.duration > 0 && ms < mpvPlayer.duration - 1500) {
+            if (pageRoot._steinSegmentEnded) {
+                pageRoot._steinSegmentEnded = false
+                pageRoot._steinLastPos = -1
+                pageRoot._steinStallTicks = 0
+            }
+            if (pageRoot._mediaEnded) {
+                pageRoot._mediaEnded = false
+                pageRoot._mediaLastPos = -1
+                pageRoot._mediaStallTicks = 0
+            }
         }
         pageRoot._seekTargetMs = ms
         pageRoot._seekRequestedAt = Date.now()
@@ -661,15 +667,21 @@ Rectangle {
     // 这样主判据可以卡在真正的结尾（进度条走到 100%），不必提前 1 秒就暂停
     property int _steinLastPos: -1
     property int _steinStallTicks: 0
+    // 普通视频（非互动）是否已播到结尾：只服务于进度条显示。
+    // 片尾 position 常停在 duration 前几百毫秒（DASH 音视频轨终点差），
+    // 时长越短这段差占比越大，播放完滑块看着明显没贴到右端
+    property bool _mediaEnded: false
+    property int _mediaLastPos: -1
+    property int _mediaStallTicks: 0
     // 进度条显示位置（滑块 + 时间数字都用它）：
-    // 拖动/seek 锁定期间用锁定值；互动片段已播完时钉到片段结尾 ——
-    // 片尾 position 常常停在 duration 前几百毫秒，若不钉住滑块会停在 99%，
-    // 而选项卡片已经弹出来了，看着就像没播完。用户往后拖动会清掉
-    // _steinSegmentEnded（见 doSeek），所以不会长期骗人
+    // 拖动/seek 锁定期间用锁定值；播放已到结尾时钉到 duration ——
+    // 片尾 position 常常差几百毫秒，不钉住滑块会停在 99%，而选项卡片
+    // 已经弹出来了 / 视频其实已经播完，看着就像没播完。
+    // 用户往回拖动会清掉这个状态（见 doSeek），所以不会长期骗人
     readonly property int displayPositionMs: {
         if (_seekDisplayMs >= 0)
             return _seekDisplayMs
-        if (_steinSegmentEnded)
+        if (_steinSegmentEnded || _mediaEnded)
             return Math.max(mpvPlayer.position, mpvPlayer.duration)
         return mpvPlayer.position
     }
@@ -770,12 +782,70 @@ Rectangle {
             // 避免把"卡缓冲"或"用户暂停"误判成播完
             var sameAsLast = (p === pageRoot._steinLastPos)
             pageRoot._steinLastPos = p
-            if (sameAsLast && mpvPlayer.playing && !mpvPlayer.buffering && p >= d - 3000) {
+            if (sameAsLast && mpvPlayer.playing && !mpvPlayer.buffering
+                    && p >= d - 3000 && p >= d * 0.5) {
                 pageRoot._steinStallTicks += 1
                 if (pageRoot._steinStallTicks >= 2)
                     pageRoot.markSteinSegmentEnded()
             } else if (!sameAsLast) {
                 pageRoot._steinStallTicks = 0
+            }
+        }
+    }
+
+    // 普通视频（非互动）的"播到结尾"检测，只用于把进度条钉到最右端。
+    // 与上面的互动判尾同源：片尾 position 常停在 duration 前几百毫秒
+    // （DASH 音视频轨终点差），时长越短这段差占比越明显——播完了滑块却
+    // 差一截。判据不写进 mpv，纯显示层修正，不影响播放/上报逻辑
+    Timer {
+        id: mediaEndTimer
+        interval: 400
+        repeat: true
+        // 位置退回中段（拖回去/重播）时也要重新跑起来，把钳制撤掉
+        running: pageRoot.steinGraphVersion === ""
+                 && mpvPlayer.duration > 0
+                 && (!pageRoot._mediaEnded
+                     || mpvPlayer.position < mpvPlayer.duration - 1500)
+        onTriggered: {
+            if (!mpvPlayer) return
+            var d = mpvPlayer.duration
+            if (d <= 1000) return
+            var p = mpvPlayer.position
+
+            if (pageRoot._mediaEnded) {
+                // 已判结尾，但位置又退回去了：撤销显示钳制
+                pageRoot._mediaEnded = false
+                pageRoot._mediaLastPos = -1
+                pageRoot._mediaStallTicks = 0
+                return
+            }
+
+            // 真到末尾（留 60ms ≈ 一到两帧）
+            if (p >= d - 60) {
+                pageRoot._mediaEnded = true
+                return
+            }
+            // mpv 到 EOF 会把播放停下（keep-open 保最后一帧）：位置已经在
+            // 最后 1.5 秒内又停了播放，就是播完了。
+            // 多带一个 p >= 1000：短时长视频刚加载时"暂停 + position=0"也满足
+            // 前两个条件，会把一开场就判成播完
+            if (!mpvPlayer.playing && !mpvPlayer.buffering && p >= 1000
+                    && p >= d - 1500) {
+                pageRoot._mediaEnded = true
+                return
+            }
+            // 兜底：最后 3 秒内位置连续两拍没动（正在播、没缓冲）→ 认为已播完。
+            // 必须"正在播"（用户手动暂停不算）且已播过半（起播阶段 position=0
+            // 停滞会被短时长视频误判成播完）
+            var sameAsLast = (p === pageRoot._mediaLastPos)
+            pageRoot._mediaLastPos = p
+            if (sameAsLast && mpvPlayer.playing && !mpvPlayer.buffering
+                    && p >= d - 3000 && p >= d * 0.5) {
+                pageRoot._mediaStallTicks += 1
+                if (pageRoot._mediaStallTicks >= 2)
+                    pageRoot._mediaEnded = true
+            } else if (!sameAsLast) {
+                pageRoot._mediaStallTicks = 0
             }
         }
     }
@@ -3571,6 +3641,9 @@ Rectangle {
             pageRoot._steinSegmentEnteredAt = 0
             pageRoot._steinLastPos = -1
             pageRoot._steinStallTicks = 0
+            pageRoot._mediaEnded = false
+            pageRoot._mediaLastPos = -1
+            pageRoot._mediaStallTicks = 0
             pageRoot.maybeFetchSteinGraph()
             pageRoot.mid = detail.ownerMid || ""
             pageRoot.videoTitle = detail.title || ""
@@ -3811,6 +3884,11 @@ Rectangle {
             if (audioQualityCombo) audioQualityCombo.syncIndex()
             // 新流就绪：互动片段切换完成，此后 position/duration 才是本片段的
             pageRoot._steinAwaitingStream = false
+            // 新流的"已播完"状态从零开始：不重置的话换了视频/换了清晰度后
+            // 滑块会被 displayPositionMs 一直钉在结尾
+            pageRoot._mediaEnded = false
+            pageRoot._mediaLastPos = -1
+            pageRoot._mediaStallTicks = 0
             // 互动视频：playurl 不下发图谱版本（实测没有 interaction 字段），
             // 这里只触发一次 player 接口查询，拿到版本后再开始互动逻辑
             pageRoot.maybeFetchSteinGraph()
@@ -4370,6 +4448,15 @@ Rectangle {
                     }
                     onPlayingChanged: {
                         pageRoot.isPlaying = playing
+                        // 从暂停恢复：撤销进度条的"已播完"钳制。
+                        // 真正的播完不会自己恢复播放，所以这里清掉只可能是
+                        // "用户暂停在结尾附近"被误判过，或者又拖回去重看
+                        if (playing && pageRoot._mediaEnded
+                                && mpvPlayer.position < mpvPlayer.duration - 200) {
+                            pageRoot._mediaEnded = false
+                            pageRoot._mediaLastPos = -1
+                            pageRoot._mediaStallTicks = 0
+                        }
                         // 播放期间阻止系统息屏/自动睡眠（暂停、结束、关闭都会走到
                         // playing=false，从而自动释放）
                         App.setScreenWakeLock(playing, "video")
