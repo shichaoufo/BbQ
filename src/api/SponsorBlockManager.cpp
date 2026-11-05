@@ -416,18 +416,19 @@ void SponsorBlockManager::submitSegments(const QString &bvid, const QString &cid
     body[QStringLiteral("videoDuration")] = durationSec;
     body[QStringLiteral("segments")] = segArr;
 
-    // 元数据同时放进 query 与 body：
-    // 服务端 postSkipSegments 取的是 `req.query.x || req.body.x`（segments 只从
-    // body 读），两处都带一份就不会因为 fork 改了读取方式而失败。
-    // 另外这个服务器对 POST 的 body 解析并不总是可用（setUsername 就完全
-    // 只读 query），冗余一份最稳。
+    // 元数据放 query（videoID/cid/userID/userAgent），segments 只放 body：
+    // 服务端 postSkipSegments 取的是 `req.query.x || req.body.x`，两处都能读。
+    //
+    // ★ videoDuration 只放 body，**不要**在 query 里再放一份：
+    //   query 里是格式化成的 "363.880"，body 里是 JSON 双精度 363.88，
+    //   两者解析出来的浮点数并不完全相等，这个 fork 会做一致性校验，直接回
+    //   400 "Conflicting videoDuration values in query and body."
     QUrl url(m_baseUrl + QStringLiteral("/skipSegments"));
     QUrlQuery query;
     query.addQueryItem(QStringLiteral("videoID"), bvid);
     query.addQueryItem(QStringLiteral("cid"), cid);
     query.addQueryItem(QStringLiteral("userID"), body[QStringLiteral("userID")].toString());
     query.addQueryItem(QStringLiteral("userAgent"), body[QStringLiteral("userAgent")].toString());
-    query.addQueryItem(QStringLiteral("videoDuration"), QString::number(durationSec, 'f', 3));
     url.setQuery(query);
 
     m_submitting = true;
@@ -510,16 +511,31 @@ void SponsorBlockManager::sendSubmitRequest(const QUrl &url, const QByteArray &p
         m_submitting = false;
         emit submittingChanged();
 
-        // 重试时才出现的 409：说明第一次其实已经写进去了（只是回包丢了）
-        if (httpStatus == 409 && attempt > 0) {
-            emit submitFinished(true, 200, QStringLiteral("已提交（上一次已受理）"),
-                                normalized);
+        // 重试时才出现的 409：只说明"这个片段已经在库里"，**不能**据此判定
+        // 是我们上一次提交成功了 —— 也可能是别人早就标过。之前把它当成功，
+        // 用户重复提交测试时就出现了"明明重复却提示已提交"。如实报存在即可
+        if (httpStatus == 409) {
+            emit submitFinished(false, 409,
+                                attempt > 0
+                                ? QStringLiteral("该片段已存在（也可能上一次请求其实已经成功）")
+                                : QStringLiteral("该片段已存在（可能已被提交过）"),
+                                {});
             return;
         }
         if (httpStatus != 200) {
             // 注意：**不调用 noteResult()** —— 用户输错/重复提交/被限流都不该
             // 让整个空降助手在本会话被禁用
-            emit submitFinished(false, httpStatus, httpStatusMessage(httpStatus), {});
+            //
+            // 服务端对 400/403 会在 body 里说明具体原因（英文或中文，例如
+            // "One of your segments times are invalid"、"该片段已存在"），
+            // 比我们自造的"参数不合法"有用得多，原样带给用户
+            QString serverMsg = QString::fromUtf8(reply->readAll()).trimmed();
+            if (serverMsg.size() > 200)
+                serverMsg = serverMsg.left(200);
+            const QString msg = (httpStatus == 409 || serverMsg.isEmpty())
+                    ? httpStatusMessage(httpStatus)
+                    : serverMsg;
+            emit submitFinished(false, httpStatus, msg, {});
             return;
         }
 

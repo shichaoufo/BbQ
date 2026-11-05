@@ -432,6 +432,9 @@ Rectangle {
     // bsb.conf 缺失时 SponsorBlockManager.available=false，此数组恒为空
     property var sponsorSegments: []
     property bool sponsorEnabled: true           // 自动跳过开关（持久化）
+    // 空降助手：菜单里取消勾选的类别（key 数组）。空数组 = 全部类别都自动跳过。
+    // 存成逗号分隔串，跟随播放设置持久化
+    property var sponsorSkipDisabled: []
     property bool miniProgressEnabled: true      // 控制栏隐藏时常驻 mini 进度条（持久化）
     property string _sponsorFetchedKey: ""       // 已查询过的 bvid:cid（去重）
     property real _sponsorSkipGuardMs: 0         // 跳过防重入护栏（该时刻前不再触发）
@@ -1728,6 +1731,7 @@ Rectangle {
         // 本函数由各菜单的 onAboutToShow 调用，此刻自身 opened 仍为 false，
         // 所以 close() 只会影响另一个，不会把自己关掉
         if (chapterMenu.opened) chapterMenu.close()
+        if (sponsorSkipMenu.opened) sponsorSkipMenu.close()
         // 抽屉挂在窗口 overlay 上，不受本页裁剪；页面隐藏/停止播放时
         // 必须主动关闭，否则会留在屏幕上盖住新页面
         //（存在性判断：根对象初始化期间 id 可能还没创建）
@@ -1745,6 +1749,7 @@ Rectangle {
             // 设置键也在同一块阴影里，一并被覆盖
             || (pageRoot.controlsVisible && topShadowHover.hovered)
             || chapterMenu.opened          // 章节选择菜单打开时不隐藏
+            || sponsorSkipMenu.opened      // 跳过类型菜单打开时不隐藏
             || settingsSheet.opened        // 播放设置抽屉打开时不隐藏
             || volumePopup.opened
             || speedMenu.opened || qualityMenu.opened
@@ -1909,6 +1914,9 @@ Rectangle {
         pageRoot.playbackSpeed = Settings.getReal("video/playbackSpeed", 1.0)
         pageRoot.danmakuFpsLimit = Settings.getInt("video/danmaku/fpsLimit", 60)
         pageRoot.sponsorEnabled = Settings.getBool("video/sponsor/enabled", true)
+        var disabledKeys = Settings.getString("video/sponsor/skipDisabled", "")
+        pageRoot.sponsorSkipDisabled = disabledKeys === ""
+                ? [] : disabledKeys.split(",")
         pageRoot.miniProgressEnabled = Settings.getBool("video/miniProgress/enabled", true)
         FramePacer.setTargetRate(pageRoot.danmakuFpsLimit)
     }
@@ -1924,6 +1932,8 @@ Rectangle {
         Settings.setReal("video/playbackSpeed", pageRoot.playbackSpeed)
         Settings.setInt("video/danmaku/fpsLimit", pageRoot.danmakuFpsLimit)
         Settings.setBool("video/sponsor/enabled", pageRoot.sponsorEnabled)
+        Settings.setString("video/sponsor/skipDisabled",
+                           (pageRoot.sponsorSkipDisabled || []).join(","))
         Settings.setBool("video/miniProgress/enabled", pageRoot.miniProgressEnabled)
     }
 
@@ -3292,6 +3302,34 @@ Rectangle {
         default: return "#90A4AE"
         }
     }
+    // 找出与 [startSec, endSec] 重叠超过 1 秒的已知空降片段（没有则 null）。
+    // 用于提交前的本地提示：这个视频多半已经有别人标过同一段了
+    function sponsorOverlapOf(startSec, endSec) {
+        var list = pageRoot.sponsorSegments || []
+        for (var i = 0; i < list.length; ++i) {
+            var g = list[i]
+            if (!g) continue
+            var ov = Math.min(endSec, g.end) - Math.max(startSec, g.start)
+            if (ov >= 1) return g
+        }
+        return null
+    }
+
+    // 该类别是否参与自动跳过（设置面板里的勾选状态）
+    function sponsorCategorySkippable(cat) {
+        return (pageRoot.sponsorSkipDisabled || []).indexOf(cat) < 0
+    }
+
+    // 顶部「跳过类型」菜单里勾选/取消某个类别，立即生效并持久化
+    function toggleSponsorSkipCategory(cat) {
+        var list = (pageRoot.sponsorSkipDisabled || []).slice()
+        var i = list.indexOf(cat)
+        if (i >= 0) list.splice(i, 1)
+        else list.push(cat)
+        pageRoot.sponsorSkipDisabled = list
+        savePlayerSettings()
+    }
+
     // 提交成功的片段并入本地色带。
     // ★ 只收 actionType === "skip"：sponsorSegments 的隐式不变量就是"只装跳过
     // 片段"，混进 mute/poi 会被 onPositionChanged 当跳过直接 seek。
@@ -4897,6 +4935,9 @@ Rectangle {
                             var sponsorPosSec = position / 1000
                             for (var ssi = 0; ssi < pageRoot.sponsorSegments.length; ssi++) {
                                 var sseg = pageRoot.sponsorSegments[ssi]
+                                // 菜单里取消勾选的类别只画色带、不自动跳过
+                                if (!pageRoot.sponsorCategorySkippable(sseg.category))
+                                    continue
                                 if (sponsorPosSec >= sseg.start && sponsorPosSec < sseg.end - 0.5) {
                                     pageRoot._sponsorSkipGuardMs = position + 1500
                                     pageRoot.doSeek(sseg.end * 1000)
@@ -8551,6 +8592,9 @@ Rectangle {
         title: "设置"
         // Right 模式下 size 表示宽度，由 applyDrawerGeometry() 在 open 前算好
         size: 320
+        // 抽屉关掉时顺手收掉「跳过类型」菜单：菜单挂在窗口 overlay 上，
+        // 不受抽屉裁剪，不关会孤零零浮在播放器上
+        onClosed: if (sponsorSkipMenu.opened) sponsorSkipMenu.close()
 
         // 下拉框是常驻实例：切视频、切编码、拿到新的字幕列表后不会自己跟着变，
         // 每次打开抽屉时统一同步一次
@@ -8576,6 +8620,9 @@ Rectangle {
 
         property bool _sbBusy: false
         property string _sbError: ""
+        // 提交前的本地提示（不阻止提交）：区间与已有标注重叠时，服务端往往
+        // 会判重复/非法，提前告诉用户重叠的是哪一条，省得猜
+        property string _sbHint: ""
         property int _sbCooldown: 0
         // 用户是否动过起止时间。只有没动过时，打开抽屉才会用当前播放位置
         // 预填结束时间；动过就一律不碰，避免把用户刚取的值冲掉
@@ -8638,6 +8685,7 @@ Rectangle {
             sponsorEndField.text = "00:00"
             _sbFormTouched = false
             _sbError = ""
+            _sbHint = ""
             _sbCooldown = 0
         }
 
@@ -8702,6 +8750,16 @@ Rectangle {
             }
 
             _sbError = ""
+            _sbHint = ""
+            // 与本地已知片段重叠时给个提示（仍然提交，由服务端判定：
+            // 有些重合是合理的，比如同区间的"片头"和"恰饭"）
+            var ov = pageRoot.sponsorOverlapOf(s, e)
+            if (ov) {
+                _sbHint = "提示：与已有片段重叠 —— " + pageRoot.sponsorCategoryName(ov.category)
+                        + " " + pageRoot.formatDuration(Math.floor(ov.start))
+                        + "-" + pageRoot.formatDuration(Math.floor(ov.end))
+                        + "，服务端可能判为重复"
+            }
             _sbBusy = true
             SponsorBlockManager.submitSegments(pageRoot.bvid, pageRoot.cid, durSec,
                                                [{ "start": s, "end": e,
@@ -8721,18 +8779,11 @@ Rectangle {
                         pageInfoBar.showSuccess("已提交 " + added + " 个片段，已加入进度条色带")
                     else
                         pageInfoBar.showSuccess("已提交（静音/高光点类型不会自动跳过）")
-                    // 提交成功后：开始/结束都停在"这一段的结束时间"。
-                    // 两个框都填同一个值（不再一边 00:00 一边空着）——下一段
-                    // 直接从这儿开始改，点一次「取当前」更新结束即可
-                    var lastEnd = 0
-                    if (segments && segments.length > 0) {
-                        var lastSeg = segments[segments.length - 1]
-                        lastEnd = Math.floor(lastSeg.end || 0)
-                    }
-                    var endText = pageRoot.formatDuration(lastEnd)
-                    sponsorStartField.text = endText
-                    sponsorEndField.text = endText
-                    settingsSheet._sbFormTouched = true
+                    // 提交成功后**不动**起止时间：保留用户刚填的那一段，
+                    // 让"我提交的就是这个区间"一目了然。
+                    // （之前会把两个框都改成片段结束时间，看着像被系统改写了；
+                    //   最早还试过 00:00 + 空值，两个框不一致更让人困惑）
+                    settingsSheet._sbHint = ""
                     return
                 }
                 settingsSheet._sbError = message
@@ -9011,7 +9062,7 @@ Rectangle {
                     visible: SponsorBlockManager.available
 
                     FluText {
-                        text: "自动跳过（恰饭、片头等）"
+                        text: "自动跳过"
                         font: FluTextStyle.Body
                         color: FluTheme.fontPrimaryColor
                         Layout.fillWidth: true
@@ -9023,6 +9074,74 @@ Rectangle {
                         clickListener: function() {
                             pageRoot.sponsorEnabled = !pageRoot.sponsorEnabled
                             savePlayerSettings()
+                        }
+                    }
+
+                    // 跳过类型：勾选哪些类别参与自动跳过。只影响"跳不跳"，
+                    // 色带照常绘制 —— 取消勾选等于"这类内容我想自己看"
+                    FluMenuBar {
+                        id: sponsorSkipMenuBar
+                        Layout.alignment: Qt.AlignVCenter
+                        // 总开关关掉时整个菜单不可用（灰色、点不动），
+                        // 否则用户会困惑"勾了类型却不跳"
+                        enabled: pageRoot.sponsorEnabled
+                        onEnabledChanged: {
+                            if (!enabled && sponsorSkipMenu.opened)
+                                sponsorSkipMenu.close()
+                        }
+                        // 抽屉有深/浅两套主题：文字与悬停色跟着主题走，
+                        // 不能照抄控制栏那套写死的白色
+                        delegate: FluMenuBarItem {
+                            id: skipBarItem
+                            // 总开关关掉时用三级文字色，让"点不动"看得出来
+                            textColor: pageRoot.sponsorEnabled
+                                       ? FluTheme.fontPrimaryColor
+                                       : FluTheme.fontTertiaryColor
+                            // FluMenuBarItem 用自定义的 disabled 控制可用性，
+                            // 父级的 enabled 不会自动传下来，这里显式关联
+                            disabled: !pageRoot.sponsorEnabled
+                            background: Rectangle {
+                                implicitWidth: 30
+                                implicitHeight: 30
+                                radius: 3
+                                color: skipBarItem.pressed ? FluTheme.itemPressColor
+                                       : (skipBarItem.highlighted ? FluTheme.itemHoverColor
+                                                                  : "transparent")
+                            }
+                        }
+                        FluMenu {
+                            id: sponsorSkipMenu
+                            title: "跳过类型"
+                            width: 190
+                            // 窗口变矮时（比如把播放器拉小）限制菜单高度，
+                            // 否则 12 项会顶出窗口底部、下面几项点不到
+                            height: Math.min(implicitHeight,
+                                             (pageRoot.Window && pageRoot.Window.height > 0
+                                              ? pageRoot.Window.height : 800) - 120)
+                            // 覆盖模板的 contentItem：原版的 ListView 高度等于内容高度，
+                            // 菜单被压矮后它不会滚（interactive 要"内容比窗口高"才为 true）。
+                            // 这里改成"内容比自身高就能滚"，并常驻滚动条
+                            contentItem: ListView {
+                                implicitHeight: contentHeight
+                                model: sponsorSkipMenu.contentModel
+                                clip: true
+                                interactive: contentHeight > height
+                                boundsBehavior: Flickable.StopAtBounds
+                                ScrollBar.vertical: FluScrollBar {
+                                    policy: ScrollBar.AsNeeded
+                                }
+                            }
+                            // 这里**不能**调 closePopups()：那会把设置抽屉本身关掉。
+                            // 抽屉关闭时由 settingsSheet.onClosed 收掉这个菜单
+                            Repeater {
+                                model: SponsorBlockManager.categories()
+                                FluMenuItem {
+                                    text: settingsSheet.sponsorCategoryLabel(modelData)
+                                    checkable: true
+                                    checked: pageRoot.sponsorCategorySkippable(modelData)
+                                    onTriggered: pageRoot.toggleSponsorSkipCategory(modelData)
+                                }
+                            }
                         }
                     }
                 }
@@ -9170,6 +9289,15 @@ Rectangle {
                         text: settingsSheet._sbError
                         font: FluTextStyle.Caption
                         color: "#e53935"
+                        wrapMode: Text.Wrap
+                    }
+
+                    FluText {
+                        Layout.fillWidth: true
+                        visible: settingsSheet._sbHint !== ""
+                        text: settingsSheet._sbHint
+                        font: FluTextStyle.Caption
+                        color: "#e08a00"
                         wrapMode: Text.Wrap
                     }
 
