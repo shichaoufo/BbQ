@@ -154,6 +154,28 @@ Rectangle {
         return m ? m[1].toLowerCase() : ""
     }
 
+    // ===== CDN 健康表接口的安全包装 =====
+    // 为什么要包一层：这些是 C++ 的 Q_INVOKABLE，若某天没能从 QML 访问到
+    // （比如声明被放进类的 private 段 —— Qt 6 的 moc 会把访问级别写进元对象，
+    // 私有段的方法 QML 调不到，运行时报 "Property 'x' is not a function"），
+    // 直接调用会抛异常并**中断整个信号处理函数**。
+    // onFileLoaded 里那一句曾经就是这样：异常一抛，后面的历史进度恢复
+    // （pendingSeekTimer.restart）和弹幕请求全部被跳过 —— 表现为"打开看过的
+    // 视频不再自动续播"。所以这里统一用 typeof 判空，宁可不记健康表，
+    // 也不能让播放流程断掉。
+    function cdnReportResult(url, ok, bytes) {
+        if (typeof PlayUrlManager.reportCdnResult === "function")
+            PlayUrlManager.reportCdnResult(url, ok, bytes)
+    }
+    function cdnIsHostBlocked(url) {
+        return typeof PlayUrlManager.cdnHostBlocked === "function"
+                ? PlayUrlManager.cdnHostBlocked(url) : false
+    }
+    function cdnReportThroughput(url, bps, required) {
+        if (typeof PlayUrlManager.reportCdnThroughput === "function")
+            PlayUrlManager.reportCdnThroughput(url, bps, required)
+    }
+
     // 从候选列表里挑一个"当前未处于退避期"的地址：从 startIdx 起找一圈，
     // 全都在退避就退回 startIdx 那个（宁可试一次，也别没得播）
     function pickCdnCandidate(list, startIdx) {
@@ -161,7 +183,7 @@ Rectangle {
         var n = list.length
         for (var i = 0; i < n; ++i) {
             var idx = (startIdx + i) % n
-            if (!PlayUrlManager.cdnHostBlocked(list[idx])) return list[idx]
+            if (!cdnIsHostBlocked(list[idx])) return list[idx]
         }
         return list[startIdx % n]
     }
@@ -1669,12 +1691,21 @@ Rectangle {
         // 空降昵称：拉一次服务器上的当前值（C++ 内部每会话只请求一次），
         // 再用缓存值回填输入框（用户上次改过就一直显示）
         SponsorBlockManager.fetchUsername()
-        if (sponsorNameField) sponsorNameField.text = SponsorBlockManager.userName
+        if (sponsorNameField)
+            sponsorNameField.text = pageRoot.sponsorNameForDisplay(SponsorBlockManager.userName)
         // 提交表单：已填的起止时间原样保留（用户会在两次打开之间拖进度取终点）
         settingsSheet.prepareSponsorForm()
         settingsSheet.open(FluSheetType.Right)
         settingsSheet.height = pageRoot.height
         settingsSheet.y = pageRoot.mapToItem(null, 0, 0).y
+    }
+
+    // 服务端在"没设过昵称"时会把 64 位公开 ID 当名字返回。那不是用户设的
+    // 昵称：塞进输入框既不美观，又会被 maximumLength: 32 截断成一串乱码，
+    // 用户一点保存就存进了这个截断串。所以这种情况一律按"未设置"处理
+    function sponsorNameForDisplay(name) {
+        if (!name) return ""
+        return /^[0-9a-f]{64}$/i.test(name) ? "" : name
     }
 
     // 保存排行榜昵称（空降助手社区服务器侧的显示名，与 B 站账号无关）
@@ -2509,7 +2540,7 @@ Rectangle {
             if (mpvPlayer.hasVideo || mpvPlayer.playing) return
 
             // 一个字节都没拿到 → 记为线路坏（中途断开有字节的不算，见 C++ 注释）
-            PlayUrlManager.reportCdnResult(pageRoot._cdnHostInUse, false, 0)
+            pageRoot.cdnReportResult(pageRoot._cdnHostInUse, false, 0)
             pageRoot._cdnFailoverCount += 1
             console.warn("[CDN] first frame timeout, host:", pageRoot._cdnHostInUse,
                          "failover:", pageRoot._cdnFailoverCount)
@@ -2568,7 +2599,7 @@ Rectangle {
                     pageRoot._cdnSlowSamples = 0
                     console.warn("[CDN] throughput below bitrate:", pageRoot._cdnLastSampleBps,
                                  "B/s vs required:", required, "host:", pageRoot._cdnHostInUse)
-                    PlayUrlManager.reportCdnThroughput(pageRoot._cdnHostInUse, bps, required)
+                    pageRoot.cdnReportThroughput(pageRoot._cdnHostInUse, bps, required)
                 }
             } else {
                 if (pageRoot._cdnSlowSamples > 0)
@@ -2576,7 +2607,7 @@ Rectangle {
                                  "B/s host:", pageRoot._cdnHostInUse)
                 pageRoot._cdnSlowSamples = 0
                 // 好样本也上报一次：让 C++ 侧把该 host 的软降权清掉（无历史时直接返回）
-                PlayUrlManager.reportCdnThroughput(pageRoot._cdnHostInUse, bps, required)
+                pageRoot.cdnReportThroughput(pageRoot._cdnHostInUse, bps, required)
             }
         }
     }
@@ -4575,7 +4606,7 @@ Rectangle {
         // 用户正在输入时不抢焦点里的内容
         function onUserNameChanged() {
             if (sponsorNameField && !sponsorNameField.activeFocus)
-                sponsorNameField.text = SponsorBlockManager.userName
+                sponsorNameField.text = pageRoot.sponsorNameForDisplay(SponsorBlockManager.userName)
         }
         function onUsernameResult(ok, message) {
             if (ok) pageInfoBar.showSuccess(message)
@@ -4727,7 +4758,7 @@ Rectangle {
                             // 加载失败 = 一个字节都没拿到：记进 CDN 健康表，
                             // 下次打开视频直接跳过这条线路
                             firstFrameWatchdog.stop()
-                            PlayUrlManager.reportCdnResult(pageRoot._cdnHostInUse, false, 0)
+                            pageRoot.cdnReportResult(pageRoot._cdnHostInUse, false, 0)
                             pageRoot.playbackRetryCount += 1
                             if (pageRoot.playbackRetryCount <= 5) {
                                 // 保存当前位置，重试恢复
@@ -4752,7 +4783,7 @@ Rectangle {
                         // 首帧已出：停掉首帧看门狗，并把这条 CDN 记为"可用"
                         pageRoot._firstFrameSeen = true
                         firstFrameWatchdog.stop()
-                        PlayUrlManager.reportCdnResult(pageRoot._cdnHostInUse, true, 1)
+                        pageRoot.cdnReportResult(pageRoot._cdnHostInUse, true, 1)
                         // 文件加载成功后重置播放级重试状态
                         if (pageRoot._retryingPlayback) {
                             pageRoot._retryingPlayback = false
@@ -8546,6 +8577,9 @@ Rectangle {
         property bool _sbBusy: false
         property string _sbError: ""
         property int _sbCooldown: 0
+        // 用户是否动过起止时间。只有没动过时，打开抽屉才会用当前播放位置
+        // 预填结束时间；动过就一律不碰，避免把用户刚取的值冲掉
+        property bool _sbFormTouched: false
 
         function sponsorCategoryLabel(key) {
             switch (key) {
@@ -8592,23 +8626,28 @@ Rectangle {
             }
         }
 
-        // 换视频时清空表单（旧区间对新视频毫无意义，还可能误提交到别的视频上）
+        // 换视频时清空表单（旧区间对新视频毫无意义，还可能误提交到别的视频上）。
+        // 开始/结束统一填 "00:00"，不留"未填"占位 —— 两个框看起来一致，
+        // 打开抽屉时再自动把结束补成当前播放位置
         function resetSponsorForm() {
             sponsorCategoryIndex = 0
             // 用户点过下拉后 currentIndex 的声明式绑定就被打断，
             // 只改 sponsorCategoryIndex 不会回写控件，这里显式同步一次
             if (sponsorCategoryCombo) sponsorCategoryCombo.currentIndex = 0
             sponsorStartField.text = "00:00"
-            sponsorEndField.text = ""
+            sponsorEndField.text = "00:00"
+            _sbFormTouched = false
             _sbError = ""
             _sbCooldown = 0
         }
 
-        // 打开抽屉时调用：只在"结束时间还空着"时用当前播放位置兜个底，
-        // 已经填过的值一律不动 —— 这正是"关掉面板调进度再回来接着填"能成立的前提
+        // 打开抽屉时调用：只有用户还没动过起止时间，才用当前播放位置预填
+        // 结束时间；动过就一律不碰 —— 这正是"关掉面板调进度再回来接着填"
+        // 能成立的前提。
+        // full（整段）分类的时间本来就不用填，也不预填
         function prepareSponsorForm() {
             if (SponsorBlockManager.available && pageRoot.bvid.indexOf("BV") === 0
-                    && sponsorEndField.text === "" && mpvPlayer.position > 1000) {
+                    && !_sbFormTouched && !_sbFull && mpvPlayer.position > 1000) {
                 sponsorEndField.text =
                     pageRoot.formatDuration(Math.floor(mpvPlayer.position / 1000))
             }
@@ -8682,9 +8721,18 @@ Rectangle {
                         pageInfoBar.showSuccess("已提交 " + added + " 个片段，已加入进度条色带")
                     else
                         pageInfoBar.showSuccess("已提交（静音/高光点类型不会自动跳过）")
-                    // 提交成功后把结束时间清空：下一个片段从头取，起点也归零
-                    sponsorStartField.text = "00:00"
-                    sponsorEndField.text = ""
+                    // 提交成功后：开始/结束都停在"这一段的结束时间"。
+                    // 两个框都填同一个值（不再一边 00:00 一边空着）——下一段
+                    // 直接从这儿开始改，点一次「取当前」更新结束即可
+                    var lastEnd = 0
+                    if (segments && segments.length > 0) {
+                        var lastSeg = segments[segments.length - 1]
+                        lastEnd = Math.floor(lastSeg.end || 0)
+                    }
+                    var endText = pageRoot.formatDuration(lastEnd)
+                    sponsorStartField.text = endText
+                    sponsorEndField.text = endText
+                    settingsSheet._sbFormTouched = true
                     return
                 }
                 settingsSheet._sbError = message
@@ -9048,6 +9096,7 @@ Rectangle {
                             placeholderText: "0:00"
                             disabled: settingsSheet._sbFull
                             onEditingFinished: {
+                                settingsSheet._sbFormTouched = true
                                 var v = settingsSheet.sponsorParseTime(text)
                                 if (!isNaN(v)) text = pageRoot.formatDuration(Math.floor(v))
                                 if (settingsSheet._sbPoi) sponsorEndField.text = text
@@ -9059,6 +9108,7 @@ Rectangle {
                             font: FluTextStyle.Caption
                             disabled: settingsSheet._sbFull
                             onClicked: {
+                                settingsSheet._sbFormTouched = true
                                 sponsorStartField.text =
                                     pageRoot.formatDuration(Math.floor(mpvPlayer.position / 1000))
                                 if (settingsSheet._sbPoi) sponsorEndField.text = sponsorStartField.text
@@ -9083,6 +9133,7 @@ Rectangle {
                             placeholderText: "未填"
                             disabled: settingsSheet._sbFull || settingsSheet._sbPoi
                             onEditingFinished: {
+                                settingsSheet._sbFormTouched = true
                                 var v = settingsSheet.sponsorParseTime(text)
                                 if (!isNaN(v))
                                     text = pageRoot.formatDuration(Math.floor(v))
@@ -9094,6 +9145,7 @@ Rectangle {
                             font: FluTextStyle.Caption
                             disabled: settingsSheet._sbFull || settingsSheet._sbPoi
                             onClicked: {
+                                settingsSheet._sbFormTouched = true
                                 sponsorEndField.text =
                                     pageRoot.formatDuration(Math.floor(mpvPlayer.position / 1000))
                             }

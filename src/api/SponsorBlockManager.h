@@ -6,6 +6,7 @@
 #include <QString>
 #include <QStringList>
 #include <QVariantList>
+#include <QUrl>
 
 /**
  * @brief 空降助手（BilibiliSponsorBlock）查询管理器
@@ -108,6 +109,14 @@ private:
     void loadConfig();          // 解析 bsb.conf（构造时调用一次）
     void noteResult(bool ok);   // 连续失败计数 → 会话级自动禁用
     QString ensureUserID();     // 懒生成 + 持久化私人 ID（不进 QML）
+    // 设完昵称后读回来核对。服务端有几种"回 200 但根本不保存"的分支
+    // （用户名被锁定、身份被封禁、该身份还没有任何提交记录、命中请求校验
+    // 规则等），不核对的话客户端会骗用户"已更新"
+    void verifyUsernameSaved(const QString &expected);
+    // 发出提交请求；attempt=0 首次，网络层失败后自动以 attempt=1 重试一次
+    // （服务端按 videoID+userID+片段去重，重试只会得到 409，不会重复入库）
+    void sendSubmitRequest(const QUrl &url, const QByteArray &payload,
+                           const QVariantList &normalized, int attempt);
     void emitSubmitFailure(int httpStatus, const QString &message);
     static QString httpStatusMessage(int st);
 

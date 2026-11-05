@@ -12,6 +12,7 @@
 #include <QNetworkRequest>
 #include <QUrl>
 #include <QUrlQuery>
+#include <QTimer>
 #include <QUuid>
 #include <algorithm>
 
@@ -429,28 +430,90 @@ void SponsorBlockManager::submitSegments(const QString &bvid, const QString &cid
     query.addQueryItem(QStringLiteral("videoDuration"), QString::number(durationSec, 'f', 3));
     url.setQuery(query);
 
+    m_submitting = true;
+    emit submittingChanged();
+
+    sendSubmitRequest(url, QJsonDocument(body).toJson(QJsonDocument::Compact),
+                      normalized, 0);
+}
+
+// 真正发出提交请求。attempt 用于"网络层失败自动重试一次"：
+// 服务端按 (videoID, userID, segment) 去重，重复提交只会拿到 409，
+// 不会产生重复片段，所以重试是安全的。
+//
+// 为什么必须重试：跨境线路经常出现"请求已到、回包丢失/超时"，
+// 客户端看到的是无 HTTP 状态的网络错误（status 0），用户再点一次就变 409。
+// 2026-11-04 另一台机器的日志就是 0/0/409/0/0 这个序列。
+void SponsorBlockManager::sendSubmitRequest(const QUrl &url, const QByteArray &payload,
+                                            const QVariantList &normalized, int attempt)
+{
     QNetworkRequest req(url);
     req.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
     req.setRawHeader("origin", "BbQ");
     req.setRawHeader("x-ext-version", clientVersionTag().toUtf8());
-    req.setTransferTimeout(8000);   // 比 GET 宽：POST 可能被限流排队
+    // 20 秒：服务端提交时要走去重/风控/写库，跨境线路又慢。8 秒会把
+    // "其实已经受理、只是回包慢"的请求判成失败
+    req.setTransferTimeout(20000);
     req.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
                      QNetworkRequest::NoLessSafeRedirectPolicy);
 
-    m_submitting = true;
-    emit submittingChanged();
-
-    QNetworkReply *reply = m_nam.post(req, QJsonDocument(body).toJson(QJsonDocument::Compact));
-    connect(reply, &QNetworkReply::finished, this, [this, reply, normalized]() {
+    QNetworkReply *reply = m_nam.post(req, payload);
+    connect(reply, &QNetworkReply::finished, this,
+            [this, reply, url, payload, normalized, attempt]() {
         reply->deleteLater();
-        m_submitting = false;
-        emit submittingChanged();
 
         const int httpStatus = reply->attribute(
             QNetworkRequest::HttpStatusCodeAttribute).toInt();
 
         if (reply->error() != QNetworkReply::NoError && httpStatus == 0) {
-            emit submitFinished(false, 0, httpStatusMessage(0), {});
+            const auto err = reply->error();
+            qWarning() << "[SponsorBlock] submit network error, attempt:" << attempt
+                       << err << reply->errorString();
+            // 第一次失败就静默重试一次（保持"提交中…"状态，用户无感）
+            if (attempt == 0) {
+                QTimer::singleShot(700, this, [this, url, payload, normalized]() {
+                    sendSubmitRequest(url, payload, normalized, 1);
+                });
+                return;
+            }
+
+            m_submitting = false;
+            emit submittingChanged();
+
+            QString msg;
+            switch (err) {
+            case QNetworkReply::TimeoutError:
+            case QNetworkReply::OperationCanceledError:
+                msg = QStringLiteral(
+                    "服务器响应超时（可能已受理：稍后重新打开视频，"
+                    "片段若已在进度条上就说明提交成功）");
+                break;
+            case QNetworkReply::HostNotFoundError:
+                msg = QStringLiteral("无法解析服务器地址，请检查网络/DNS");
+                break;
+            case QNetworkReply::SslHandshakeFailedError:
+                msg = QStringLiteral("TLS 握手失败（请检查系统时间或代理设置）");
+                break;
+            case QNetworkReply::ConnectionRefusedError:
+            case QNetworkReply::RemoteHostClosedError:
+            case QNetworkReply::NetworkSessionFailedError:
+                msg = QStringLiteral("连接被服务器断开，请稍后重试");
+                break;
+            default:
+                msg = httpStatusMessage(0);
+                break;
+            }
+            emit submitFinished(false, 0, msg, {});
+            return;
+        }
+
+        m_submitting = false;
+        emit submittingChanged();
+
+        // 重试时才出现的 409：说明第一次其实已经写进去了（只是回包丢了）
+        if (httpStatus == 409 && attempt > 0) {
+            emit submitFinished(true, 200, QStringLiteral("已提交（上一次已受理）"),
+                                normalized);
             return;
         }
         if (httpStatus != 200) {
@@ -587,9 +650,50 @@ void SponsorBlockManager::setUsername(const QString &name)
             emit usernameResult(false, msg);
             return;
         }
-        m_userName = trimmed;
-        m_userNameFetched = true;
-        emit userNameChanged();
-        emit usernameResult(true, QStringLiteral("昵称已更新"));
+        // 200 不等于真的存下了：服务端在"用户名被锁定 / 身份被封禁 /
+        // 该身份还没有任何提交记录 / 命中请求校验规则"时会直接回 200 而不写库。
+        // 所以再 GET 一次核对，只有读回来一致才告诉用户成功
+        verifyUsernameSaved(trimmed);
+    });
+}
+
+void SponsorBlockManager::verifyUsernameSaved(const QString &expected)
+{
+    QUrl url(m_baseUrl + QStringLiteral("/getUsername"));
+    QUrlQuery query;
+    query.addQueryItem(QStringLiteral("userID"), ensureUserID());
+    url.setQuery(query);
+
+    QNetworkRequest req(url);
+    req.setRawHeader("origin", "BbQ");
+    req.setRawHeader("x-ext-version", clientVersionTag().toUtf8());
+    req.setTransferTimeout(6000);
+
+    QNetworkReply *reply = m_nam.get(req);
+    connect(reply, &QNetworkReply::finished, this, [this, reply, expected]() {
+        reply->deleteLater();
+        if (reply->error() != QNetworkReply::NoError) {
+            // 设置请求本身已经 200，只是这次校验没成功，别谎报"未生效"
+            emit usernameResult(false,
+                QStringLiteral("昵称请求已提交，但校验失败（网络错误），请重开设置确认"));
+            return;
+        }
+        QString actual;
+        {
+            const QJsonDocument doc = QJsonDocument::fromJson(reply->readAll());
+            if (doc.isObject())
+                actual = doc.object().value(QStringLiteral("userName")).toString();
+        }
+        if (actual == expected) {
+            m_userName = expected;
+            m_userNameFetched = true;
+            emit userNameChanged();
+            emit usernameResult(true, QStringLiteral("昵称已更新"));
+            return;
+        }
+        // 读回来不是刚设的名字（通常仍是公开 ID）= 服务器没保存
+        emit usernameResult(false,
+            QStringLiteral("昵称未生效：服务器没有保存（换个昵称再试，"
+                           "或该身份尚未提交过片段）"));
     });
 }

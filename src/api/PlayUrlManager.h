@@ -721,6 +721,11 @@ private:
     QString handleUrl(const QString &baseUrl, const QList<QString> &backupUrls, 
                       bool isProxy = false);
     
+    // ★ 下面这些必须是 public：Qt 6 的 moc 会把访问级别写进元对象，声明在
+    // private 段的 Q_INVOKABLE 从 QML 调不到（报 "Property 'x' ... is not a
+    // function"）。以前这几个 CDN 方法一直躺在 private 段里，
+    // 所以 QML 侧的 reportCdnResult 从来没真正生效过。
+public:
     // 设置 CDN 替换模式
     Q_INVOKABLE void setCDNReplaceMode(int mode);
     int cdnReplaceMode() const { return m_cdnReplaceMode; }
@@ -759,6 +764,7 @@ private:
     // "起播了但跑不动"（软降权，5 分钟自动恢复）
     Q_INVOKABLE void reportCdnThroughput(const QString &url, int observedBps, int requiredBps);
 
+private:
     struct HostHealth {
         int fails = 0;
         qint64 blockedUntil = 0;
