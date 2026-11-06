@@ -143,6 +143,8 @@ Rectangle {
     property string actualPixelFormat: ""
     property string actualPath: ""
     property bool showVideoInfo: false
+    // 直播编码偏好：0=AVC 1=HEVC 2=AV1（默认 AVC，与改动前行为一致）
+    property int liveCodecPref: 0
 
     // 视频信息浮层里的"解码方式"文案：
     //   hwdec-current = 实际生效的硬解后端（d3d11va / dxva2 / vulkan…），"no" = 软解
@@ -404,9 +406,30 @@ Rectangle {
 
                 // 收集实际可用的 qn 列表
                 var availableQns = {}
-                // 先收集 avc 候选，再收集其它编码作为兜底
-                var avcCandidates = []
-                var fallbackCandidates = []
+
+                // 候选排序：先按"用户选的编码偏好"，再按封装格式。
+                // 以前是 avc 全部排在前面，只要房间有 avc 就永远播 h264，
+                // 相当于 hevc/av1 永远拿不到。
+                // B站直播的实际情况：flv 只有 avc/hevc，av1 只在 fmp4 里；
+                // fmp4/ts 走 http_hls。
+                var codecKey = function(name) {
+                    var n = String(name || "").toLowerCase()
+                    if (n === "avc" || n === "h264") return "avc"
+                    if (n === "hevc" || n === "h265") return "hevc"
+                    if (n === "av1") return "av1"
+                    return "other"
+                }
+                // 偏好编码排最前，其余按 avc > hevc > av1 兜底
+                //（房间不提供该编码时自然会落到后面的）
+                var codecOrder = root.liveCodecPref === 1 ? ["hevc", "avc", "av1", "other"]
+                               : root.liveCodecPref === 2 ? ["av1", "hevc", "avc", "other"]
+                               : ["avc", "hevc", "av1", "other"]
+                // avc 用 flv 起播最快；选了 hevc/av1 就让 fmp4 优先（av1 仅 fmp4）
+                var formatOrder = root.liveCodecPref === 0 ? ["flv", "fmp4", "ts"]
+                                                          : ["fmp4", "flv", "ts"]
+
+                var entries = []
+                var seq = 0
 
                 for (var si = 0; si < streamList.length; si++) {
                     var stream = streamList[si]
@@ -414,6 +437,7 @@ Rectangle {
                     var formatList = stream.format || []
                     for (var fi = 0; fi < formatList.length; fi++) {
                         var format = formatList[fi]
+                        var formatName = format.format_name || ""
                         var codecList = format.codec || []
                         for (var ci = 0; ci < codecList.length; ci++) {
                             var codec = codecList[ci]
@@ -422,6 +446,11 @@ Rectangle {
                                 availableQns[acceptQn[aqi]] = true
                             }
 
+                            var cr = codecOrder.indexOf(codecKey(codec.codec_name))
+                            if (cr < 0) cr = 99
+                            var fr = formatOrder.indexOf(formatName)
+                            if (fr < 0) fr = 99
+
                             var baseUrl = codec.base_url || ""
                             var urlList = codec.url_info || []
                             for (var ui = 0; ui < urlList.length; ui++) {
@@ -429,19 +458,39 @@ Rectangle {
                                 var host = urlInfo.host || ""
                                 var extra = urlInfo.extra || ""
                                 if (host === "") continue
-                                var url = host + baseUrl + extra
-                                var lineName = (protocolName ? protocolName + " " : "") + (codec.codec_name || "") + " 线路" + (ui + 1)
-                                if (codec.codec_name === "avc" || codec.codec_name === "h264") {
-                                    avcCandidates.push(url)
-                                } else {
-                                    fallbackCandidates.push(url)
-                                }
+                                entries.push({ url: host + baseUrl + extra,
+                                               cr: cr, fr: fr, seq: seq++,
+                                               // 该编码在这一档实际能给的清晰度：
+                                               // 例如某房间 HEVC 只有 250(720p)，
+                                               // 而 AVC 有 10000(原画)
+                                               qn: codec.current_qn || 0 })
                             }
                         }
                     }
                 }
 
-                result.candidates = avcCandidates.concat(fallbackCandidates)
+                entries.sort(function(a, b) {
+                    // ★ 画质优先：先保证不降档，再在"同等画质"里按编码/封装偏好挑。
+                    // 之前编码优先，导致"选了 HEVC 但该房间 HEVC 只转码到 720p"时
+                    // 宁可降画质也要用 HEVC —— 与用户的预期相反。
+                    if (a.qn !== b.qn) return b.qn - a.qn
+                    if (a.cr !== b.cr) return a.cr - b.cr
+                    if (a.fr !== b.fr) return a.fr - b.fr
+                    return a.seq - b.seq
+                })
+                result.candidates = entries.map(function(e) { return e.url })
+                // 实际拿到的清晰度可能低于请求（未登录、或该编码只转码了低档）：
+                // 以选中候选的 qn 为准，让控制栏显示真实档位而不是"原画"
+                if (entries.length > 0 && entries[0].qn > 0)
+                    result.qn = entries[0].qn
+                if (root.liveCodecPref !== 0 && entries.length > 0 && entries[0].cr !== 0)
+                    console.warn("[LivePlayerPage] preferred codec unavailable, fallback",
+                                 "pref:", root.liveCodecPref, "rank:", entries[0].cr,
+                                 "qn:", entries[0].qn)
+                if (entries.length > 0)
+                    console.log("[LivePlayerPage] candidates:", entries.length,
+                                "pref:", root.liveCodecPref,
+                                "first:", entries[0].cr + "/" + entries[0].fr)
 
                 // 只保留实际可用的画质
                 var filteredQualities = []
@@ -761,6 +810,7 @@ Rectangle {
         root.danmakuRangeIndex = Settings.getInt("live/danmaku/rangeIndex", 3)
         root.danmakuSpeedIndex = Settings.getInt("live/danmaku/speedIndex", 1)
         root.danmakuOutlineStyle = Settings.getInt("live/danmaku/outlineStyle", 0)
+        root.liveCodecPref = Settings.getInt("live/codec", 0)
     }
 
     function savePlayerSettings() {
@@ -773,6 +823,7 @@ Rectangle {
         Settings.setInt("live/danmaku/rangeIndex", root.danmakuRangeIndex)
         Settings.setInt("live/danmaku/speedIndex", root.danmakuSpeedIndex)
         Settings.setInt("live/danmaku/outlineStyle", root.danmakuOutlineStyle)
+        Settings.setInt("live/codec", root.liveCodecPref)
     }
 
     // 供外部在卸载前主动停止播放，避免延迟销毁期间仍有声音输出
@@ -2514,7 +2565,10 @@ Rectangle {
     // 加载超时定时器 - 检测视频是否在规定时间内加载完成
     Timer {
         id: loadTimeoutTimer
-        interval: 8000  // 8秒超时
+        // AVC 走 FLV，起播快，8 秒足够；HEVC/AV1 走 fmp4(HLS)，
+        // 要先拉 m3u8 再拉首个分片，给到 12 秒，避免刚起来就被判超时
+        // 而回退到 avc（那样等于编码偏好没生效）
+        interval: root.liveCodecPref === 0 ? 8000 : 12000
         repeat: false
         onTriggered: {
             if (root._waitingForVideo && !mpvPlayer.hasVideo) {
@@ -3124,6 +3178,46 @@ Rectangle {
                         FluRadioButton { text: "中" }
                         FluRadioButton { text: "快" }
                     }
+                }
+
+                // 直播编码：AVC 兼容性最好、起播最快（默认）；
+                // HEVC 同码率画质更好；AV1 最省带宽，但只有 fmp4 且需要显卡支持
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 12
+
+                    FluText {
+                        text: "直播编码"
+                        font: FluTextStyle.Body
+                        color: FluTheme.fontPrimaryColor
+                        Layout.fillWidth: true
+                        wrapMode: Text.Wrap
+                    }
+
+                    FluComboBox {
+                        Layout.preferredWidth: 132
+                        model: ["AVC", "HEVC", "AV1"]
+                        // 绑定而不是 Component.onCompleted：抽屉是常驻实例，
+                        // 首次构造时 liveCodecPref 可能还没从设置里读出来
+                        currentIndex: root.liveCodecPref
+                        onActivated: function(index) {
+                            root.liveCodecPref = index
+                            root.savePlayerSettings()
+                            // 换编码等于换一条流：断流计数归零后重新取流
+                            root._sameUrlRetries = 0
+                            root._eofRetryCount = 0
+                            root.loadStream()
+                        }
+                    }
+                }
+
+                FluText {
+                    Layout.fillWidth: true
+                    text: "画质优先：仅在同一清晰度下按编码偏好选择；"
+                          + "该直播间没有这个编码的当前清晰度时，会回退到其它编码"
+                    font: FluTextStyle.Caption
+                    color: FluTheme.fontSecondaryColor
+                    wrapMode: Text.Wrap
                 }
 
                 Rectangle {

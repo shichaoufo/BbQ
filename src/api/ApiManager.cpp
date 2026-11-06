@@ -1654,7 +1654,9 @@ void ApiManager::getLiveStreamInfo(const QString &roomId, int qn, const QString 
     // 参数与 PiliPlus 对齐，并加 WBI 签名：不签名时服务端可能降清晰度或限流。
     // WBI 签名内部按 key 排序计算 w_rid，参数顺序无关；签名计算会剔除
     // 感叹号/引号/括号/星号，直播这几个值都是数字与逗号，不受影响。
-    QString params = QString("room_id=%1&protocol=0,1&format=0,1,2&codec=0,1"
+    // codec=0,1,2：avc + hevc + av1 全要。这里只是"允许哪些编码"，
+    // 具体用哪条由 LivePlayerPage 的「直播编码」选项决定（默认仍优先 avc）
+    QString params = QString("room_id=%1&protocol=0,1&format=0,1,2&codec=0,1,2"
                              "&qn=%2&platform=%3&ptype=8&dolby=5&panorama=1"
                              "&web_location=444.8")
                          .arg(roomId).arg(qn).arg(platform);
