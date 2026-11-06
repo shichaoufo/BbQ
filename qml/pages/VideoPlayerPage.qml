@@ -1119,7 +1119,21 @@ Rectangle {
     property real actualVideoBitrate: 0
     property real actualAudioBitrate: 0
     property string actualAudioCodec: ""
+    // 解码路径：实际生效的硬解后端（"no" = 软解）与解码后的像素格式
+    property string actualHwdec: ""
+    property string actualPixelFormat: ""
     property string actualPath: ""
+
+    // 视频信息浮层里的"解码方式"文案：
+    //   hwdec-current = 实际生效的硬解后端（d3d11va / dxva2 / vulkan…），"no" = 软解；
+    //   后面附解码后的像素格式（硬解时是 nv12/p010 等 GPU 侧格式）
+    function decodeSummary() {
+        var hw = pageRoot.actualHwdec
+        var s = (!hw || hw === "no") ? "软件解码 (CPU)" : ("硬件解码 · " + hw)
+        if (pageRoot.actualPixelFormat !== "")
+            s += " · " + pageRoot.actualPixelFormat
+        return s
+    }
 
     // 弹幕速度倍率映射：0=慢(0.7x), 1=中(1.0x), 2=快(1.4x)
     function _danmakuSpeedScale(idx) { return [0.7, 1.0, 1.4][idx] || 1.0 }
@@ -4868,6 +4882,8 @@ Rectangle {
                             pageRoot.actualVideoBitrate = info["videoBitrate"] || 0
                             pageRoot.actualAudioBitrate = info["audioBitrate"] || 0
                             pageRoot.actualAudioCodec = info["audioCodec"] || ""
+                            pageRoot.actualHwdec = info["hwdec"] || ""
+                            pageRoot.actualPixelFormat = info["pixelFormat"] || ""
                             pageRoot.actualPath = info["path"] || ""
                         }
                     }
@@ -5094,6 +5110,14 @@ Rectangle {
                             text: "视频编码: " + (pageRoot.actualVideoCodec || "未知")
                             font: FluTextStyle.Caption
                             color: "#FFFFFF"
+                        }
+
+                        // 实际解码路径：硬解后端 + 解码后的像素格式（软解时显示 CPU）
+                        FluText {
+                            text: "解码方式: " + pageRoot.decodeSummary()
+                            font: FluTextStyle.Caption
+                            color: "#FFFFFF"
+                            visible: pageRoot.actualHwdec !== ""
                         }
 
                         FluText {

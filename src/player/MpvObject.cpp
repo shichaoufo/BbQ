@@ -1673,6 +1673,11 @@ QVariantMap MpvObject::getVideoInfo()
     info["videoBitrate"] = readDouble("video-bitrate");
     info["audioBitrate"] = readDouble("audio-bitrate");
     info["audioCodec"] = readString("audio-codec");
+    // 当前解码路径：hwdec-current 为实际生效的硬解后端（"no" = 软解），
+    // video-params/* 给出解码后的像素格式（硬解时是 nv12/p010 等 GPU 格式）
+    QString hwdec = readString("hwdec-current");
+    info["hwdec"] = hwdec.isEmpty() ? QStringLiteral("no") : hwdec;
+    info["pixelFormat"] = readString("video-params/pixelformat");
     // 当前播放 URL（可用于核对请求的 qn）
     // DASH 下我们交给 mpv 的是内部拼的 edl://（video+audio 双流），
     // 信息面板里还是显示真实的视频流地址，别把 EDL 串糊上去

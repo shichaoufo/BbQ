@@ -138,8 +138,21 @@ Rectangle {
     property real actualVideoBitrate: 0
     property real actualAudioBitrate: 0
     property string actualAudioCodec: ""
+    // 解码路径：实际生效的硬解后端（"no" = 软解）与解码后的像素格式
+    property string actualHwdec: ""
+    property string actualPixelFormat: ""
     property string actualPath: ""
     property bool showVideoInfo: false
+
+    // 视频信息浮层里的"解码方式"文案：
+    //   hwdec-current = 实际生效的硬解后端（d3d11va / dxva2 / vulkan…），"no" = 软解
+    function decodeSummary() {
+        var hw = root.actualHwdec
+        var s = (!hw || hw === "no") ? "软件解码 (CPU)" : ("硬件解码 · " + hw)
+        if (root.actualPixelFormat !== "")
+            s += " · " + root.actualPixelFormat
+        return s
+    }
 
     signal closeRequested()
     signal reloadRequested()
@@ -943,6 +956,8 @@ Rectangle {
         root.actualVideoBitrate = info["videoBitrate"] || 0
         root.actualAudioBitrate = info["audioBitrate"] || 0
         root.actualAudioCodec = info["audioCodec"] || ""
+        root.actualHwdec = info["hwdec"] || ""
+        root.actualPixelFormat = info["pixelFormat"] || ""
         root.actualPath = info["path"] || ""
         return true
     }
@@ -1895,6 +1910,14 @@ Rectangle {
                     text: "视频编码: " + (root.actualVideoCodec || "未知")
                     font: FluTextStyle.Caption
                     color: "#FFFFFF"
+                }
+
+                // 实际解码路径：硬解后端 + 解码后的像素格式（软解时显示 CPU）
+                FluText {
+                    text: "解码方式: " + root.decodeSummary()
+                    font: FluTextStyle.Caption
+                    color: "#FFFFFF"
+                    visible: root.actualHwdec !== ""
                 }
 
                 FluText {

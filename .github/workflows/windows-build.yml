@@ -15,8 +15,9 @@
 #
 # 依赖说明：
 #   - Qt 6.11.1 win64_mingw + Qt 配套 MinGW 13.1（aqt 手动安装）
-#   - libmpv 已内置仓库 third_party/mpv-dev（含 #17764 D3D11 补丁，
-#     头文件/导入库 + runtime 全量依赖 DLL），无需外部下载
+#   - libmpv 以官方 0.42.0 发布包（zip，62.7MB）形式内置在 third_party/mpv-dev，
+#     CMake configure 时解压到 build 目录；该版本静态链接 ffmpeg，且 D3D11
+#     render API 已是官方支持（不再需要 #17764 补丁），无需外部下载
 #   - FluentUI 官方仓库现编译（本地无改动），安装进 Qt 的 qml 目录
 #
 # 注意：runner 上 MinGW 与本地 Qt 官方 MinGW 版本可能存在小版本差异，
@@ -162,9 +163,12 @@ jobs:
           $binDir = $exe.DirectoryName
           echo "BIN_DIR=$binDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           windeployqt --release --qmldir qml "$($exe.FullName)"
-          # 拷贝 libmpv 运行库及其 ffmpeg 全家桶依赖（仓库内置 third_party/mpv-dev）
-          Copy-Item "third_party\mpv-dev\lib\mpv-2.dll" $binDir -Force
-          Copy-Item "third_party\mpv-dev\runtime\*.dll" $binDir -Force
+          # libmpv 的 DLL 由 CMake 的 POST_BUILD 自动拷到 exe 目录（官方 0.42 是
+          # 静态构建，没有 ffmpeg 全家桶要额外分发），这里只做一次存在性断言，
+          # 防止某天解压/链接环节出问题时打包出一个打不开视频的包
+          if (-not (Test-Path (Join-Path $binDir "libmpv-2.dll"))) {
+              throw "libmpv-2.dll missing in output dir"
+          }
           Get-ChildItem $binDir | ForEach-Object { $_.Name }
 
       # 打成单个 zip：artifact 传目录没问题，但 Release 资产只能是文件，
