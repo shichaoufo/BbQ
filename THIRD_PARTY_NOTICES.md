@@ -14,17 +14,14 @@
 
 ## libmpv / mpv
 
-- **用途**：音视频解码与渲染
-- **版本**：官方 0.42.0（`libmpv-v0.42.0-x86_64-w64-mingw32-gpl`）
-- **形态**：`third_party/mpv-dev/libmpv-v0.42.0-x86_64-w64-mingw32-gpl.zip`（官方发布包原样入库，构建时解压）
-- **许可**：**GPLv2+**（该构建为 `-gpl` 变体，与本项目 GPLv3 兼容）
-- **说明**：该构建把 ffmpeg / libdav1d / libplacebo 等静态链接进 `libmpv-2.dll`，因此不再单独分发 ffmpeg DLL。包内的 `LICENSE.GPL` 一并保留。
+- **用途**：音视频解码与渲染（`third_party/mpv-dev` 下的头文件、导入库与运行时 DLL）
+- **许可**：LGPLv2.1+；若该构建启用了 GPL-only 组件，则为 GPLv2+
+- **说明**：仓库内的 `third_party/mpv-dev` 是第三方预编译产物，具体许可取决于该构建启用的编译选项。分发前请核对该构建附带的分发说明，并保留其版权声明。
 
 ## FFmpeg
 
-- **用途**：libmpv 的解码/解复用后端
-- **形态**：已由上述 libmpv 0.42.0 构建**静态链接**进 `libmpv-2.dll`，仓库不再单独提供 ffmpeg DLL
-- **许可**：GPLv2+（随该 libmpv 构建一同分发）
+- **用途**：libmpv 的解码/解复用后端（`third_party/mpv-dev/runtime` 下的 `avcodec-*.dll`、`avformat-*.dll`、`avutil-*.dll` 等）
+- **许可**：LGPLv2.1+ 或 GPLv2+（取决于构建时是否启用 `--enable-gpl` 等选项）
 - **说明**：同上，属第三方预编译产物，遵循其构建对应的许可。
 
 ## FluentUI

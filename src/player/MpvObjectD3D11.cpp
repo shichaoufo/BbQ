@@ -37,9 +37,8 @@ extern "C" {
 #include <mpv/client.h>
 #include <mpv/render.h>
 
-// mpv 0.42.0 起 D3D11 render API 是官方正式支持（PR #17764 已合并），
-// 官方包里自带 render_d3d11.h。下面的兜底定义只在用更老的 mpv-dev 时才生效，
-// 且要求渲染后端行为与 0.42 一致（见 mpv_d3d11_fbo 的说明）。
+// mpv 的 D3D11 render API 在 PR #17764 中才加入公开头文件 render_d3d11.h。
+// 这些宏和结构体在标准 render.h 中没有定义，需要自行提供。
 #ifndef MPV_RENDER_API_TYPE_D3D11
 #define MPV_RENDER_API_TYPE_D3D11 "d3d11"
 #endif
@@ -54,8 +53,6 @@ extern "C" {
 
 // 若 mpv-dev 包未提供 render_d3d11.h，则使用本地定义结构体。
 // 注意：device 和 tex 字段使用 void* 以匹配 mpv 官方头文件定义。
-// ★ 0.42 起 mpv_d3d11_fbo 去掉了 w/h（后端直接从纹理本身取尺寸），
-//   所以下面的 FBO 结构体也只有 tex；这段代码不兼容 0.41 及其补丁版本。
 #if __has_include(<mpv/render_d3d11.h>)
 #include <mpv/render_d3d11.h>
 #else
@@ -65,6 +62,7 @@ typedef struct mpv_d3d11_init_params {
 
 typedef struct mpv_d3d11_fbo {
     void *tex;
+    int w, h;
 } mpv_d3d11_fbo;
 #endif
 }
@@ -1777,10 +1775,10 @@ void MpvObjectD3D11::renderMpv()
         return;
     }
 
-    // 0.42 起 fbo 只带纹理：渲染尺寸由后端从纹理描述里取，
-    // 不再由调用方传 w/h（旧版 0.41 的补丁结构体才有这两个字段）
     mpv_d3d11_fbo fbo;
     fbo.tex = m_d3d11Texture;
+    fbo.w = m_textureSize.width();
+    fbo.h = m_textureSize.height();
 
     mpv_render_param params[] = {
         {static_cast<mpv_render_param_type>(MPV_RENDER_PARAM_D3D11_FBO), &fbo},

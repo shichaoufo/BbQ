@@ -729,10 +729,9 @@ private:
 int main(int argc, char *argv[])
 {
 #ifdef Q_OS_WIN
-    // 兼容旧的 mpv_runtime 子目录布局：若存在则优先从该目录加载 libmpv，
-    // 避免与 Qt 自带的 MinGW 运行时冲突（旧版动态构建才会遇到的问题）。
-    // 现在用的 libmpv 0.42.0 是静态构建（ffmpeg/libcurl 等都编进 DLL 了），
-    // 直接放 exe 同级目录即可，没有这个子目录时什么也不做。
+    // 将 mpv_runtime 子目录加入 DLL 搜索路径，使 libmpv-2.dll 及其全部依赖
+    // （libcurl、libgcc_s_seh、libstdc++ 等）都从该目录加载，避免与 Qt 自带的
+    // 旧版 MinGW 运行时冲突（如 curl_easy_header 缺失等问题）。
     {
         wchar_t exePath[MAX_PATH];
         GetModuleFileNameW(NULL, exePath, MAX_PATH);

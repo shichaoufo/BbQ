@@ -441,54 +441,44 @@ if(Vulkan_FOUND)
 endif()
 
 if(WIN32)
-    # libmpv 以**官方发布 zip** 形式入库，构建时解压到 build 目录再用：
-    #   · 解压后的 libmpv-2.dll 有 152MB，超过 GitHub 单文件 100MB 限制，不能直接提交；
-    #     官方 zip 只有 62.7MB，可以正常入库，包内自带头文件 + 导入库 + DLL，
-    #     对外仍然是"仓库自包含、clone 即可构建"。
-    #   · 这是官方 0.42.0（GPL）构建，**静态链接**了 ffmpeg/dav1d/libplacebo，
-    #     所以不再需要分发 avcodec-*.dll 那一堆运行库（旧的 runtime/ 已删除）。
-    #   · 0.42 起 D3D11 render API 是官方正式支持（不再需要 PR #17764 补丁）。
-    set(MPV_ZIP "${CMAKE_SOURCE_DIR}/third_party/mpv-dev/libmpv-v0.42.0-x86_64-w64-mingw32-gpl.zip")
+    # 仓库内置 mpv-dev（含 D3D11 补丁的 libmpv + 头文件 + 导入库），
+    # 运行期依赖的 ffmpeg 全家桶 DLL 在 third_party/mpv-dev/runtime
     if(DEFINED ENV{MPV_DIR})
-        set(MPV_DIR $ENV{MPV_DIR} CACHE PATH "mpv directory from environment variable" FORCE)
-    endif()
-    # 旧版本的缓存指向 third_party/mpv-dev（那时是解压好的头文件+lib 目录），
-    # 现在那里只剩 zip 包。命中这种旧缓存时自动改到解压目录，
-    # 免得升级后必须手动删 CMakeCache 才能重新构建
-    if(NOT DEFINED MPV_DIR OR MPV_DIR STREQUAL "${CMAKE_SOURCE_DIR}/third_party/mpv-dev")
-        set(MPV_DIR "${CMAKE_BINARY_DIR}/libmpv-0.42.0" CACHE PATH "Path to extracted mpv-dev" FORCE)
+        set(MPV_DIR $ENV{MPV_DIR} CACHE PATH "mpv directory from environment variable")
+    elseif(NOT DEFINED MPV_DIR)
+        set(MPV_DIR "${CMAKE_SOURCE_DIR}/third_party/mpv-dev" CACHE PATH "Path to mpv-dev directory")
     endif()
 
-    # 首次 configure 时解压（约 152MB，几秒钟）。已有解压结果则跳过
-    if(EXISTS "${MPV_ZIP}" AND NOT EXISTS "${MPV_DIR}/libmpv.dll.a")
-        message(STATUS "Extracting libmpv from ${MPV_ZIP} ...")
-        file(MAKE_DIRECTORY "${MPV_DIR}")
-        if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.18)
-            file(ARCHIVE_EXTRACT INPUT "${MPV_ZIP}" DESTINATION "${MPV_DIR}")
-        else()
-            # 3.16/3.17 没有 ARCHIVE_EXTRACT：退到 tar（基于 libarchive，可解 zip）
-            execute_process(COMMAND ${CMAKE_COMMAND} -E tar xf "${MPV_ZIP}"
-                            WORKING_DIRECTORY "${MPV_DIR}"
-                            RESULT_VARIABLE _mpv_tar_rc)
-            if(NOT _mpv_tar_rc EQUAL 0)
-                message(FATAL_ERROR "解压 libmpv 失败（cmake -E tar 返回 ${_mpv_tar_rc}）")
-            endif()
-        endif()
+    # 回退兼容：libmpv 0.42 那版 CMake 会把缓存里的 MPV_DIR 改到
+    # build/libmpv-0.42.0（官方 zip 解压出来的布局）。回退到 0.41 后那里
+    # 既没有 lib/mpv-2.dll，头文件也是 0.42 的 ABI（mpv_d3d11_fbo 无 w/h），
+    # 会和 0.41 的 libmpv 不匹配。检测到这种布局就强制回到仓库内置目录，
+    # 免得每次回退都要手动清 CMakeCache。
+    if(DEFINED MPV_DIR
+       AND NOT EXISTS "${MPV_DIR}/lib/mpv-2.dll"
+       AND EXISTS "${CMAKE_SOURCE_DIR}/third_party/mpv-dev/lib/mpv-2.dll")
+        message(STATUS "MPV_DIR '${MPV_DIR}' is not a 0.41 dev layout, using bundled third_party/mpv-dev")
+        set(MPV_DIR "${CMAKE_SOURCE_DIR}/third_party/mpv-dev" CACHE PATH "Path to mpv-dev directory" FORCE)
     endif()
 
-    if(MPV_DIR AND EXISTS "${MPV_DIR}/include/mpv/client.h")
-        include_directories(${MPV_DIR}/include)
-        target_link_directories(${PROJECT_NAME} PRIVATE ${MPV_DIR})
-        # 导入库是 libmpv.dll.a → -lmpv；运行期加载的是 libmpv-2.dll（同包提供）
-        target_link_libraries(${PROJECT_NAME} PRIVATE mpv)
+    if(MPV_DIR AND EXISTS ${MPV_DIR})
+        include_directories(${MPV_DIR}/include ${MPV_DIR}/include/mpv)
+        target_link_directories(${PROJECT_NAME} PRIVATE ${MPV_DIR}/lib)
+        target_link_libraries(${PROJECT_NAME} PRIVATE mpv-2)
 
-        # 静态构建只有这一个运行库，拷贝到 exe 目录即可
-        if(EXISTS "${MPV_DIR}/libmpv-2.dll")
+        # 编译后把 libmpv 主 DLL 及其运行期依赖（ffmpeg 全家桶等）拷贝到
+        # exe 输出目录，免去手动复制。
+        # 注意：MinGW 导入库 libmpv-2.dll.a 使 exe 运行期按 "libmpv-2.dll"
+        # 名字加载，而仓库里的 DLL 叫 mpv-2.dll，拷贝时需重命名。
+        if(EXISTS ${MPV_DIR}/lib/mpv-2.dll)
             add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
                 COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                    "${MPV_DIR}/libmpv-2.dll"
-                    "$<TARGET_FILE_DIR:${PROJECT_NAME}>/libmpv-2.dll"
-                COMMENT "Deploying libmpv DLL to output directory..."
+                    ${MPV_DIR}/lib/mpv-2.dll
+                    $<TARGET_FILE_DIR:${PROJECT_NAME}>/libmpv-2.dll
+                COMMAND ${CMAKE_COMMAND} -E copy_directory
+                    ${MPV_DIR}/runtime
+                    $<TARGET_FILE_DIR:${PROJECT_NAME}>
+                COMMENT "Deploying libmpv runtime DLLs to output directory..."
             )
         endif()
 

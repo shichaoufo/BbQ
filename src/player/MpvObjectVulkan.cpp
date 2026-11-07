@@ -27,14 +27,14 @@ typedef struct mpv_d3d11_init_params {
     ID3D11Device *device;
 } mpv_d3d11_init_params;
 
-// 与 mpv 0.42 的 render_d3d11.h 保持一致：fbo 只有 tex（尺寸由后端从纹理取）
+// 与 mpv 公开头文件 render_d3d11.h 保持一致字段名 { tex, w, h }
 typedef struct mpv_d3d11_fbo {
     ID3D11Texture2D *tex;
+    int w, h;
 } mpv_d3d11_fbo;
 
-// 与 mpv render.h 的枚举保持一致（21/22）；这两个兜底值只在老 SDK 缺失时用到
-#define MPV_RENDER_PARAM_D3D11_INIT_PARAMS 21
-#define MPV_RENDER_PARAM_D3D11_FBO 22
+#define MPV_RENDER_PARAM_D3D11_INIT_PARAMS 17
+#define MPV_RENDER_PARAM_D3D11_FBO 18
 #endif
 }
 
@@ -764,9 +764,10 @@ void MpvObjectVulkan::renderMpv()
         return;
     }
 
-    // 0.42 起 fbo 只带纹理，渲染尺寸由后端从纹理描述里取
     mpv_d3d11_fbo fbo;
     fbo.tex = m_d3d11Texture;
+    fbo.w = m_textureSize.width();
+    fbo.h = m_textureSize.height();
 
     mpv_render_param params[] = {
         {static_cast<mpv_render_param_type>(MPV_RENDER_PARAM_D3D11_FBO), &fbo},
