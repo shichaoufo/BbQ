@@ -6742,7 +6742,9 @@ Rectangle {
                                     id: bottomTagHover
                                     anchors.fill: parent
                                     hoverEnabled: true
-                                    cursorShape: Qt.PointingHandCursor
+                                    // 标签胶囊悬停保持默认箭头：内容区不出手指光标，
+                                    // hover 底色变化仍由 containsMouse 提供反馈
+                                    cursorShape: Qt.ArrowCursor
                                     // 标签点击 → 客户端自己的搜索结果页（切到搜索页并弹出结果），
                                     // 不再丢给系统浏览器打开 bilibili.com/tag/
                                     onClicked: GlobalState.openInAppSearch(modelData.name || "")
