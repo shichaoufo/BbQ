@@ -737,6 +737,28 @@ Item {
                                         }
                                     }
 
+                                    // 发布时间 / IP 归属地：移到用户名下方，与用户名、正文同列。
+                                    // 文本格式沿用原操作栏，只换位置。
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        spacing: 8
+
+                                        FluText {
+                                            text: GlobalState.formatCommentTime(model.ctime)
+                                            font: FluTextStyle.Caption
+                                            color: FluTheme.fontSecondaryColor
+                                            Layout.alignment: Qt.AlignVCenter
+                                        }
+
+                                        FluText {
+                                            text: model.ipLocation || ""
+                                            font: FluTextStyle.Caption
+                                            color: FluTheme.fontSecondaryColor
+                                            Layout.alignment: Qt.AlignVCenter
+                                            visible: model.ipLocation && model.ipLocation !== ""
+                                        }
+                                    }
+
                                     CommentRichText {
                                         segments: panelRoot.commentSegmentsOf(model.content, model.emotes, false, panelRoot.jumpInfosOf(model), null, panelRoot.atMidMapOf(model))
                                         bodyFont: FluTextStyle.Body
@@ -897,7 +919,9 @@ Item {
                                         }
                                     }
 
-                            // ====== 操作栏（时间、IP、回复、点赞、点踩）======
+                            // ====== 操作栏（点赞、点踩、回复）======
+                            // 时间与 IP 已移到用户名下方（见上方头部），原本最左的两个
+                            // 位置让给点赞/点踩，回复仍是第 3 个，弹性占位挪到末尾。
                             // 关键：必须放在【头像右侧ColumnLayout(L331)】内部，跟用户名/正文在同一个父容器，
                             // 这样它的Layout.left天然跟用户名、正文、图片的左边完全对齐，
                             // 再也不需要靠手动Layout.leftMargin: 40去硬凑Avatar宽度+spacing
@@ -905,37 +929,6 @@ Item {
                                 Layout.fillWidth: true
                                 Layout.topMargin: 6
                                 spacing: 16
-
-                                FluText {
-                                    text: GlobalState.formatCommentTime(model.ctime)
-                                    font: FluTextStyle.Caption
-                                    color: FluTheme.fontSecondaryColor
-                                    Layout.alignment: Qt.AlignVCenter
-                                }
-
-                                FluText {
-                                    text: model.ipLocation || ""
-                                    font: FluTextStyle.Caption
-                                    color: FluTheme.fontSecondaryColor
-                                    Layout.alignment: Qt.AlignVCenter
-                                    visible: model.ipLocation && model.ipLocation !== ""
-                                }
-
-                                FluTextButton {
-                                    text: "回复"
-                                    font: FluTextStyle.Caption
-                                    textColor: FluTheme.fontSecondaryColor
-                                    onClicked: {
-                                        if (!panelRoot.requireLogin()) return
-                                        panelRoot.replyRpid = model.rpid || ""
-                                        panelRoot.replyRootRpid = (model.root && model.root !== "0") ? model.root : (model.rpid || "")
-                                        panelRoot.replyToUser = model.uname || ""
-                                        // 点击回复即聚焦输入框，用户可直接输入
-                                        commentInput.forceActiveFocus()
-                                    }
-                                }
-
-                                Item { Layout.fillWidth: true }
 
                                 FluTextButton {
                                     font: FluTextStyle.Caption
@@ -1001,6 +994,22 @@ Item {
                                         }
                                     }
                                 }
+
+                                FluTextButton {
+                                    text: "回复"
+                                    font: FluTextStyle.Caption
+                                    textColor: FluTheme.fontSecondaryColor
+                                    onClicked: {
+                                        if (!panelRoot.requireLogin()) return
+                                        panelRoot.replyRpid = model.rpid || ""
+                                        panelRoot.replyRootRpid = (model.root && model.root !== "0") ? model.root : (model.rpid || "")
+                                        panelRoot.replyToUser = model.uname || ""
+                                        // 点击回复即聚焦输入框，用户可直接输入
+                                        commentInput.forceActiveFocus()
+                                    }
+                                }
+
+                                Item { Layout.fillWidth: true }
                             }
 
                                 // ====== 展开/收起子评论按钮 ======
@@ -1158,6 +1167,28 @@ Item {
                                                     anchors.verticalCenter: parent.verticalCenter
                                                     visible: panelRoot.isUpAuthor(modelData.mid)
                                                     asynchronous: true
+                                                }
+                                            }
+
+                                            // 发布时间 / IP 归属地：移到回复用户名下方。
+                                            // 文本格式沿用原操作栏，只换位置。
+                                            RowLayout {
+                                                Layout.fillWidth: true
+                                                spacing: 8
+
+                                                FluText {
+                                                    text: GlobalState.formatCommentTime(modelData.ctime)
+                                                    font: FluTextStyle.Caption
+                                                    color: FluTheme.fontSecondaryColor
+                                                    Layout.alignment: Qt.AlignVCenter
+                                                }
+
+                                                FluText {
+                                                    text: modelData.ipLocation || ""
+                                                    font: FluTextStyle.Caption
+                                                    color: FluTheme.fontSecondaryColor
+                                                    Layout.alignment: Qt.AlignVCenter
+                                                    visible: modelData.ipLocation && modelData.ipLocation !== ""
                                                 }
                                             }
 
@@ -1319,45 +1350,17 @@ Item {
                                                 }
                                             }
 
-                                            // ====== 回复评论：操作栏（时间/IP/回复/点赞/点踩）======
-                                            // 关键：与主评论同样，必须放在【回复头像右侧ColumnLayout(L626)】内部，
+                                            // ====== 回复评论：操作栏（点赞、点踩、回复）======
+                                            // 时间与 IP 已移到回复用户名下方（见上方头部），
+                                            // 原本最左的两个位置让给点赞/点踩，回复仍是第 3 个，
+                                            // 弹性占位挪到末尾。
+                                            // 关键：与主评论同样，必须放在【回复头像右侧ColumnLayout】内部，
                                             // 它的Layout.left就自然和回复用户名、回复正文、回复图片的左边完全对齐，
                                             // 不需要任何额外的Layout.leftMargin去硬凑头像+spacing。
                                             RowLayout {
                                                 Layout.fillWidth: true
                                                 Layout.topMargin: 6
                                                 spacing: 16
-
-                                                FluText {
-                                                    text: GlobalState.formatCommentTime(modelData.ctime)
-                                                    font: FluTextStyle.Caption
-                                                    color: FluTheme.fontSecondaryColor
-                                                    Layout.alignment: Qt.AlignVCenter
-                                                }
-
-                                                FluText {
-                                                    text: modelData.ipLocation || ""
-                                                    font: FluTextStyle.Caption
-                                                    color: FluTheme.fontSecondaryColor
-                                                    Layout.alignment: Qt.AlignVCenter
-                                                    visible: modelData.ipLocation && modelData.ipLocation !== ""
-                                                }
-
-                                                FluTextButton {
-                                                    text: "回复"
-                                                    font: FluTextStyle.Caption
-                                                    textColor: FluTheme.fontSecondaryColor
-                                                    onClicked: {
-                                                        if (!panelRoot.requireLogin()) return
-                                                        panelRoot.replyRpid = modelData.rpid || ""
-                                                        panelRoot.replyRootRpid = commentItem.parentModel.rpid || ""
-                                                        panelRoot.replyToUser = modelData.uname || ""
-                                                        // 点击回复即聚焦输入框，用户可直接输入
-                                                        commentInput.forceActiveFocus()
-                                                    }
-                                                }
-
-                                                Item { Layout.fillWidth: true }
 
                                                 FluTextButton {
                                                     font: FluTextStyle.Caption
@@ -1440,6 +1443,22 @@ Item {
                                                         }
                                                     }
                                                 }
+
+                                                FluTextButton {
+                                                    text: "回复"
+                                                    font: FluTextStyle.Caption
+                                                    textColor: FluTheme.fontSecondaryColor
+                                                    onClicked: {
+                                                        if (!panelRoot.requireLogin()) return
+                                                        panelRoot.replyRpid = modelData.rpid || ""
+                                                        panelRoot.replyRootRpid = commentItem.parentModel.rpid || ""
+                                                        panelRoot.replyToUser = modelData.uname || ""
+                                                        // 点击回复即聚焦输入框，用户可直接输入
+                                                        commentInput.forceActiveFocus()
+                                                    }
+                                                }
+
+                                                Item { Layout.fillWidth: true }
                                             }
                                                 }
                                             }
@@ -1482,10 +1501,13 @@ Item {
                     }
 
                     // 个性装扮 - 评论卡片右上角背景
+                    // 垂直对齐：头像中心 = commentItem.top + ColumnLayout.topMargin(8) + 32/2 = +24
+                    //           装扮中心 = topMargin + CommentCardBg.height(54)/2 = topMargin + 27
+                    //           令两者相等 → topMargin = 8 + 16 - 27 = -3
                     CommentCardBg {
                         anchors.top: parent.top
                         anchors.right: parent.right
-                        anchors.topMargin: -8
+                        anchors.topMargin: -3
                         anchors.rightMargin: 8
                         cardbg: model.cardbg
                     }

@@ -1,5 +1,6 @@
 pragma Singleton
 import QtQuick 2.15
+import BiliQt 1.0
 
 QtObject {
     id: root
@@ -70,6 +71,72 @@ QtObject {
     property real searchScrollY: 0
     property bool searchHasSearched: false
 
+    // ===== 搜索历史（全局唯一权威，2026-11-08）=====
+    // 以前只有 SearchLanding.submit() 写历史，于是「在搜索结果页内搜索」和
+    // 「从任意导航页点标签/热词/评论关键词呼出结果页」的关键词都不入库。
+    // 现在读写集中在单例，两个入口统一落库：
+    //   · openInAppSearch()            —— 所有呼出 / 换词结果牌的入口
+    //   · SearchResultPage.doSearch()  —— 结果页内搜索框提交
+    // SearchLanding 只负责展示（history 直接绑定这里）和转发按钮操作。
+    // 存储沿用本地 QSettings：key = search/history，JSON 数组，最新在最前。
+    property var searchHistory: []
+    readonly property string _searchHistKey: "search/history"
+    readonly property int _searchHistMax: 20
+
+    function _readSearchHistory() {
+        try {
+            var s = Settings.getString(root._searchHistKey, "")
+            if (s && s.length > 2) {
+                var v = JSON.parse(s)
+                if (Array.isArray(v)) return v
+            }
+        } catch (e) {}
+        return []
+    }
+
+    function _writeSearchHistory(arr) {
+        Settings.setString(root._searchHistKey, JSON.stringify(arr))
+        root.searchHistory = arr
+    }
+
+    function loadSearchHistory() {
+        root.searchHistory = root._readSearchHistory()
+    }
+
+    function addSearchHistory(kw) {
+        var w = String(kw || "").trim()
+        if (w === "") return
+        // 每次从设置读最新值：搜索落地页可能根本没被创建（例如直接从视频页
+        // 点标签进结果页），不能拿内存缓存去写，否则会把旧值覆盖回去。
+        var arr = root._readSearchHistory()
+        // 已经在最前面就不必写盘：切换搜索类型 / 筛选会用同一关键词重搜，
+        // 那种情况不该把历史顺序反复打乱。
+        var wasFirst = arr.length > 0 && arr[0] === w
+        // 去重：同一个词只留最新一次
+        for (var i = arr.length - 1; i >= 0; i--) {
+            if (arr[i] === w) arr.splice(i, 1)
+        }
+        arr.unshift(w)
+        if (arr.length > root._searchHistMax) arr = arr.slice(0, root._searchHistMax)
+        if (wasFirst) root.searchHistory = arr
+        else root._writeSearchHistory(arr)
+    }
+
+    function clearSearchHistory() {
+        root._writeSearchHistory([])
+    }
+
+    function removeSearchHistory(kw) {
+        var w = String(kw || "")
+        var arr = root._readSearchHistory()
+        var changed = false
+        for (var i = arr.length - 1; i >= 0; i--) {
+            if (arr[i] === w) { arr.splice(i, 1); changed = true }
+        }
+        if (changed) root._writeSearchHistory(arr)
+        else root.searchHistory = arr
+    }
+
     // ---- 应用内搜索请求（评论关键词 / 标签 / 话题统一走这里）----
     // 以前这些点击都是丢给系统浏览器打开 search.bilibili.com；现在客户端
     // 自己有搜索页，改为切到搜索页并直接弹出结果页。main.qml 监听本信号，
@@ -78,6 +145,10 @@ QtObject {
     function openInAppSearch(keyword) {
         var kw = String(keyword || "").trim()
         if (kw === "") return false
+        // 不管从哪个导航栏 / 哪个页面呼出结果牌，关键词都要留痕。
+        // addSearchHistory 自带去重与「已置顶则不写盘」，与落地页 submit()
+        // 里的那次记录叠加也不会重复。
+        root.addSearchHistory(kw)
         inAppSearchRequested(kw)
         return true
     }

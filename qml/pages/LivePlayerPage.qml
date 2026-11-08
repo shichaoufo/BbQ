@@ -912,12 +912,17 @@ Rectangle {
             App.exitMiniPlayerMode()
         }
         // 恢复被隐藏的鼠标指针（override cursor 是应用级的，不恢复会全局无指针）
+        // 先清文本区 I 型光标状态，再清指针隐藏状态
+        App.setPlayerTextCursor(false)
         App.setPlayerCursorHidden(false)
         try { savePlayerSettings() } catch (e) {}
     }
 
     onVisibleChanged: {
         if (!visible) {
+            // 页面切走时清掉文本区光标：override cursor 是应用级共享的，
+            // 残留会让下一个页面一直显示 I 型光标
+            App.setPlayerTextCursor(false)
             // 小窗模式下页面变为不可见（外部关闭直播的兜底路径）：
             // 退出小窗模式，恢复主窗口。播放器随本页子树由 Loader 统一销毁
             if (root.isMiniWindow) {
@@ -2313,8 +2318,14 @@ Rectangle {
             }
 
             // 控制栏区域悬停检测（HoverHandler 为被动监听，不与子控件
-            // MouseArea 抢事件）：悬停期间不触发自动隐藏
-            HoverHandler { id: controlBarHover }
+            // MouseArea 抢事件）：悬停期间不触发自动隐藏。
+            // 同时恢复指针：控制栏叠层会吃掉 playerHoverArea 的
+            // positionChanged，若指针已被 BlankCursor 隐藏，悬停在这里
+            // 不会自动恢复，QML 层任何 cursorShape 都不会显示。
+            HoverHandler {
+                id: controlBarHover
+                onHoveredChanged: if (hovered) root.playerMouseActivity()
+            }
 
             // 必须声明在按钮之前（z 序垫底）：hoverEnabled 的 MouseArea 会
             // 独占悬停事件，盖在按钮上方会吞掉按钮的 hovered 导致悬停动效失效
@@ -2399,6 +2410,19 @@ Rectangle {
                             danmakuInput.focus = false
                             event.accepted = true
                         }
+                    }
+
+                    // 工字型光标：直播控制栏是 FluClip（layer.enabled +
+                    // OpacityMask）子树，且指针隐藏走应用级 override cursor，
+                    // QML 层的 MouseArea.cursorShape / HoverHandler.cursorShape
+                    // 两种写法实测都不生效。改由应用级 override 直接压
+                    // IBeamCursor（优先级最高，绕开整条 QML 光标解析链）。
+                    // HoverHandler 只负责报告进出：blocking 默认 false，
+                    // 不吞 hover / 点击 / 拖选 / 右键菜单。
+                    HoverHandler {
+                        id: danmakuInputHover
+                        onHoveredChanged: App.setPlayerTextCursor(hovered)
+                        cursorShape: Qt.IBeamCursor   // 无 override 时的兜底
                     }
                 }
 

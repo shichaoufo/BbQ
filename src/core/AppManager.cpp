@@ -234,10 +234,45 @@ void AppManager::setPlayerCursorHidden(bool hidden)
     if (hidden == m_playerCursorHidden)
         return;
     m_playerCursorHidden = hidden;
-    if (hidden)
-        QGuiApplication::setOverrideCursor(QCursor(Qt::BlankCursor));
-    else
+    updatePlayerCursor();
+}
+
+void AppManager::setPlayerTextCursor(bool on)
+{
+    if (on == m_playerTextCursor)
+        return;
+    m_playerTextCursor = on;
+    updatePlayerCursor();
+}
+
+// 播放器光标统一在这里收敛成一层应用级 override。override cursor 是 Qt
+// 里优先级最高的光标，会压过 QML 的 MouseArea / HoverHandler.cursorShape ——
+// 这也是直播页弹幕框在 FluClip（layer.enabled）子树里怎么设 I 型都不生效
+// 的原因。文本输入区优先显示 I 型，其余时候按自动隐藏需求显示 Blank。
+void AppManager::updatePlayerCursor()
+{
+    Qt::CursorShape shape = Qt::ArrowCursor;
+    bool needOverride = false;
+    if (m_playerTextCursor) {
+        shape = Qt::IBeamCursor;
+        needOverride = true;
+    } else if (m_playerCursorHidden) {
+        shape = Qt::BlankCursor;
+        needOverride = true;
+    }
+
+    if (needOverride) {
+        if (m_playerCursorOverrideActive) {
+            // 已压过一层：原地换形状，不动栈深度
+            QGuiApplication::changeOverrideCursor(QCursor(shape));
+        } else {
+            QGuiApplication::setOverrideCursor(QCursor(shape));
+            m_playerCursorOverrideActive = true;
+        }
+    } else if (m_playerCursorOverrideActive) {
         QGuiApplication::restoreOverrideCursor();
+        m_playerCursorOverrideActive = false;
+    }
 }
 
 void AppManager::registerMainWindow(QObject *windowObj)

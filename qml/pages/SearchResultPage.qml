@@ -389,6 +389,10 @@ FluPage {
         // 3. _suggestPopupOpen 保留兼容旧代码。
         search_page._suggestWords = []
         search_page._suggestPopupOpen = false
+        // 结果页内提交同样要写搜索历史：搜索结果牌是窗口级的，从任意导航栏
+        // 呼出时根本不经过 SearchLanding，以前这一步只会写 GlobalState.searchKeyword，
+        // 关键词不会进历史。放在所有防抖 / 去重拦截之后，被丢弃的重复触发不入库。
+        GlobalState.addSearchHistory(keyword)
         search_page._startSearch(keyword)
     }
 

@@ -18,7 +18,8 @@ import BiliQt 1.0
 //     —— B站没有公开的独立「搜索发现」接口（search/discover、wbi/search/discover、
 //        v2/search/recommend、App 端 search/square 全是 404/-400），
 //        这里用同一榜单的后半段，内容是真热词，不是占位假数据。
-//   · 历史：本地 QSettings（key = search/history，JSON 数组）
+//   · 历史：GlobalState 单例统一管理（本地 QSettings，key = search/history，
+//     JSON 数组）。落地页 / 搜索结果页 / 任意导航页呼出的搜索都写入同一份数据
 FluPage {
     id: page
     title: ""
@@ -26,8 +27,9 @@ FluPage {
     // 热词：[{ word, label, icon }]
     property var hotWords: []
     property var discoverWords: []
-    // 历史：字符串数组（最新在前）
-    property var history: []
+    // 历史：字符串数组（最新在前）。直接绑定全局单例 —— 结果页里搜的词也会
+    // 立刻反映在这里，不用等本页重新创建 / 重新 loadHistory()。
+    property var history: GlobalState.searchHistory
 
     // 结果页盖着时关掉联想请求，避免和结果页抢 Api 的联想信号
     property bool suggestEnabled: true
@@ -40,9 +42,6 @@ FluPage {
     property int _suggestLastRenderedSeq: 0
 
     signal searchRequested(string keyword)
-
-    readonly property string _histKey: "search/history"
-    readonly property int _histMax: 20
 
     // ================= 数据 =================
     function loadSquare() {
@@ -74,55 +73,19 @@ FluPage {
         page.discoverWords = arr.slice(12, 24)
     }
 
-    function loadHistory() {
-        var arr = []
-        try {
-            var s = Settings.getString(page._histKey, "")
-            if (s && s.length > 2) {
-                var v = JSON.parse(s)
-                if (Array.isArray(v)) arr = v
-            }
-        } catch (e) {}
-        page.history = arr
-    }
-
-    function _saveHistory() {
-        Settings.setString(page._histKey, JSON.stringify(page.history))
-    }
-
-    function addHistory(kw) {
-        var w = String(kw || "").trim()
-        if (w === "") return
-        var arr = page.history ? page.history.slice(0) : []
-        // 去重：同一个词只留最新一次
-        for (var i = arr.length - 1; i >= 0; i--) {
-            if (arr[i] === w) arr.splice(i, 1)
-        }
-        arr.unshift(w)
-        if (arr.length > page._histMax) arr = arr.slice(0, page._histMax)
-        page.history = arr
-        page._saveHistory()
-    }
-
-    function clearHistory() {
-        page.history = []
-        page._saveHistory()
-    }
-
+    // 历史读写全部委托给 GlobalState，本页不再自己碰 QSettings —— 否则
+    // 结果页写入的新词会被本页的旧内存缓存覆盖掉。
+    function loadHistory() { GlobalState.loadSearchHistory() }
+    function addHistory(kw) { GlobalState.addSearchHistory(kw) }
+    function clearHistory() { GlobalState.clearSearchHistory() }
     // 右键单条删除（左键仍然是"用这个词搜索"）
-    function removeHistory(kw) {
-        var w = String(kw || "")
-        var arr = page.history ? page.history.slice(0) : []
-        for (var i = arr.length - 1; i >= 0; i--) {
-            if (arr[i] === w) arr.splice(i, 1)
-        }
-        page.history = arr
-        page._saveHistory()
-    }
+    function removeHistory(kw) { GlobalState.removeSearchHistory(kw) }
 
     function submit(kw) {
         var w = String(kw || "").trim()
         if (w === "") return
+        // 落地页自己记一次；searchRequested 最终走 GlobalState.openInAppSearch()，
+        // 那里还会记一次。addSearchHistory 幂等（去重 + 已置顶不写盘），不会重复入库。
         page.addHistory(w)
         box.updateText(w)
         box.focus = false

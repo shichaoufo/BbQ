@@ -7098,6 +7098,28 @@ Rectangle {
                                                         }
                                                     }
 
+                                                    // 发布时间 / IP 归属地：移到用户名下方，与用户名、正文同列。
+                                                    // 文本格式沿用原操作栏，只换位置。
+                                                    RowLayout {
+                                                        Layout.fillWidth: true
+                                                        spacing: 8
+
+                                                        FluText {
+                                                            text: GlobalState.formatCommentTime(model.ctime)
+                                                            font: FluTextStyle.Caption
+                                                            color: FluTheme.fontSecondaryColor
+                                                            Layout.alignment: Qt.AlignVCenter
+                                                        }
+
+                                                        FluText {
+                                                            text: model.ipLocation || ""
+                                                            font: FluTextStyle.Caption
+                                                            color: FluTheme.fontSecondaryColor
+                                                            Layout.alignment: Qt.AlignVCenter
+                                                            visible: model.ipLocation && model.ipLocation !== ""
+                                                        }
+                                                    }
+
                                                     CommentRichText {
                                                         segments: pageRoot.commentSegmentsOf(model.content, model.emotes, false, pageRoot.jumpInfosOf(model), null, pageRoot.atMidMapOf(model))
                                                         bodyFont: FluTextStyle.Body
@@ -7260,41 +7282,12 @@ Rectangle {
                                                         }
                                                     }
 
+                                            // 操作栏：时间/IP 已上移到用户名下方，最左两个位置
+                                            // 让给点赞/点踩，回复仍是第 3 个，弹性占位挪到末尾。
                                             RowLayout {
                                                 Layout.fillWidth: true
                                                 Layout.topMargin: 6
                                                 spacing: 16
-
-                                                FluText {
-                                                    text: GlobalState.formatCommentTime(model.ctime)
-                                                    font: FluTextStyle.Caption
-                                                    color: FluTheme.fontSecondaryColor
-                                                    Layout.alignment: Qt.AlignVCenter
-                                                }
-
-                                                FluText {
-                                                    text: model.ipLocation || ""
-                                                    font: FluTextStyle.Caption
-                                                    color: FluTheme.fontSecondaryColor
-                                                    Layout.alignment: Qt.AlignVCenter
-                                                    visible: model.ipLocation && model.ipLocation !== ""
-                                                }
-
-                                                FluTextButton {
-                                                    text: "回复"
-                                                    font: FluTextStyle.Caption
-                                                    textColor: FluTheme.fontSecondaryColor
-                                                    onClicked: {
-                                                        if (!pageRoot.requireLogin()) return
-                                                        pageRoot.replyRpid = model.rpid || ""
-                                                        pageRoot.replyRootRpid = (model.root && model.root !== "0") ? model.root : (model.rpid || "")
-                                                        pageRoot.replyToUser = model.uname || ""
-                                                        // 点击回复即聚焦输入框，用户可直接输入
-                                                        commentInput.forceActiveFocus()
-                                                    }
-                                                }
-
-                                                Item { Layout.fillWidth: true }
 
                                                 FluTextButton {
                                                     font: FluTextStyle.Caption
@@ -7355,6 +7348,22 @@ Rectangle {
                                                         }
                                                     }
                                                 }
+
+                                                FluTextButton {
+                                                    text: "回复"
+                                                    font: FluTextStyle.Caption
+                                                    textColor: FluTheme.fontSecondaryColor
+                                                    onClicked: {
+                                                        if (!pageRoot.requireLogin()) return
+                                                        pageRoot.replyRpid = model.rpid || ""
+                                                        pageRoot.replyRootRpid = (model.root && model.root !== "0") ? model.root : (model.rpid || "")
+                                                        pageRoot.replyToUser = model.uname || ""
+                                                        // 点击回复即聚焦输入框，用户可直接输入
+                                                        commentInput.forceActiveFocus()
+                                                    }
+                                                }
+
+                                                Item { Layout.fillWidth: true }
                                             }
 
                                             // ====== 展开/收起子评论按钮 ======
@@ -7513,6 +7522,28 @@ Rectangle {
                                                             anchors.verticalCenter: parent.verticalCenter
                                                             visible: pageRoot.isUpAuthor(modelData.mid)
                                                             asynchronous: true
+                                                        }
+                                                    }
+
+                                                    // 发布时间 / IP 归属地：移到回复用户名下方。
+                                                    // 文本格式沿用原操作栏，只换位置。
+                                                    RowLayout {
+                                                        Layout.fillWidth: true
+                                                        spacing: 8
+
+                                                        FluText {
+                                                            text: GlobalState.formatCommentTime(modelData.ctime)
+                                                            font: FluTextStyle.Caption
+                                                            color: FluTheme.fontSecondaryColor
+                                                            Layout.alignment: Qt.AlignVCenter
+                                                        }
+
+                                                        FluText {
+                                                            text: modelData.ipLocation || ""
+                                                            font: FluTextStyle.Caption
+                                                            color: FluTheme.fontSecondaryColor
+                                                            Layout.alignment: Qt.AlignVCenter
+                                                            visible: modelData.ipLocation && modelData.ipLocation !== ""
                                                         }
                                                     }
 
@@ -7677,40 +7708,11 @@ Rectangle {
                                                         }
                                                     }
 
+                                                    // 操作栏：时间/IP 已上移到回复用户名下方，最左两个
+                                                    // 位置让给点赞/点踩，回复仍是第 3 个，弹性占位挪到末尾。
                                                     RowLayout {
                                                         Layout.fillWidth: true
                                                         spacing: 16
-
-                                                        FluText {
-                                                            text: GlobalState.formatCommentTime(modelData.ctime)
-                                                            font: FluTextStyle.Caption
-                                                            color: FluTheme.fontSecondaryColor
-                                                            Layout.alignment: Qt.AlignVCenter
-                                                        }
-
-                                                        FluText {
-                                                            text: modelData.ipLocation || ""
-                                                            font: FluTextStyle.Caption
-                                                            color: FluTheme.fontSecondaryColor
-                                                            Layout.alignment: Qt.AlignVCenter
-                                                            visible: modelData.ipLocation && modelData.ipLocation !== ""
-                                                        }
-
-                                                        FluTextButton {
-                                                            text: "回复"
-                                                            font: FluTextStyle.Caption
-                                                            textColor: FluTheme.fontSecondaryColor
-                                                            onClicked: {
-                                                                if (!pageRoot.requireLogin()) return
-                                                                pageRoot.replyRpid = modelData.rpid || ""
-                                                                pageRoot.replyRootRpid = commentItem.parentModel.rpid || ""
-                                                                pageRoot.replyToUser = modelData.uname || ""
-                                                                // 点击回复即聚焦输入框，用户可直接输入
-                                                                commentInput.forceActiveFocus()
-                                                            }
-                                                        }
-
-                                                        Item { Layout.fillWidth: true }
 
                                                         FluTextButton {
                                                             font: FluTextStyle.Caption
@@ -7788,6 +7790,22 @@ Rectangle {
                                                                 }
                                                             }
                                                         }
+
+                                                        FluTextButton {
+                                                            text: "回复"
+                                                            font: FluTextStyle.Caption
+                                                            textColor: FluTheme.fontSecondaryColor
+                                                            onClicked: {
+                                                                if (!pageRoot.requireLogin()) return
+                                                                pageRoot.replyRpid = modelData.rpid || ""
+                                                                pageRoot.replyRootRpid = commentItem.parentModel.rpid || ""
+                                                                pageRoot.replyToUser = modelData.uname || ""
+                                                                // 点击回复即聚焦输入框，用户可直接输入
+                                                                commentInput.forceActiveFocus()
+                                                            }
+                                                        }
+
+                                                        Item { Layout.fillWidth: true }
                                                     }
                                                 }
                                                     }
@@ -7828,13 +7846,16 @@ Rectangle {
                                     }
 
                                         // 个性装扮 - 评论卡片右上角背景
+                                        // 垂直对齐：头像中心 = commentItem.top + ColumnLayout.topMargin(8) + 32/2 = +24
+                                        //           装扮中心 = topMargin + CommentCardBg.height(54)/2 = topMargin + 27
+                                        //           令两者相等 → topMargin = 8 + 16 - 27 = -3
                                         CommentCardBg {
-                            anchors.top: parent.top
-                            anchors.right: parent.right
-                            anchors.topMargin: -8
-                            anchors.rightMargin: 8
-                            cardbg: model.cardbg
-                        }
+                                            anchors.top: parent.top
+                                            anchors.right: parent.right
+                                            anchors.topMargin: -3
+                                            anchors.rightMargin: 8
+                                            cardbg: model.cardbg
+                                        }
 
                                         FluDivider {
                                             anchors.bottom: parent.bottom
@@ -8538,8 +8559,8 @@ Rectangle {
 
     // ===== 视频简介面板（右侧抽屉）=====
     // 标题那行的 tooltip 只做预览（最多 12 行、超出省略）；完整简介在这里看：
-    // 从右侧滑入、宽度盖住右侧栏，可纵向滚动，正文用 FluCopyableText
-    //（readOnly + selectByMouse + 右键菜单），支持选中与复制。
+    // 从右侧滑入、宽度盖住右侧栏，可纵向滚动，正文用只读 TextEdit
+    //（selectByMouse + 中文右键菜单），支持选中与复制。
     FluSheet {
         id: descSheet
         // 标题带 BV 号，一眼确认是哪一支视频（番剧没有 bvid 时只显示标题）
@@ -8596,13 +8617,74 @@ Rectangle {
             // 宽度减掉滚动条预留（12），不依赖"可用宽度"变化：
             // AsNeeded 滚动条出现/消失会改变可用宽度，进而触发文本重排、
             // 高度变化，容易来回抖动。
-            FluCopyableText {
+            // 这里不用 FluentUI 的 FluCopyableText：它内部右键弹的是 FluTextBoxMenu，
+            // 四项文案写死成 qsTr("Cut"/"Copy"/"Paste"/"Select All")，项目没加载
+            // FluentUI 的中文翻译，实际显示英文；而运行时加载的是 Qt kit 里预编译的
+            // FluentUI QML 模块（仓库 FluentUI-main/ 只是未跟踪的源码参考，改它不生效）。
+            // 于是照搬它的只读 / 可选中样式，右键菜单换成中文「复制」「全选」。
+            // 只读文本下剪切、粘贴原本就不显示，所以菜单只留这两项。
+            TextEdit {
                 id: descBody
                 width: descFlick.width - 12
                 text: pageRoot.description !== "" ? pageRoot.description : "暂无简介"
                 wrapMode: TextEdit.Wrap
                 font: FluTextStyle.Body
+                color: FluTheme.fontPrimaryColor
+                readOnly: true
+                selectByMouse: true
+                selectedTextColor: color
+                selectionColor: Qt.rgba(FluTheme.primaryColor.r,
+                                        FluTheme.primaryColor.g,
+                                        FluTheme.primaryColor.b, 0.5)
+                activeFocusOnTab: false
+                activeFocusOnPress: false
+                // 菜单弹出可能抢焦点；TextEdit 默认失焦即清选区，会让「复制」失效，
+                // 所以保持选区（FluentUI 原组件靠 forceActiveFocus 绕开，这里更直接）
+                persistentSelection: true
+                renderType: FluTheme.nativeText ? Text.NativeRendering : Text.QtRendering
+                padding: 0
+                leftPadding: 0
+                rightPadding: 0
+                topPadding: 0
+                bottomPadding: 0
+
+                // 只接右键：左键事件链完全不碰，拖选与滚轮滚动照旧（与
+                // FluCopyableText 内部那只 MouseArea 同样的做法）。
+                // 右键默认被本 MouseArea 消费，TextEdit 不会因此清掉已有选区。
+                MouseArea {
+                    anchors.fill: parent
+                    cursorShape: Qt.IBeamCursor
+                    acceptedButtons: Qt.RightButton
+                    onClicked: function(mouse) {
+                        // 菜单声明在页面根级，用场景坐标换算，避免依赖 Popup 的隐式 parent
+                        var scene = descBody.mapToItem(null, mouse.x, mouse.y)
+                        var p = descMenu.parent.mapFromItem(null, scene.x, scene.y)
+                        descMenu.x = p.x
+                        descMenu.y = p.y
+                        descMenu.open()
+                    }
+                }
             }
+        }
+    }
+
+    // ===== 视频简介正文的中文右键菜单 =====
+    // 与评论区的右键菜单同一套用法：FluMenu 挂在页面根级，由 descBody 的
+    // 右键 MouseArea 换算场景坐标后 open()；只读文本只保留「复制」「全选」。
+    FluMenu {
+        id: descMenu
+        width: 120
+        // 不抢焦点，避免打开瞬间把 descBody 的选区清掉
+        focus: false
+        FluMenuItem {
+            text: "复制"
+            visible: descBody.selectedText !== ""
+            onTriggered: descBody.copy()
+        }
+        FluMenuItem {
+            text: "全选"
+            visible: descBody.text !== ""
+            onTriggered: descBody.selectAll()
         }
     }
 
