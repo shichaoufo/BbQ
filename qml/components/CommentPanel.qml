@@ -11,6 +11,12 @@ import "../components"
 Item {
     id: panelRoot
 
+    // 输入框的 I 型光标走应用级 override（见 commentInput 处注释）。
+    // override cursor 是全局的：面板隐藏/销毁时必须还原，否则整个应用的
+    // 指针会一直停在 I 型，直到下次再悬停某个输入框。
+    onVisibleChanged: if (!visible) App.setTextInputCursor(false)
+    Component.onDestruction: App.setTextInputCursor(false)
+
     property ListModel commentModel
     property string oid: ""
     property string aid: ""
@@ -1565,6 +1571,42 @@ Item {
                 id: commentInput
                 Layout.fillWidth: true
                 placeholderText: panelRoot.replyToUser !== "" ? "回复 @" + panelRoot.replyToUser + "..." : "说点什么..."
+
+                // 工字形光标：走应用级 override（App.setTextInputCursor）。
+                // QML 的两条常规路子在这里都不生效：FluTextBox 自带的
+                // cursorShape=IBeam 的 MouseArea 与文本区是兄弟节点（Qt 的光标
+                // 解析只沿父链走），HoverHandler.cursorShape 也压不过去。
+                //
+                // 这层 Item 只铺"文本区"（右边让出 rightPadding，即 ✕ 那一带）。
+                Item {
+                    anchors.left: parent.left
+                    anchors.top: parent.top
+                    anchors.bottom: parent.bottom
+                    anchors.right: parent.right
+                    anchors.rightMargin: parent.rightPadding
+
+                    HoverHandler {
+                        onHoveredChanged: App.setTextInputCursor(hovered)
+                    }
+                }
+
+                // ✕ 那一带：只负责"箭头光标"，同时把这块的 hover 收在感应层里，
+                // 不让它落到 TextField 本体上 —— FluentUI 的输入框背景会在
+                // `hovered` 时换一档配色（FluTextBoxBackground: 251 vs 255 +
+                // 底边渐变），那正是"鼠标移上去多出一层阴影"的来源。
+                // 官方示例里悬停没有这个变化、只有点击（获得焦点）才有，
+                // 所以这里跟搜索页保持同一套处理。
+                // Item 不接鼠标事件：点击 ✕ 照常落到下面的按钮上。
+                Item {
+                    anchors.top: parent.top
+                    anchors.bottom: parent.bottom
+                    anchors.right: parent.right
+                    width: parent.rightPadding
+
+                    HoverHandler {
+                        onHoveredChanged: App.setUiArrowCursor(hovered)
+                    }
+                }
             }
 
             FluTextButton {

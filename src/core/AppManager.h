@@ -65,12 +65,25 @@ public:
     // 不用 QML MouseArea 的 cursorShape 实现——叠层顺序/visible 切换时
     // 窗口光标不会随静止鼠标重新求值，会出现残留可见光标。
     Q_INVOKABLE void setPlayerCursorHidden(bool hidden);
-    // 播放页文本输入区的工字型光标：同样走应用级 override cursor。
-    // 直播控制栏是 FluClip（layer.enabled + OpacityMask）子树，实测
-    // MouseArea.cursorShape 与 HoverHandler.cursorShape 都不生效；而
-    // 应用级 override 是 Qt 里优先级最高的光标，能绕开整条 QML 解析链。
+    // 文本输入区的工字型光标：走应用级 override cursor（优先级最高）。
+    //
+    // 为什么不用 QML 的 MouseArea.cursorShape / HoverHandler.cursorShape：
+    // 这两条路实测都不生效——FluTextBox 里那个 cursorShape=IBeam 的 MouseArea
+    // 和文本区是兄弟节点（Qt 的光标解析只沿父链走，兄弟不参与）；HoverHandler
+    // 的 cursorShape 在这套环境里同样压不过去（直播页 FluClip 子树、
+    // 动态详情/搜索页都验证过）。
+    //
     // 由输入框的 HoverHandler.onHoveredChanged 驱动，离开时还原。
-    Q_INVOKABLE void setPlayerTextCursor(bool on);
+    // 与播放器光标的自动隐藏共用同一层 override（见 updateCursorOverride）。
+    Q_INVOKABLE void setTextInputCursor(bool on);
+    // 输入框右侧图标区（发送 / 搜索）强制显示箭头。
+    //
+    // 为什么需要它：图标是普通 FluIcon，正下方就是 TextInput，光标会一路
+    // 继承成 I 型。这里**不能用 MouseArea 盖一层**——MouseArea 即便
+    // acceptedButtons=NoButton，也会参与鼠标命中检测，把同一块区域里
+    // 清除 ✕ 的 hover 抢掉（✕ 的悬停高亮就没了）。只用一个 HoverHandler
+    // 报告进出，光标交给应用级 override，命中检测一点不受影响。
+    Q_INVOKABLE void setUiArrowCursor(bool on);
 
     // 播放期间阻止系统息屏 / 自动睡眠（Windows: SetThreadExecutionState）。
     // owner 用于区分来源（"video" / "live"），内部按 owner 记录：
@@ -135,17 +148,20 @@ private:
     // 正在要求"别息屏"的来源集合（video / live）。空 = 未持有唤醒锁。
     QSet<QString> m_wakeLockOwners;
 
-    // 播放器光标只维护一层 override：文本输入区（IBeam）优先于自动隐藏
+    // 全应用只维护一层 override：文本输入区（IBeam）优先于播放器自动隐藏
     //（Blank）。状态变化时用 changeOverrideCursor 原地换形状，不反复压栈，
-    // 避免两个播放页共用单例时 override 栈累积 / 误弹别的模块的 override。
-    void updatePlayerCursor();
+    // 避免多个页面共用单例时 override 栈累积 / 误弹别的模块的 override。
+    void updateCursorOverride();
 
     static AppManager *s_instance;
     bool m_vulkanEnabled;
     QString m_rendererBackend;
     qreal m_recommendScrollY = 0;
     bool m_playerCursorHidden = false;
-    bool m_playerTextCursor = false;
+    // 文本输入框悬停（播放页弹幕框、评论区输入框、搜索框…）
+    bool m_uiTextCursor = false;
+    // 输入框右侧图标区悬停：强制箭头（优先于 I 型）
+    bool m_uiArrowCursor = false;
     bool m_playerCursorOverrideActive = false;
     class QQuickWindow *m_mainWindow = nullptr;
     // ===== 小窗播放（单窗口变身）=====

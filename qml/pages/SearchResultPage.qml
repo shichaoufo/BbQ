@@ -1352,6 +1352,9 @@ FluPage {
                 else if (GlobalState.searchResultModel.count === 0) appendSearchResults()
             }
         } else {
+            // 搜索框的 I 型光标走应用级 override（见 searchBox 处注释）：
+            // 页面隐藏时必须还原，否则指针会一直停在 I 型
+            App.setTextInputCursor(false)
             // 小窗模式：pageStack.visible=false 使 visible 从父级"流动"为 false
             //（Qt 语义：父项 visible 变化会直接改变全部子孙的 visible 值并触发
             //  visibleChanged），非真实切页，绝不能关闭播放器
@@ -1449,6 +1452,8 @@ FluPage {
     }
 
     Component.onDestruction: {
+        // 应用级 I 型光标还原（全局 override，不还原会残留到其它页面）
+        App.setTextInputCursor(false)
         // 离开搜索页面时强制销毁直播播放器（释放 D3D11 设备/纹理）
         try {
             if (liveOverlay._playerCreated && livePlayerLoader.item) {
@@ -1740,6 +1745,42 @@ FluPage {
                     searchBox.focus = false
                     searchBox.forceActiveFocus()
                     doSearch()
+                }
+
+                // 工字形光标：走应用级 override（App.setTextInputCursor）。
+                // FluTextBox 自带的 cursorShape=IBeam 的 MouseArea 与文本区是
+                // 兄弟节点（Qt 的光标解析只沿父链走），HoverHandler.cursorShape
+                // 也压不过去；与应用级 override 相比都不够可靠。
+                //
+                // 这层 Item 只铺"文本区"（右边让出 rightPadding，即图标区），
+                // 鼠标移到清除 ✕ / 搜索图标上时收不到 hover，光标回到默认，
+                // 按钮自己的手型不受影响；Item 不接鼠标事件，点击照常。
+                Item {
+                    anchors.left: parent.left
+                    anchors.top: parent.top
+                    anchors.bottom: parent.bottom
+                    anchors.right: parent.right
+                    anchors.rightMargin: parent.rightPadding
+
+                    HoverHandler {
+                        onHoveredChanged: App.setTextInputCursor(hovered)
+                    }
+                }
+
+                // 右侧"图标"那一小条只显示箭头：图标是普通 FluIcon，不设光标，
+                // 光标会从下面的 TextInput 继承成 I 型。
+                // 不能用 MouseArea 盖（即便 NoButton 也会参与命中检测，把清除 ✕
+                // 的 hover / 悬停高亮抢掉）；只报告 hover，光标走应用级 override。
+                Item {
+                    anchors.top: parent.top
+                    anchors.bottom: parent.bottom
+                    anchors.right: parent.right
+                    anchors.rightMargin: 4
+                    width: parent.iconSource > 0 ? 24 : 0
+
+                    HoverHandler {
+                        onHoveredChanged: App.setUiArrowCursor(hovered)
+                    }
                 }
             }
 

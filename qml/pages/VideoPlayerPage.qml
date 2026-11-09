@@ -2062,6 +2062,10 @@ Rectangle {
 
     onVisibleChanged: {
         if (!visible) {
+            // 输入框的 I 型/箭头光标是应用级 override：页面切走时还原，
+            // 否则指针会一直停在 I 型（与直播页、搜索页同一套处理）
+            App.setTextInputCursor(false)
+            App.setUiArrowCursor(false)
             // 小窗模式下页面变为不可见（外部关闭视频的兜底路径）：
             // 退出小窗模式，恢复主窗口几何与常规 UI。播放器随本页子树
             // 由 Loader 统一销毁（不做 reparent——销毁中移动子对象会
@@ -2255,6 +2259,9 @@ Rectangle {
         // 兜底释放防息屏锁：页面被直接销毁时不一定走 stopPlayer，
         // 漏掉这里会让电脑一直不熄屏（比不防息屏更糟）
         App.setScreenWakeLock(false, "video")
+        // 输入框光标 override 的兜底还原（应用级，残留会全局变 I 型/箭头）
+        App.setTextInputCursor(false)
+        App.setUiArrowCursor(false)
         closePopups()
         // 小窗模式下被销毁（外部代码直接关页面的兜底路径）：退出小窗模式，
         // 恢复主窗口几何与常规 UI。播放器/迷你 UI 层随本页子树一并销毁
@@ -5880,6 +5887,26 @@ Rectangle {
                                         event.accepted = true
                                     }
                                 }
+
+                                // 右侧"图标"那一小条只显示箭头光标。发送图标是普通
+                                // FluIcon，不设光标，而它正下方就是 TextInput，光标会
+                                // 一路继承成 I 型 —— 用户看到的就是"移到发送图标上还是工字"。
+                                //
+                                // 这里**不能**用 MouseArea 盖一层：MouseArea 即便
+                                // acceptedButtons=NoButton 也会参与命中检测，同一片区域里
+                                // 清除 ✕ 的 hover / 悬停高亮会被抢掉。只用一个 HoverHandler
+                                // 报告进出，光标交给应用级 override，命中检测不受影响。
+                                Item {
+                                    anchors.top: parent.top
+                                    anchors.bottom: parent.bottom
+                                    anchors.right: parent.right
+                                    anchors.rightMargin: 4
+                                    width: parent.iconSource > 0 ? 24 : 0
+
+                                    HoverHandler {
+                                        onHoveredChanged: App.setUiArrowCursor(hovered)
+                                    }
+                                }
                             }
 
                             // 弹幕颜色选择（FluColorPicker：内置取色面板，
@@ -7909,6 +7936,36 @@ Rectangle {
                                 id: commentInput
                                 Layout.fillWidth: true
                                 placeholderText: pageRoot.replyToUser !== "" ? "回复 @" + pageRoot.replyToUser + "..." : "说点什么..."
+
+                                // 与动态详情页的评论区保持一致（那边用的是
+                                // CommentPanel，这里页面内联了一份，所以要单独补）：
+                                //
+                                // 1) 文本区：工字光标走应用级 override；
+                                // 2) ✕ 那一带：压住 hover，避免 FluTextBoxBackground
+                                //    切到 hovered 配色（就是"鼠标移上去多一层阴影"）。
+                                //    官方示例里悬停是没有这个变化的，只有点击才变。
+                                Item {
+                                    anchors.left: parent.left
+                                    anchors.top: parent.top
+                                    anchors.bottom: parent.bottom
+                                    anchors.right: parent.right
+                                    anchors.rightMargin: parent.rightPadding
+
+                                    HoverHandler {
+                                        onHoveredChanged: App.setTextInputCursor(hovered)
+                                    }
+                                }
+
+                                Item {
+                                    anchors.top: parent.top
+                                    anchors.bottom: parent.bottom
+                                    anchors.right: parent.right
+                                    width: parent.rightPadding
+
+                                    HoverHandler {
+                                        onHoveredChanged: App.setUiArrowCursor(hovered)
+                                    }
+                                }
                             }
 
                             FluTextButton {

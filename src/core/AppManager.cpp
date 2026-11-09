@@ -234,26 +234,40 @@ void AppManager::setPlayerCursorHidden(bool hidden)
     if (hidden == m_playerCursorHidden)
         return;
     m_playerCursorHidden = hidden;
-    updatePlayerCursor();
+    updateCursorOverride();
 }
 
-void AppManager::setPlayerTextCursor(bool on)
+void AppManager::setTextInputCursor(bool on)
 {
-    if (on == m_playerTextCursor)
+    if (on == m_uiTextCursor)
         return;
-    m_playerTextCursor = on;
-    updatePlayerCursor();
+    m_uiTextCursor = on;
+    updateCursorOverride();
 }
 
-// 播放器光标统一在这里收敛成一层应用级 override。override cursor 是 Qt
-// 里优先级最高的光标，会压过 QML 的 MouseArea / HoverHandler.cursorShape ——
-// 这也是直播页弹幕框在 FluClip（layer.enabled）子树里怎么设 I 型都不生效
-// 的原因。文本输入区优先显示 I 型，其余时候按自动隐藏需求显示 Blank。
-void AppManager::updatePlayerCursor()
+void AppManager::setUiArrowCursor(bool on)
+{
+    if (on == m_uiArrowCursor)
+        return;
+    m_uiArrowCursor = on;
+    updateCursorOverride();
+}
+
+// 全应用光标统一在这里收敛成一层 override。override cursor 是 Qt 里优先级
+// 最高的光标，会压过 QML 的 MouseArea / HoverHandler.cursorShape —— 这也是
+// 直播页弹幕框（FluClip + layer.enabled 子树）、动态详情与搜索页的输入框
+// 怎么在 QML 里设 I 型都不生效的原因。文本输入区优先显示 I 型，其余时候
+// 按播放器的自动隐藏需求显示 Blank。
+void AppManager::updateCursorOverride()
 {
     Qt::CursorShape shape = Qt::ArrowCursor;
     bool needOverride = false;
-    if (m_playerTextCursor) {
+    if (m_uiArrowCursor) {
+        // 输入框右侧图标区：显式压箭头。没有这层，光标会从下面的 TextInput
+        // 继承成 I 型（图标本身不设光标）。
+        shape = Qt::ArrowCursor;
+        needOverride = true;
+    } else if (m_uiTextCursor) {
         shape = Qt::IBeamCursor;
         needOverride = true;
     } else if (m_playerCursorHidden) {

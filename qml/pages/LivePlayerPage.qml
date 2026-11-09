@@ -913,7 +913,7 @@ Rectangle {
         }
         // 恢复被隐藏的鼠标指针（override cursor 是应用级的，不恢复会全局无指针）
         // 先清文本区 I 型光标状态，再清指针隐藏状态
-        App.setPlayerTextCursor(false)
+        App.setTextInputCursor(false)
         App.setPlayerCursorHidden(false)
         try { savePlayerSettings() } catch (e) {}
     }
@@ -922,7 +922,7 @@ Rectangle {
         if (!visible) {
             // 页面切走时清掉文本区光标：override cursor 是应用级共享的，
             // 残留会让下一个页面一直显示 I 型光标
-            App.setPlayerTextCursor(false)
+            App.setTextInputCursor(false)
             // 小窗模式下页面变为不可见（外部关闭直播的兜底路径）：
             // 退出小窗模式，恢复主窗口。播放器随本页子树由 Loader 统一销毁
             if (root.isMiniWindow) {
@@ -2417,12 +2417,37 @@ Rectangle {
                     // QML 层的 MouseArea.cursorShape / HoverHandler.cursorShape
                     // 两种写法实测都不生效。改由应用级 override 直接压
                     // IBeamCursor（优先级最高，绕开整条 QML 光标解析链）。
-                    // HoverHandler 只负责报告进出：blocking 默认 false，
-                    // 不吞 hover / 点击 / 拖选 / 右键菜单。
-                    HoverHandler {
-                        id: danmakuInputHover
-                        onHoveredChanged: App.setPlayerTextCursor(hovered)
-                        cursorShape: Qt.IBeamCursor   // 无 override 时的兜底
+                    //
+                    // 这层 Item 只铺"文本区"（右边让出 rightPadding，即清空 ✕
+                    // 与发送图标所在的区域），鼠标移到图标上时收不到 hover，
+                    // 光标回到默认，按钮自己的手型不受影响。Item 不接鼠标事件，
+                    // 点击 / 拖选 / 右键照常落到下面的 TextInput。
+                    Item {
+                        anchors.left: parent.left
+                        anchors.top: parent.top
+                        anchors.bottom: parent.bottom
+                        anchors.right: parent.right
+                        anchors.rightMargin: parent.rightPadding
+
+                        HoverHandler {
+                            onHoveredChanged: App.setTextInputCursor(hovered)
+                        }
+                    }
+
+                    // 右侧"图标"那一小条只显示箭头：图标是普通 FluIcon，不设光标，
+                    // 光标会从下面的 TextInput 继承成 I 型。
+                    // 不能用 MouseArea 盖（即便 NoButton 也会参与命中检测，把这一小块
+                    // 区域里清除 ✕ 的 hover 抢掉）；只报告 hover，光标走应用级 override。
+                    Item {
+                        anchors.top: parent.top
+                        anchors.bottom: parent.bottom
+                        anchors.right: parent.right
+                        anchors.rightMargin: 4
+                        width: parent.iconSource > 0 ? 24 : 0
+
+                        HoverHandler {
+                            onHoveredChanged: App.setUiArrowCursor(hovered)
+                        }
                     }
                 }
 
