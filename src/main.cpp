@@ -2,6 +2,11 @@
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
 #include <QQmlEngine>
+#include <QQmlNetworkAccessManagerFactory>
+#include <QNetworkAccessManager>
+#include <QNetworkDiskCache>
+#include <QNetworkReply>
+#include <QNetworkRequest>
 #include <qqml.h>
 #include <QDir>
 #include <QFile>
@@ -726,6 +731,60 @@ private:
     }
 };
 
+// ===========================================================================
+// QML 图片网络管理器（表情 / 头像 / 封面）
+//
+// 两个作用：
+//   1. **强制 HTTP/1.1**。B 站图床对 h2 连接偶发 "HTTP/2 protocol error /
+//      连接已关闭"：表情面板一开就有几十张图同时请求，复用同一条 h2 连接时
+//      更容易被服务端直接关掉，表现就是"偶尔有几张表情加载不出来"。
+//      图片这种小请求用 h1 多开几条连接反而更稳。
+//   2. **磁盘缓存**。表情包 / 头像 / 封面 URL 基本不变，缓存到本地以后，
+//      重开面板、重启程序都能直接命中，不再每次都重新下载
+//      （PiliPlus 体感快就是因为有本地图片缓存）。
+//
+// 缓存目录：AppDirs::configRoot()/cache/images。
+// Windows 下 configRoot() 就是 exe 同目录，删程序即无残留（项目既有约定）。
+// ===========================================================================
+class Http1ImageNetworkManager : public QNetworkAccessManager
+{
+public:
+    explicit Http1ImageNetworkManager(QObject *parent = nullptr)
+        : QNetworkAccessManager(parent) {}
+
+protected:
+    QNetworkReply *createRequest(Operation op, const QNetworkRequest &request,
+                                 QIODevice *outgoingData = nullptr) override
+    {
+        QNetworkRequest req(request);
+        // 关掉 h2：见上面的注释
+        req.setAttribute(QNetworkRequest::Http2AllowedAttribute, false);
+        // 有缓存就直接用（即使过期）：图片换 URL 才会变内容，离线也能显示
+        req.setAttribute(QNetworkRequest::CacheLoadControlAttribute,
+                         QNetworkRequest::PreferCache);
+        return QNetworkAccessManager::createRequest(op, req, outgoingData);
+    }
+};
+
+class QmlImageNetworkFactory : public QQmlNetworkAccessManagerFactory
+{
+public:
+    QNetworkAccessManager *create(QObject *parent) override
+    {
+        auto *nam = new Http1ImageNetworkManager(parent);
+
+        auto *cache = new QNetworkDiskCache(nam);
+        const QString dir = AppDirs::configRoot() + QStringLiteral("cache/images");
+        QDir().mkpath(dir);
+        cache->setCacheDirectory(dir);
+        // 128MB 上限：表情包+头像+封面足够，且不会失控
+        cache->setMaximumCacheSize(128LL * 1024 * 1024);
+        nam->setCache(cache);
+
+        return nam;
+    }
+};
+
 int main(int argc, char *argv[])
 {
 #ifdef Q_OS_WIN
@@ -848,6 +907,10 @@ int main(int argc, char *argv[])
     ImageActions imageActions;
 
     QQmlApplicationEngine engine;
+
+    // QML 里的 Image（表情 / 头像 / 封面）走带磁盘缓存的 HTTP/1.1 管理器。
+    // 必须在任何 QML 加载之前设置：QML 引擎在第一次加载图片时才会创建 NAM。
+    engine.setNetworkAccessManagerFactory(new QmlImageNetworkFactory());
 
     // FramePacer 单例暴露给 QML：播放器设置面板的"弹幕帧率限制"下拉框
     // 调用 setTargetRate()（60/100/120/144/0=不限制）。单例本身由

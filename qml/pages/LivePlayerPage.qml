@@ -2708,10 +2708,12 @@ Rectangle {
     Popup {
         id: emoticonPopup
         parent: emoticonBtn
-        // 尺寸比原来的 360×340 放大一圈：格子按列宽自适应、预览图跟着格子走
-        // （原来是格子 48 / 图 36，大表情看着像缩略图，太费眼）
-        width: 460
-        height: 420
+        // 尺寸：现在是 400×340。
+        // 之前为了"看清大表情"从 360×340 放大到 460×420，属于无奈之举；
+        // 加了悬停 tooltip（放大预览 + 触发词）之后，格子里不需要再铺那么大，
+        // 面板收回原尺寸附近，一屏能多放一行，也不再挡画面。
+        width: 400
+        height: 340
         x: (parent.width - width) / 2
         y: -height - 10
         modal: false
@@ -2871,18 +2873,18 @@ Rectangle {
                                    : "transparent"
                         }
 
-                        Image {
+                        RetryImage {
                             id: emoImage
                             anchors.centerIn: parent
-                            // 通用/UP主/房间专属这类是整张贴图，铺满格子（只留 4px 边），
-                            // 不再压在 48px——之前缩到 48 就只剩个轮廓；
-                            // 黄豆类（pkg_name 固定 "emoji"）是文字小表情，放太大会糊，
-                            // 维持略大于原尺寸即可。分类是分 Tab 显示的，不会大小参差
+                            // 面板缩小后格子也跟着小了，图按格子留边自适应：
+                            // 大表情留 6px、黄豆（文字小表情）留更多，放大会糊。
+                            // 真正的"看清"交给悬停 tooltip（72px 预览）。
                             width: modelData.pkgName === "emoji"
-                                   ? Math.min(parent.width - 20, 40)
-                                   : Math.min(parent.width - 8, 68)
+                                   ? Math.min(parent.width - 24, 34)
+                                   : Math.min(parent.width - 12, 52)
                             height: width
-                            source: modelData.url
+                            // 图床偶发 "HTTP/2 protocol error"，组件内部会自动重试
+                            imageSource: modelData.url
                             fillMode: Image.PreserveAspectFit
                             asynchronous: true
                             cache: true
@@ -2903,7 +2905,17 @@ Rectangle {
                             anchors.fill: parent
                             hoverEnabled: true
                             cursorShape: Qt.PointingHandCursor
+                            // 悬停 300ms 弹放大预览；离开即收起（划过整片网格不会一路闪）
+                            onContainsMouseChanged: {
+                                if (containsMouse) {
+                                    emoteTipTimer.restart()
+                                } else {
+                                    emoteTipTimer.stop()
+                                    emoteTip.close()
+                                }
+                            }
                             onClicked: {
+                                emoteTip.close()
                                 // 黄豆 emoji 包（pkg_name 固定为 "emoji"）：插入
                                 // 输入框与文字混合编辑，回车一起发送（网页端同款；
                                 // 此类表情 emoticon_unique 也非空，不能凭 unique 判断）
@@ -2921,6 +2933,48 @@ Rectangle {
                                     // 大表情（通用/UP主/房间专属等）：点击即发送
                                     emoticonPopup.close()
                                     root.sendLiveEmoticon(modelData.unique, modelData.text)
+                                }
+                            }
+                        }
+
+                        Timer {
+                            id: emoteTipTimer
+                            interval: 300
+                            onTriggered: {
+                                if (emoMouse.containsMouse)
+                                    emoteTip.open()
+                            }
+                        }
+
+                        // 悬停预览：72px 放大图 + 触发词（[大笑] 这种）。
+                        // 面板整体缩小后，靠它来"看清"具体是哪个表情。
+                        FluTooltip {
+                            id: emoteTip
+                            padding: 8
+                            x: parent ? (parent.width - width) / 2 : 0
+                            y: -height - 6
+
+                            contentItem: ColumnLayout {
+                                spacing: 4
+
+                                RetryImage {
+                                    Layout.alignment: Qt.AlignHCenter
+                                    visible: modelData.url !== ""
+                                    // 2x 解码，72px 显示不糊
+                                    sourceSize.width: 144
+                                    imageSource: modelData.url
+                                    Layout.preferredWidth: 72
+                                    Layout.preferredHeight: 72
+                                    fillMode: Image.PreserveAspectFit
+                                }
+
+                                FluText {
+                                    Layout.alignment: Qt.AlignHCenter
+                                    visible: modelData.text !== undefined
+                                             && modelData.text !== ""
+                                    text: modelData.text || ""
+                                    font: FluTextStyle.Caption
+                                    color: FluTheme.fontSecondaryColor
                                 }
                             }
                         }
