@@ -1609,6 +1609,13 @@ Item {
                 }
             }
 
+            // 输入框右端：表情 / @（面板与选区逻辑都在 EmoteAtBar 内）
+            EmoteAtBar {
+                Layout.alignment: Qt.AlignVCenter
+                targetInput: commentInput
+                emoteBusiness: "reply"
+            }
+
             FluTextButton {
                 text: "取消"
                 font: FluTextStyle.Caption

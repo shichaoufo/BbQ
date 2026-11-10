@@ -40,6 +40,33 @@ FluPage {
     property bool detailCommentHasNextPage: true
     property bool detailCommentLoadingMore: false
 
+    // ===== 详情页底部：转发 / 点赞 =====
+    // 这三个是「当前展示值」，与 currentDynamic 分开存：currentDynamic 是普通
+    // JS 对象，改它的字段不会通知绑定，图标颜色/数字不会跟着变；放成独立
+    // property 才能在点赞、转发后即时刷新。
+    property bool _detailLiked: false
+    property int _detailLikes: 0
+    property int _detailForwards: 0
+    // 点赞请求在飞：避免连点造成"赞了又取消"
+    property bool _likePending: false
+    // 打开详情时向 getVideoStatus 要过一次视频点赞状态，等 statusReady 回来
+    property bool _awaitVideoLikeStatus: false
+    // 转发弹窗草稿（弹窗里是独立 Component，用页面属性中转才能在这里读到）
+    property string _repostDraft: ""
+    property bool _repostSending: false
+    // 表情面板（business=dynamic）：[{pkgName, emoticons:[{text,url}]}]
+    property var _emotePackages: []
+    property var _emoteList: []
+    property string _emoteFilter: ""
+    property bool _emotesLoaded: false
+    // business=dynamic 返回空时是否已退到 reply 试过一次
+    property bool _emoteFallbackTried: false
+    // 表情接口失败时的提示（否则面板会永远停在"加载中…"）
+    property string _emoteError: ""
+    // @ 用户面板：mention/search 的 groups[] 拍平成一维（面板不做分组头）
+    property var _mentionList: []
+    property bool _mentionLoading: false
+
     // 左侧 UP 主列表
     ListModel { id: upListModel }
 
@@ -2078,12 +2105,239 @@ FluPage {
         }
     }
 
+    // ===== 详情页：转发 / 点赞 =====
+    //
+    // 动态的点赞对象分两种（与 B 站网页 / PiliPlus 一致）：
+    //   · 普通动态 → POST /x/dynamic/feed/dyn/thumb（InteractionManager.likeDynamic）
+    //   · 视频动态（rtype=1）→ 点赞的是**视频本身**，必须走 archive/like，
+    //     否则动态里的赞和播放页的赞对不上
+    //
+    // 视频这条要求参数是**数字 aid**，而 basic.rid_str 在新版接口里并不保证是
+    // aid（可能是 BV 号）。直接把 BV 丢给 archive/like，服务端回 -400「参数错误」
+    // —— 2026-11-10 用户点视频动态的赞就是这个提示。所以这里先把 aid 解析出来，
+    // 解析不到就退回"赞动态本身"，宁可不同步也不报错。
+    function videoAid() {
+        var d = currentDynamic
+        if (!d) return ""
+        var candidates = []
+        if (d.videos && d.videos.length > 0) candidates.push(d.videos[0].aid)
+        // comment_type=1（视频）时 comment_id_str 就是 aid
+        if (Number(d.commentType) === 1) candidates.push(d.commentId)
+        candidates.push(d.rid_str)
+        for (var i = 0; i < candidates.length; ++i) {
+            var v = candidates[i]
+            if (v === undefined || v === null) continue
+            v = String(v)
+            if (/^\d+$/.test(v) && v !== "0") return v
+        }
+        return ""
+    }
+
+    function isVideoDynamic() {
+        return currentDynamic && Number(currentDynamic.rtype) === 1 && videoAid() !== ""
+    }
+
+    // 三个展示值由详情数据初始化（打开详情、详情接口回包各一次）
+    function syncDetailStates(d) {
+        if (!d) return
+        _detailLiked = d.likeState === true
+        _detailLikes = Number(d.likes || 0)
+        _detailForwards = Number(d.forwards || 0)
+    }
+
+    // adjustCount=false 用于"从服务端同步状态"：数字以服务端为准，不能自己 +1
+    function applyDetailLike(liked, adjustCount) {
+        var was = _detailLiked
+        _detailLiked = liked
+        if (adjustCount && liked !== was)
+            _detailLikes = Math.max(0, _detailLikes + (liked ? 1 : -1))
+        if (!currentDynamic) return
+        // 同步回当前详情对象本身：它是普通 JS 对象，改字段不会触发绑定，
+        // 但能保证后面再 normalize / 再同步时读到的不是旧值
+        currentDynamic.likeState = liked
+        currentDynamic.likes = _detailLikes
+        var id = String(currentDynamic.id_str || "")
+        if (id === "") return
+        // 左侧 feed 里同一条同步掉，返回列表时不会还显示旧状态
+        for (var i = 0; i < feedModel.count; ++i) {
+            var it = feedModel.get(i)
+            if (it && String(it.id_str || "") === id) {
+                feedModel.setProperty(i, "likeState", liked)
+                feedModel.setProperty(i, "likes", _detailLikes)
+                break
+            }
+        }
+    }
+
+    function toggleDynamicLike() {
+        if (!currentDynamic || String(currentDynamic.id_str || "") === "") return
+        if (!Login.isLoggedIn) { infoBar.showWarning("请先登录"); return }
+        if (_likePending) return
+        var target = !_detailLiked
+        _likePending = true
+        applyDetailLike(target, true)          // 乐观更新，失败再回滚
+        if (isVideoDynamic())
+            InteractionManager.likeVideo(videoAid(), target ? 1 : 2)
+        else
+            InteractionManager.likeDynamic(String(currentDynamic.id_str), target ? 1 : 2)
+    }
+
+    function openRepostDialog() {
+        if (!currentDynamic || String(currentDynamic.id_str || "") === "") return
+        if (!Login.isLoggedIn) { infoBar.showWarning("请先登录"); return }
+        _repostDraft = ""
+        repostDialog.open()
+    }
+
+    function submitRepost() {
+        if (!currentDynamic || _repostSending) return
+        // 允许不带理由直接转发（B 站网页同样允许，此时只显示"转发了动态"），
+        // 所以这里不校验空内容，只在 request 在飞时挡住连点。
+        _repostSending = true
+        InteractionManager.repostDynamic(
+                    String(currentDynamic.id_str), _repostDraft,
+                    Number(currentDynamic.rtype || 0),
+                    isVideoDynamic() ? videoAid() : "")
+    }
+
+    // 转发成功后同步转发数（详情 + 左侧 feed）
+    function bumpDetailForward() {
+        _detailForwards += 1
+        if (!currentDynamic) return
+        var id = String(currentDynamic.id_str || "")
+        for (var i = 0; i < feedModel.count; ++i) {
+            var it = feedModel.get(i)
+            if (it && String(it.id_str || "") === id) {
+                feedModel.setProperty(i, "forwards", _detailForwards)
+                break
+            }
+        }
+    }
+
+    // ===== 表情面板（business=dynamic）=====
+    function loadEmotePanel() {
+        if (_emotesLoaded) return
+        _emoteError = ""
+        InteractionManager.getEmotePanel("dynamic")
+    }
+
+    // 判断是否是"真的图片地址"。B 站的表情包里除了图片表情，还有一类**颜文字**
+    // 包（type=1）：这类条目没有图片，`url` 要么是空串，要么干脆就塞着颜文字
+    // 本身。之前直接拿来当 Image.source，Qt 会把它当相对路径去打开，
+    // 于是刷出满屏的
+    //   Cannot open: qrc:/BiliQt/qml/pages/( ﾟдﾟ)
+    // （还会把日志刷爆）。所以这里先判定，不是图片地址就置空，交给 delegate
+    // 按文字渲染。
+    function isEmoteImageUrl(u) {
+        if (!u) return false
+        if (u.indexOf("data:image/") === 0) return true
+        if (u.indexOf("//") === 0 || u.indexOf("http://") === 0 || u.indexOf("https://") === 0)
+            return true
+        return /\.(png|jpe?g|gif|webp|avif|bmp)(\?|#|$)/i.test(u)
+    }
+
+    function parseEmotePanel(data) {
+        var packages = []
+        var flat = []
+        _emoteError = ""
+        try {
+            var resp = JSON.parse(typeof data === "string" ? data : data.toString())
+            var pkgs = (resp && resp.data && resp.data.packages) ? resp.data.packages : []
+            for (var i = 0; i < pkgs.length; ++i) {
+                var pkg = pkgs[i] || {}
+                // 该接口的字段是 emote（不是 emoticons），两个都兜一下
+                var arr = pkg.emotes || pkg.emote || []
+                // 包名只算一次：分类栏用 pkgName 匹配，条目的 pkgName 和它必须
+                // 完全一致，否则没名字的包（兜底成「表情N」）会筛出空列表。
+                var pkgName = pkg.text || pkg.package_name || ("表情" + (i + 1))
+                var list = []
+                for (var j = 0; j < arr.length; ++j) {
+                    var e = arr[j] || {}
+                    var text = e.text || e.emoji || ""
+                    var url = e.url || ""
+                    if (url.indexOf("//") === 0) url = "https:" + url
+                    if (!isEmoteImageUrl(url)) url = ""
+                    // 颜文字：text 就是颜文字本身；图片表情：text 是 [微笑] 这样的
+                    // 插入文本。两者都没有就没法用，跳过。
+                    if (text === "" && url === "") continue
+                    if (text === "" && url !== "") text = "[表情]"
+                    var item = { text: text, url: url, pkgName: pkgName }
+                    list.push(item)
+                    flat.push(item)
+                }
+                if (list.length > 0)
+                    packages.push({ pkgName: pkgName, emoticons: list })
+            }
+        } catch (err) {
+            console.warn("[DynamicPage] parse emote panel failed:", err)
+        }
+        _emotePackages = packages
+        _emoteList = flat
+        _emotesLoaded = flat.length > 0
+        if (packages.length > 0 && _emoteFilter === "")
+            _emoteFilter = packages[0].pkgName
+        // business=dynamic 拿不到包时兜底试一次 reply（两个 business 的包
+        // 基本一致，个别账号只放行 reply），只试一次避免死循环
+        if (!_emotesLoaded && !_emoteFallbackTried) {
+            _emoteFallbackTried = true
+            InteractionManager.getEmotePanel("reply")
+        }
+    }
+
+    // 当前分类下的表情（分类栏只有当返回多个包时才显示）
+    function emoteItems() {
+        if (_emoteFilter === "") return _emoteList
+        var out = []
+        for (var i = 0; i < _emoteList.length; ++i) {
+            if (_emoteList[i].pkgName === _emoteFilter) out.push(_emoteList[i])
+        }
+        return out
+    }
+
+    // ===== @ 用户面板 =====
+    function loadDynMention(keyword) {
+        _mentionLoading = true
+        InteractionManager.getDynMention(keyword || "")
+    }
+
+    function parseDynMention(data) {
+        _mentionLoading = false
+        var list = []
+        try {
+            var resp = JSON.parse(typeof data === "string" ? data : data.toString())
+            var gs = (resp && resp.data && resp.data.groups) ? resp.data.groups : []
+            for (var i = 0; i < gs.length; ++i) {
+                var g = gs[i] || {}
+                var arr = g.items || []
+                for (var j = 0; j < arr.length; ++j) {
+                    var u = arr[j] || {}
+                    var name = u.name || u.uname || ""
+                    if (name === "") continue
+                    list.push({ name: name,
+                                uid: String(u.uid || u.mid || ""),
+                                face: u.face || u.avatar || "",
+                                group: g.group_name || g.name || "" })
+                }
+            }
+        } catch (err) {
+            console.warn("[DynamicPage] parse mention failed:", err)
+        }
+        _mentionList = list
+    }
+
     function openDynamicDetail(dynamic) {
         // 同类互斥：其它宿主的动态详情页先关掉
         GlobalState.requestClosePagesOfType("detail", "dynamic")
         // 取消可能 pending 的关闭清理（关闭后 250ms 内又重开），避免清掉新数据
         detailCleanupTimer.stop()
         currentDynamic = normalizeDynamicForDetail(dynamic)
+        _likePending = false          // 上一条动态的点赞请求若还在飞，状态不算数
+        syncDetailStates(currentDynamic)
+        // 视频动态的点赞对象是视频本身：状态直接问视频接口，
+        // 保证和播放页里看到的一致（dynamic 接口给的 like_state 未必对得上）
+        _awaitVideoLikeStatus = isVideoDynamic()
+        if (_awaitVideoLikeStatus)
+            InteractionManager.getVideoStatus(videoAid())
         detailCommentModel.clear()
         detailCommentTotal = 0
         detailCommentLoading = false
@@ -2096,6 +2350,8 @@ FluPage {
     }
 
     function closeDynamicDetail() {
+        // 详情关了就不再等视频点赞状态，避免迟到的 statusReady 改到别的动态上
+        _awaitVideoLikeStatus = false
         detailVisible = false
         closeDetailImagePreview()
         detailOverlay.doClose()
@@ -2266,6 +2522,7 @@ FluPage {
         var dynamic = parseDynamicItem(item)
         if (dynamic) {
             currentDynamic = dynamic
+            syncDetailStates(dynamic)
             loadDetailComments()
             // 实况照片的 live_url 只有 opus 接口下发，补拉一次。
             // desktop 接口（本函数用的那个）会把 live_url 剥掉，只能另找接口要
@@ -3492,17 +3749,23 @@ FluPage {
                                                 }
                                             }
 
+                                            // 点赞态直接读 model 的角色：详情页点赞后
+                                            // 用 feedModel.setProperty 改的就是这两个角色，
+                                            // 通过 itemData 取值不会重新求值（itemData 是
+                                            // 一次性快照），列表里的图标/数字就不会跟着变。
                                             RowLayout {
                                                 spacing: 4
                                                 FluIcon {
                                                     iconSource: FluentIcons.Like
                                                     iconSize: 14
-                                                    color: FluTheme.fontTertiaryColor
+                                                    color: model.likeState === true
+                                                           ? "#FB7299" : FluTheme.fontTertiaryColor
                                                 }
                                                 FluText {
-                                                    text: GlobalState.formatNumber(itemData ? itemData.likes : 0)
+                                                    text: GlobalState.formatNumber(model.likes || 0)
                                                     font: Theme.fontSmall
-                                                    color: FluTheme.fontTertiaryColor
+                                                    color: model.likeState === true
+                                                           ? "#FB7299" : FluTheme.fontTertiaryColor
                                                 }
                                             }
                                         }
@@ -4423,20 +4686,67 @@ FluPage {
 
                                 Item { Layout.fillWidth: true }
 
-                                RowLayout {
-                                    spacing: 4
-                                    FluIcon { iconSource: FluentIcons.Share; iconSize: 14; color: FluTheme.fontTertiaryColor }
-                                    FluText { text: GlobalState.formatNumber(currentDynamic ? (currentDynamic.forwards || 0) : 0); font: Theme.fontSmall; color: FluTheme.fontTertiaryColor }
+                                // ===== 转发（可点）=====
+                                Item {
+                                    Layout.alignment: Qt.AlignVCenter
+                                    implicitWidth: forwardRow.implicitWidth + 10
+                                    implicitHeight: forwardRow.implicitHeight + 8
+
+                                    RowLayout {
+                                        id: forwardRow
+                                        anchors.centerIn: parent
+                                        spacing: 4
+                                        FluIcon { iconSource: FluentIcons.Share; iconSize: 14; color: FluTheme.fontTertiaryColor }
+                                        FluText {
+                                            text: GlobalState.formatNumber(dynamic_page._detailForwards)
+                                            font: Theme.fontSmall
+                                            color: FluTheme.fontTertiaryColor
+                                        }
+                                    }
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        cursorShape: Qt.ArrowCursor
+                                        onClicked: dynamic_page.openRepostDialog()
+                                    }
                                 }
+
+                                // ===== 评论数（只读；发评论走右侧评论框）=====
                                 RowLayout {
                                     spacing: 4
                                     FluIcon { iconSource: FluentIcons.Comment; iconSize: 14; color: FluTheme.fontTertiaryColor }
-                                    FluText { text: GlobalState.formatNumber(currentDynamic ? (currentDynamic.comments || 0) : 0); font: Theme.fontSmall; color: FluTheme.fontTertiaryColor }
+                                    FluText {
+                                        text: GlobalState.formatNumber(currentDynamic ? (currentDynamic.comments || 0) : 0)
+                                        font: Theme.fontSmall
+                                        color: FluTheme.fontTertiaryColor
+                                    }
                                 }
-                                RowLayout {
-                                    spacing: 4
-                                    FluIcon { iconSource: FluentIcons.Like; iconSize: 14; color: FluTheme.fontTertiaryColor }
-                                    FluText { text: GlobalState.formatNumber(currentDynamic ? (currentDynamic.likes || 0) : 0); font: Theme.fontSmall; color: FluTheme.fontTertiaryColor }
+
+                                // ===== 点赞（可点，赞后图标/数字变色）=====
+                                Item {
+                                    Layout.alignment: Qt.AlignVCenter
+                                    implicitWidth: likeRow.implicitWidth + 10
+                                    implicitHeight: likeRow.implicitHeight + 8
+
+                                    RowLayout {
+                                        id: likeRow
+                                        anchors.centerIn: parent
+                                        spacing: 4
+                                        FluIcon {
+                                            iconSource: FluentIcons.Like
+                                            iconSize: 14
+                                            color: dynamic_page._detailLiked ? "#FB7299" : FluTheme.fontTertiaryColor
+                                        }
+                                        FluText {
+                                            text: GlobalState.formatNumber(dynamic_page._detailLikes)
+                                            font: Theme.fontSmall
+                                            color: dynamic_page._detailLiked ? "#FB7299" : FluTheme.fontTertiaryColor
+                                        }
+                                    }
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        cursorShape: Qt.ArrowCursor
+                                        onClicked: dynamic_page.toggleDynamicLike()
+                                    }
                                 }
                             } // end: 点赞/评论/分享 RowLayout
                         }     // end: detailContentColumn (ColumnLayout)
@@ -4851,6 +5161,537 @@ FluPage {
         if (!liveVisible) return
         liveVisible = false
         liveOverlay.doClose()
+    }
+
+    // ===== 转发弹窗 =====
+    //
+    // 用 FluContentDialog + FluMultilineTextBox，下面一行是表情 / @ 两个入口。
+    // 点「转发」不自动关窗：按钮回调由 onPositiveClickListener 接管（见下），
+    // 内容为空时提示后原地保留，不丢草稿。
+    FluContentDialog {
+        id: repostDialog
+        title: "转发动态"
+        message: ""
+        positiveText: "转发"
+        negativeText: "取消"
+        buttonFlags: FluContentDialogType.NegativeButton | FluContentDialogType.PositiveButton
+
+        // 用"函数字面量"而不是 `onPositiveClickListener: { ... }` 语句块。
+        // 后者是 property var 的声明式绑定，块内语句在绑定求值时就会执行一次
+        //（且读写本页属性会形成绑定环），直播页的天选时刻踩过这个坑。
+        // 函数字面量只在按下按钮时被调用，不会有这个问题。
+        onPositiveClickListener: function() { dynamic_page.submitRepost() }
+
+        contentDelegate: Component {
+            ColumnLayout {
+                id: repostContent
+                // 用锚点而不是 `x: 20` + `width: parent.width - 40`：
+                // 后者在 Loader 里 parent.width 求值时机不稳（组件实例化时
+                // Loader 还没有最终宽度），x 与 width 一旦不同步，右侧就会
+                // 顶出对话框边界。锚点左右各留 20，和标题/正文的内边距对齐。
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.top: parent.top
+                anchors.leftMargin: 20
+                anchors.rightMargin: 20
+                spacing: 6
+
+                // 表情 / @ 都插到光标处（TextEdit.insert 语义等价，这里手写
+                // 是为了同时把光标推到插入内容之后）
+                function insertAtCursor(str) {
+                    var pos = repostInput.cursorPosition
+                    var t = repostInput.text
+                    repostInput.text = t.substring(0, pos) + str + t.substring(pos)
+                    repostInput.cursorPosition = pos + str.length
+                    repostInput.forceActiveFocus()
+                }
+
+                FluMultilineTextBox {
+                    id: repostInput
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 110
+                    placeholderText: "说点什么…"
+                    // TextArea 没有 maximumLength，超长时自己截断
+                    //（改 text 会再触发一次 onTextChanged，第二次长度已合法，收敛）
+                    onTextChanged: {
+                        if (text.length > 1000) {
+                            var p = cursorPosition
+                            text = text.substring(0, 1000)
+                            cursorPosition = Math.min(p, 1000)
+                        }
+                        dynamic_page._repostDraft = text
+                    }
+                }
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 2
+
+                    FluIconButton {
+                        id: repostEmojiBtn
+                        iconSource: FluentIcons.Emoji2
+                        iconSize: 16
+                        verticalPadding: 6
+                        horizontalPadding: 6
+                        onClicked: {
+                            if (emojiPopup.opened) { emojiPopup.close(); return }
+                            dynamic_page.loadEmotePanel()   // 已加载过则直接返回
+                            emojiPopup.open()
+                        }
+                    }
+
+                    FluIconButton {
+                        id: repostAtBtn
+                        // FluentIcons 里没有 Mention/At，用 Contact（人像）代替
+                        iconSource: FluentIcons.Contact
+                        iconSize: 16
+                        verticalPadding: 6
+                        horizontalPadding: 6
+                        onClicked: {
+                            if (atPopup.opened) { atPopup.close(); return }
+                            dynamic_page.loadDynMention("")
+                            atPopup.open()
+                        }
+                    }
+
+                    Item { Layout.fillWidth: true }
+
+                    FluText {
+                        text: repostInput.length + "/1000"
+                        font: Theme.fontSmall
+                        color: FluTheme.fontTertiaryColor
+                    }
+                }
+
+                // ---------- 表情面板 ----------
+                Popup {
+                    id: emojiPopup
+                    parent: repostEmojiBtn
+                    y: -height - 8
+                    x: -8
+                    width: 368
+                    height: 320
+                    modal: false
+                    closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutsideParent
+                    padding: 8
+                    background: Rectangle {
+                        radius: 6
+                        color: FluTheme.dark ? Qt.rgba(43/255, 43/255, 43/255, 1)
+                                             : Qt.rgba(1, 1, 1, 1)
+                        border.width: 1
+                        border.color: FluTheme.dark ? Qt.rgba(58/255, 58/255, 58/255, 1)
+                                                    : Qt.rgba(226/255, 229/255, 234/255, 1)
+                        FluShadow { radius: 6 }
+                    }
+
+                    contentItem: ColumnLayout {
+                        spacing: 4
+
+                        // ===== 分类栏（Pivot 风格）=====
+                        // 和直播页表情面板同一套画法：FluPivot 的 tab 是静态子项，
+                        // 不支持按接口返回的表情包动态生成，所以按 Pivot 的视觉
+                        // 规范手绘 —— 主题色下划线（单一实例横移 + 200ms 缓动）
+                        // 加悬停变色。之前这里只是几行纯文字，既没有下划线也没有
+                        // 悬停反馈，看起来和正文没区别。
+                        Item {
+                            id: emoteTabContainer
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: 34
+                            visible: dynamic_page._emotePackages.length > 1
+
+                            // 下划线的目标位置/宽度（由激活的 tab 项上报）
+                            property real indicatorX: 0
+                            property real indicatorW: 0
+                            property Item activeTabItem: null
+
+                            Rectangle {
+                                height: 3
+                                radius: 1.5
+                                y: parent.height - 3
+                                x: emoteTabContainer.indicatorX
+                                width: emoteTabContainer.indicatorW
+                                color: FluTheme.primaryColor
+                                visible: emoteTabContainer.activeTabItem !== null
+
+                                Behavior on x {
+                                    NumberAnimation { duration: 200; easing.type: Easing.OutCubic }
+                                }
+                                Behavior on width {
+                                    NumberAnimation { duration: 200; easing.type: Easing.OutCubic }
+                                }
+                            }
+
+                            // 分类横向列表：包多时超出宽度可横向拖动
+                            ListView {
+                                id: emoteTabBar
+                                anchors.fill: parent
+                                orientation: ListView.Horizontal
+                                clip: true
+                                boundsBehavior: Flickable.StopAtBounds
+                                spacing: 16
+                                model: dynamic_page._emotePackages
+                                // 横向拖动后下划线要跟着重算位置
+                                onContentXChanged: {
+                                    if (emoteTabContainer.activeTabItem) {
+                                        var pos = emoteTabContainer.activeTabItem.mapToItem(emoteTabContainer, 0, 0)
+                                        emoteTabContainer.indicatorX = pos.x
+                                        emoteTabContainer.indicatorW = emoteTabContainer.activeTabItem.width
+                                    }
+                                }
+
+                                delegate: Item {
+                                    id: emoteTabItem
+                                    width: emoteTabText.width
+                                    height: emoteTabBar.height
+                                    property bool activeTab: modelData.pkgName === dynamic_page._emoteFilter
+
+                                    function updateIndicator() {
+                                        if (!emoteTabItem.activeTab) return
+                                        emoteTabContainer.activeTabItem = emoteTabItem
+                                        var pos = emoteTabItem.mapToItem(emoteTabContainer, 0, 0)
+                                        emoteTabContainer.indicatorX = pos.x
+                                        emoteTabContainer.indicatorW = emoteTabItem.width
+                                    }
+
+                                    onActiveTabChanged: updateIndicator()
+                                    Component.onCompleted: updateIndicator()
+                                    // 激活项被销毁时清引用，避免下划线指向已销毁的 item
+                                    Component.onDestruction: {
+                                        if (emoteTabContainer.activeTabItem === emoteTabItem)
+                                            emoteTabContainer.activeTabItem = null
+                                    }
+
+                                    FluText {
+                                        id: emoteTabText
+                                        anchors.centerIn: parent
+                                        text: modelData.pkgName
+                                        font: FluTextStyle.Body
+                                        color: {
+                                            if (emoteTabItem.activeTab) return FluTheme.primaryColor
+                                            if (emoteTabMouse.containsMouse) return FluTheme.fontPrimaryColor
+                                            return FluTheme.fontSecondaryColor
+                                        }
+                                    }
+
+                                    MouseArea {
+                                        id: emoteTabMouse
+                                        anchors.fill: parent
+                                        hoverEnabled: true
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: dynamic_page._emoteFilter = modelData.pkgName
+                                    }
+                                }
+                            }
+                        }
+
+                        // ===== 表情网格 =====
+                        Item {
+                            Layout.fillWidth: true
+                            Layout.fillHeight: true
+
+                            FluText {
+                                anchors.centerIn: parent
+                                visible: dynamic_page._emoteList.length === 0
+                                text: dynamic_page._emoteError !== ""
+                                      ? "表情加载失败：" + dynamic_page._emoteError
+                                      : "加载中…"
+                                font: Theme.fontSmall
+                                color: FluTheme.fontTertiaryColor
+                            }
+
+                            GridView {
+                                id: emoteGrid
+                                anchors.fill: parent
+                                clip: true
+                                visible: dynamic_page._emoteList.length > 0
+                                // 每行 7 格、格宽按面板宽度自适应，换缩放不会出现
+                                // "右边空一条"或"最后一列被裁掉"
+                                readonly property int columns: 7
+                                cellWidth: Math.floor(width / columns)
+                                cellHeight: 44
+                                boundsBehavior: Flickable.StopAtBounds
+                                ScrollBar.vertical: FluScrollBar {}
+                                model: dynamic_page.emoteItems()
+
+                                delegate: Item {
+                                    width: emoteGrid.cellWidth
+                                    height: 44
+
+                                    // 悬停底色（直播页同款）
+                                    Rectangle {
+                                        anchors.fill: parent
+                                        anchors.margins: 2
+                                        radius: 4
+                                        color: emoteMouse.containsMouse
+                                               ? (FluTheme.dark ? "#40FFFFFF" : "#0F000000")
+                                               : "transparent"
+                                    }
+
+                                    // 图片表情（带失败重试：图床偶发掐连接）
+                                    RetryImage {
+                                        anchors.centerIn: parent
+                                        width: 28
+                                        height: 28
+                                        visible: modelData.url !== ""
+                                        imageSource: modelData.url
+                                        asynchronous: true
+                                        cache: true
+                                        fillMode: Image.PreserveAspectFit
+                                    }
+
+                                    // 颜文字：包里没有图片地址，直接显示文字本身
+                                    FluText {
+                                        anchors.centerIn: parent
+                                        visible: modelData.url === ""
+                                        width: parent.width - 8
+                                        horizontalAlignment: Text.AlignHCenter
+                                        wrapMode: Text.Wrap
+                                        maximumLineCount: 2
+                                        elide: Text.ElideRight
+                                        font.pixelSize: 9
+                                        lineHeight: 0.95
+                                        color: FluTheme.fontSecondaryColor
+                                        text: modelData.text
+                                    }
+
+                                    MouseArea {
+                                        id: emoteMouse
+                                        anchors.fill: parent
+                                        hoverEnabled: true
+                                        cursorShape: Qt.PointingHandCursor
+                                        onContainsMouseChanged: {
+                                            if (containsMouse) {
+                                                emoteTipTimer.restart()
+                                            } else {
+                                                emoteTipTimer.stop()
+                                                emoteTip.close()
+                                            }
+                                        }
+                                        onClicked: {
+                                            emoteTip.close()
+                                            repostContent.insertAtCursor(modelData.text)
+                                            emojiPopup.close()
+                                        }
+                                    }
+
+                                    // 悬停预览：图片表情放 72px 原图，颜文字放大字号，
+                                    // 下方一行是表情名（就是点选后插入的 [微笑] 那种文本）。
+                                    // 300ms 延时，避免鼠标划过整片网格时 tooltip 乱闪。
+                                    Timer {
+                                        id: emoteTipTimer
+                                        interval: 300
+                                        onTriggered: {
+                                            if (emoteMouse.containsMouse)
+                                                emoteTip.open()
+                                        }
+                                    }
+
+                                    FluTooltip {
+                                        id: emoteTip
+                                        padding: 8
+                                        x: parent ? (parent.width - width) / 2 : 0
+                                        y: -height - 6
+
+                                        contentItem: ColumnLayout {
+                                            spacing: 4
+
+                                            RetryImage {
+                                                Layout.alignment: Qt.AlignHCenter
+                                                visible: modelData.url !== ""
+                                                // 按 2x 解码，72px 显示时不糊
+                                                sourceSize.width: 144
+                                                imageSource: modelData.url
+                                                Layout.preferredWidth: 72
+                                                Layout.preferredHeight: 72
+                                                fillMode: Image.PreserveAspectFit
+                                            }
+
+                                            FluText {
+                                                Layout.alignment: Qt.AlignHCenter
+                                                visible: modelData.url === ""
+                                                text: modelData.text
+                                                font.pixelSize: 15
+                                                color: FluTheme.fontPrimaryColor
+                                            }
+
+                                            FluText {
+                                                Layout.alignment: Qt.AlignHCenter
+                                                visible: modelData.url !== ""
+                                                text: modelData.text
+                                                font: FluTextStyle.Caption
+                                                color: FluTheme.fontSecondaryColor
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // ---------- @ 用户面板 ----------
+                Popup {
+                    id: atPopup
+                    parent: repostAtBtn
+                    y: -height - 8
+                    x: -60
+                    width: 280
+                    height: 300
+                    modal: false
+                    closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutsideParent
+                    padding: 8
+                    background: Rectangle {
+                        radius: 6
+                        color: FluTheme.dark ? Qt.rgba(43/255, 43/255, 43/255, 1)
+                                             : Qt.rgba(1, 1, 1, 1)
+                        border.width: 1
+                        border.color: FluTheme.dark ? Qt.rgba(58/255, 58/255, 58/255, 1)
+                                                    : Qt.rgba(226/255, 229/255, 234/255, 1)
+                        FluShadow { radius: 6 }
+                    }
+
+                    contentItem: ColumnLayout {
+                        spacing: 6
+
+                        FluTextBox {
+                            id: atSearchBox
+                            Layout.fillWidth: true
+                            placeholderText: "搜索昵称"
+                            onTextChanged: atSearchTimer.restart()
+                        }
+
+                        Item {
+                            Layout.fillWidth: true
+                            Layout.fillHeight: true
+
+                            ListView {
+                                anchors.fill: parent
+                                clip: true
+                                boundsBehavior: Flickable.StopAtBounds
+                                ScrollBar.vertical: FluScrollBar {}
+                                model: dynamic_page._mentionList
+
+                                delegate: Item {
+                                    width: ListView.view.width
+                                    height: 36
+
+                                    // 悬停底色：和表情面板 / 直播页同一套观感
+                                    Rectangle {
+                                        anchors.fill: parent
+                                        anchors.margins: 2
+                                        radius: 4
+                                        color: mentionMouse.containsMouse
+                                               ? (FluTheme.dark ? "#40FFFFFF" : "#0F000000")
+                                               : "transparent"
+                                    }
+
+                                    RowLayout {
+                                        anchors.fill: parent
+                                        anchors.leftMargin: 4
+                                        anchors.rightMargin: 4
+                                        spacing: 8
+
+                                        CircleAvatar {
+                                            Layout.preferredWidth: 22
+                                            Layout.preferredHeight: 22
+                                            Layout.alignment: Qt.AlignVCenter
+                                            source: modelData.face
+                                            placeholderText: modelData.name
+                                        }
+                                        FluText {
+                                            Layout.fillWidth: true
+                                            text: modelData.name
+                                            font: Theme.fontSmall
+                                            elide: Text.ElideRight
+                                        }
+                                    }
+
+                                    MouseArea {
+                                        id: mentionMouse
+                                        anchors.fill: parent
+                                        cursorShape: Qt.PointingHandCursor
+                                        hoverEnabled: true
+                                        onClicked: {
+                                            repostContent.insertAtCursor("@" + modelData.name + " ")
+                                            atPopup.close()
+                                        }
+                                    }
+                                }
+                            }
+
+                            FluText {
+                                anchors.centerIn: parent
+                                visible: dynamic_page._mentionList.length === 0
+                                text: dynamic_page._mentionLoading ? "加载中…" : "没有可选的用户"
+                                font: Theme.fontSmall
+                                color: FluTheme.fontTertiaryColor
+                            }
+                        }
+                    }
+                }
+
+                // 昵称搜索防抖
+                Timer {
+                    id: atSearchTimer
+                    interval: 300
+                    repeat: false
+                    onTriggered: dynamic_page.loadDynMention(atSearchBox.text)
+                }
+            }
+        }
+    }
+
+    // ===== 点赞 / 转发的响应 =====
+    Connections {
+        target: InteractionManager
+
+        function onActionSuccess(action, message) {
+            if (action === "dyn_like" || action === "like" || action === "dislike") {
+                if (!dynamic_page._likePending) return
+                dynamic_page._likePending = false
+            } else if (action === "dyn_repost") {
+                dynamic_page._repostSending = false
+                repostDialog.close()
+                dynamic_page.bumpDetailForward()
+                infoBar.showSuccess("转发成功")
+            }
+        }
+
+        function onActionFailed(action, error) {
+            if (action === "dyn_like" || action === "like" || action === "dislike") {
+                if (dynamic_page._likePending) {
+                    dynamic_page._likePending = false
+                    // 回滚乐观更新
+                    dynamic_page.applyDetailLike(!dynamic_page._detailLiked, true)
+                }
+                infoBar.showWarning("点赞失败：" + error)
+            } else if (action === "dyn_repost") {
+                dynamic_page._repostSending = false
+                infoBar.showWarning("转发失败：" + error)
+            } else if (action === "dyn_mention") {
+                dynamic_page._mentionLoading = false
+            } else if (action === "dyn_emote") {
+                dynamic_page._emoteError = error
+                // 失败也算"试过了"，别再无限重试（否则每开一次面板就发一次请求）
+                dynamic_page._emoteFallbackTried = true
+            }
+        }
+
+        // 视频动态的点赞状态（打开详情时向视频接口要一次）
+        function onStatusReady(liked, favorited, coined) {
+            if (!dynamic_page._awaitVideoLikeStatus) return
+            dynamic_page._awaitVideoLikeStatus = false
+            // 只同步状态，数字以服务端返回的为准（不再自己 +1）
+            dynamic_page.applyDetailLike(liked, false)
+        }
+
+        function onDynMentionReady(data) {
+            dynamic_page.parseDynMention(data)
+        }
+
+        function onEmotePanelReady(data) {
+            dynamic_page.parseEmotePanel(data)
+        }
     }
 
 }

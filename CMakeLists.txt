@@ -194,6 +194,8 @@ set(QML_RESOURCE_FILES
     qml/pages/UserProfilePage.qml
     qml/components/NavigationBar.qml
     qml/components/AppImage.qml
+    qml/components/RetryImage.qml
+    qml/components/EmoteAtBar.qml
     qml/components/CommentMedal.qml
     qml/components/VideoCard.qml
     qml/components/LiveCard.qml

@@ -8,6 +8,7 @@
 #include <QUrlQuery>
 #include <QHash>
 #include <QDateTime>
+#include <QRandomGenerator>
 #include <QDebug>
 
 
@@ -313,6 +314,157 @@ void InteractionManager::followUser(const QString &mid, int act)
     request.setRawHeader(QByteArray("Content-Type"), QByteArray("application/x-www-form-urlencoded"));
 
     postOneShot(request, postData.toUtf8(), action);
+}
+
+// ===== 动态：点赞 / 转发 / @搜索 / 表情面板 =====
+//
+// 四个接口的参数与用法照 PiliPlus（lib/http/dynamics.dart）来：
+//   · 点赞  POST /x/dynamic/feed/dyn/thumb   query: csrf
+//           form: dyn_id_str, up(1=赞 2=取消), spmid
+//   · 转发  POST /x/dynamic/feed/create/dyn
+//           query: platform/csrf/x-bili-device-req-json/x-bili-web-req-json
+//           json:  dyn_req{content{contents[{raw_text,type:1,biz_id:""}]},
+//                          scene(4=转发动态 5=转发视频), upload_id, meta}
+//                  web_repost_src{dyn_id_str[, revs_id{dyn_type,rid}]}
+//   · @搜索 GET /x/polymer/web-dynamic/v1/mention/search?keyword=&web_location=333.1365
+//   · 表情  GET /x/emote/user/panel/web?business=dynamic
+//
+// 动态类接口的 Referer 必须是 t.bilibili.com（用 www 会被风控拦），
+// 所以在 setupRequest 之后统一覆盖一次。
+void InteractionManager::likeDynamic(const QString &dynId, int up)
+{
+    const QString action = "dyn_like";
+    ENSURE_LOGGED_IN(action)
+    if (dynId.isEmpty()) {
+        emit actionFailed(action, "动态 id 为空");
+        return;
+    }
+
+    QUrl url("https://api.bilibili.com/x/dynamic/feed/dyn/thumb");
+    QUrlQuery query;
+    query.addQueryItem("csrf", getCSRFToken());
+    url.setQuery(query);
+
+    // 正文必须是 **JSON**，不是表单！
+    // 接口文档（bilibili-API-collect /docs/dynamic/action）写得很明确：
+    //   curl -X POST '.../dyn/thumb?csrf=xxx' -H 'content-type: application/json'
+    //        --data-raw '{"dyn_id_str":"1057...","up":1}'
+    // PiliPlus 那边看着像"表单"，其实是 Dio 的 data: Map 默认按 JSON 发出，
+    // 照抄成 x-www-form-urlencoded 就会得到 4100001「参数错误」。
+    QJsonObject body;
+    body["dyn_id_str"] = dynId;
+    body["up"] = up;
+    body["spmid"] = "333.1365.0.0";
+
+    QNetworkRequest request(url);
+    setupRequest(request);
+    request.setRawHeader(QByteArray("Content-Type"), QByteArray("application/json"));
+    request.setRawHeader(QByteArray("Referer"), QByteArray("https://t.bilibili.com/"));
+
+    qDebug() << "[InteractionManager] likeDynamic dyn_id_str:" << dynId
+             << "up:" << up << "csrf_len:" << getCSRFToken().size();
+    postOneShot(request, QJsonDocument(body).toJson(QJsonDocument::Compact), action);
+}
+
+void InteractionManager::repostDynamic(const QString &dynId, const QString &text,
+                                       int dynType, const QString &rid)
+{
+    const QString action = "dyn_repost";
+    ENSURE_LOGGED_IN(action)
+    if (dynId.isEmpty()) {
+        emit actionFailed(action, "动态 id 为空");
+        return;
+    }
+
+    const bool isVideo = !rid.isEmpty();
+
+    QUrl url("https://api.bilibili.com/x/dynamic/feed/create/dyn");
+    QUrlQuery query;
+    query.addQueryItem("platform", "web");
+    query.addQueryItem("csrf", getCSRFToken());
+    query.addQueryItem("x-bili-device-req-json", "{\"platform\": \"web\", \"device\": \"pc\"}");
+    query.addQueryItem("x-bili-web-req-json", "{\"spm_id\": \"333.999\"}");
+    url.setQuery(query);
+
+    QJsonObject textItem;
+    textItem["raw_text"] = text;
+    textItem["type"] = 1;
+    textItem["biz_id"] = "";
+
+    QJsonObject content;
+    // 允许"不带理由转发"（B 站网页同样允许，卡片上只显示"转发了动态"）：
+    // 没写内容就不塞 contents 项，PiliPlus 也是 rawText 为空时不加。
+    if (!text.isEmpty())
+        content["contents"] = QJsonArray{textItem};
+    else
+        content["contents"] = QJsonArray();
+
+    const int mid = LoginManager::instance()->getCurrentUser().mid;
+    QJsonObject dynReq;
+    dynReq["content"] = content;
+    // scene：4=转发动态，5=转发视频（PiliPlus createDynamic 的分支）
+    dynReq["scene"] = isVideo ? 5 : 4;
+    dynReq["attach_card"] = QJsonValue::Null;
+    dynReq["upload_id"] = QString("%1_%2_%3")
+            .arg(mid)
+            .arg(QDateTime::currentSecsSinceEpoch())
+            .arg(QRandomGenerator::global()->bounded(1000, 9999));
+    QJsonObject appMeta;
+    appMeta["from"] = "create.dynamic.web";
+    appMeta["mobi_app"] = "web";
+    QJsonObject meta;
+    meta["app_meta"] = appMeta;
+    dynReq["meta"] = meta;
+
+    QJsonObject repostSrc;
+    repostSrc["dyn_id_str"] = dynId;
+    if (isVideo) {
+        QJsonObject revsId;
+        revsId["dyn_type"] = dynType;
+        revsId["rid"] = rid;
+        repostSrc["revs_id"] = revsId;
+    }
+
+    QJsonObject body;
+    body["dyn_req"] = dynReq;
+    body["web_repost_src"] = repostSrc;
+
+    QNetworkRequest request(url);
+    setupRequest(request);
+    request.setRawHeader(QByteArray("Content-Type"), QByteArray("application/json"));
+    request.setRawHeader(QByteArray("Referer"), QByteArray("https://t.bilibili.com/"));
+
+    qDebug() << "[InteractionManager] repostDynamic:" << dynId
+             << "scene:" << (isVideo ? 5 : 4) << "text len:" << text.length();
+    postOneShot(request, QJsonDocument(body).toJson(QJsonDocument::Compact), action);
+}
+
+void InteractionManager::getDynMention(const QString &keyword)
+{
+    QUrl url("https://api.bilibili.com/x/polymer/web-dynamic/v1/mention/search");
+    QUrlQuery query;
+    if (!keyword.trimmed().isEmpty())
+        query.addQueryItem("keyword", keyword.trimmed());
+    query.addQueryItem("web_location", "333.1365");
+    url.setQuery(query);
+
+    QNetworkRequest request(url);
+    setupRequest(request);
+    request.setRawHeader(QByteArray("Referer"), QByteArray("https://t.bilibili.com/"));
+    getOneShot(request, "dyn_mention");
+}
+
+void InteractionManager::getEmotePanel(const QString &business)
+{
+    QUrl url("https://api.bilibili.com/x/emote/user/panel/web");
+    QUrlQuery query;
+    query.addQueryItem("business", business.trimmed().isEmpty()
+                                   ? QStringLiteral("dynamic") : business.trimmed());
+    url.setQuery(query);
+
+    QNetworkRequest request(url);
+    setupRequest(request);
+    getOneShot(request, "dyn_emote");
 }
 
 void InteractionManager::getVideoStatus(const QString &aid)
@@ -654,6 +806,28 @@ void InteractionManager::onReplyFinished()
             }
         } else {
             emit actionFailed(action, normalizeErrorMessage(message));
+        }
+    } else if (action == "dyn_mention") {
+        // @ 用户搜索：原样回传，分组结构（groups[].items[]）由 QML 解析
+        QJsonDocument doc = QJsonDocument::fromJson(data);
+        const int code = doc.isObject() ? doc.object().value("code").toInt(-1) : -1;
+        if (code == 0) {
+            emit dynMentionReady(data);
+        } else {
+            emit actionFailed(action, doc.isObject()
+                                        ? doc.object().value("message").toString()
+                                        : QStringLiteral("响应格式错误"));
+        }
+    } else if (action == "dyn_emote") {
+        // 表情面板：原样回传，包结构（packages[].emotes[]）由 QML 解析
+        QJsonDocument doc = QJsonDocument::fromJson(data);
+        const int code = doc.isObject() ? doc.object().value("code").toInt(-1) : -1;
+        if (code == 0) {
+            emit emotePanelReady(data);
+        } else {
+            emit actionFailed(action, doc.isObject()
+                                        ? doc.object().value("message").toString()
+                                        : QStringLiteral("响应格式错误"));
         }
     } else {
         QJsonDocument doc = QJsonDocument::fromJson(data);

@@ -7968,6 +7968,13 @@ Rectangle {
                                 }
                             }
 
+                            // 输入框右端：表情 / @（与动态详情页评论区同一个组件）
+                            EmoteAtBar {
+                                Layout.alignment: Qt.AlignVCenter
+                                targetInput: commentInput
+                                emoteBusiness: "reply"
+                            }
+
                             FluTextButton {
                                 text: "取消"
                                 font: FluTextStyle.Caption

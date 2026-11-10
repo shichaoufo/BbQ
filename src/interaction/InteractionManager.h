@@ -43,6 +43,28 @@ public:
     // 获取视频状态（是否已点赞、收藏、投币）
     Q_INVOKABLE void getVideoStatus(const QString &aid);
 
+    // ===== 动态：点赞 / 转发 / @搜索 / 表情面板 =====
+    //
+    // 点赞动态：POST /x/dynamic/feed/dyn/thumb（up: 1=点赞, 2=取消）。
+    // 注意 video 类动态不应该走这里 —— 那种动态的点赞对象是视频本身，
+    // 要和播放器的点赞状态一致，QML 侧会改调 likeVideo()。
+    Q_INVOKABLE void likeDynamic(const QString &dynId, int up = 1);
+
+    // 转发动态：POST /x/dynamic/feed/create/dyn，scene=4（转发动态）/
+    // 5（转发视频）。text 为转发理由，可为空。
+    // 视频类动态要传 dynType/rid，组成 web_repost_src.revs_id；
+    // 普通动态留空即可（只有 dyn_id_str）。
+    Q_INVOKABLE void repostDynamic(const QString &dynId, const QString &text,
+                                   int dynType = 0, const QString &rid = QString());
+
+    // @ 用户搜索：GET /x/polymer/web-dynamic/v1/mention/search
+    // keyword 为空时返回"最近 @ / 我的关注"等分组，有词时按昵称搜。
+    Q_INVOKABLE void getDynMention(const QString &keyword);
+
+    // 表情面板：GET /x/emote/user/panel/web?business=dynamic
+    // 返回的包结构由 QML 解析（packages[].emotes[]，字段 text/url）。
+    Q_INVOKABLE void getEmotePanel(const QString &business = QStringLiteral("dynamic"));
+
     // 获取 UP 主关注状态
     Q_INVOKABLE void getUserRelation(const QString &mid);
 
@@ -68,6 +90,12 @@ signals:
 
     // 视频状态获取成功（是否已点赞、已收藏、投币数）
     void statusReady(bool liked, bool favorited, int coined);
+
+    // @ 用户搜索结果（原始 JSON：data.groups[].items[]，QML 自行解析）
+    void dynMentionReady(const QByteArray &data);
+
+    // 表情面板结果（原始 JSON：data.packages[].emotes[]，QML 自行解析）
+    void emotePanelReady(const QByteArray &data);
 
     // UP 主关注状态获取成功（attribute: 0=未关注, 1=悄悄关注, 2=已关注）
     void relationReady(bool followed, int attribute);
