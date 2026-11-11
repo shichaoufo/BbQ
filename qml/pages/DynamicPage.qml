@@ -611,6 +611,10 @@ FluPage {
 
         var result = {
             id_str: item.id_str || "",
+            // 动态类型（DYNAMIC_TYPE_FORWARD / DYNAMIC_TYPE_AV / DYNAMIC_TYPE_DRAW …）。
+            // 转发动态必须靠它识别：`basic.rtype` / `basic.rid_str` 描述的是
+            // **被转发的原内容**，不是这条转发本身。
+            dynamicType: item.type || "",
             mid: 0,
             author: "",
             face: "",
@@ -653,6 +657,11 @@ FluPage {
         var basic = item.basic || {}
         result.rid_str = basic.rid_str || ""
         result.rtype = basic.rtype || 0
+        // basic 里其实还带着"评论对象"：comment_type=1（视频）时 comment_id_str
+        // 就是该视频的 aid，比 rid_str 可靠。module_stat 里通常没有这两个字段，
+        // 所以先在这里存；下面 MODULE_TYPE_STAT 若给了非空值会覆盖。
+        result.commentId = basic.comment_id_str || ""
+        result.commentType = Number(basic.comment_type || 0)
 
         var modules = item.modules || []
         for (var j = 0; j < modules.length; j++) {
@@ -1201,8 +1210,12 @@ FluPage {
                 result.likes = statData.like && statData.like.count ? statData.like.count : 0
                 result.likeState = statData.like && statData.like.like_state ? true : false
                 if (statData.comment) {
-                    result.commentId = statData.comment.comment_id || ""
-                    result.commentType = statData.comment.comment_type || 0
+                    // 只在非空时覆盖：module_stat 里一般没有 comment_id/comment_type，
+                    // 空值覆盖会把 basic 里那份更可靠的（视频动态 = aid）抹掉
+                    if (statData.comment.comment_id)
+                        result.commentId = statData.comment.comment_id
+                    if (statData.comment.comment_type)
+                        result.commentType = statData.comment.comment_type
                 }
             } else if (moduleType === "MODULE_TYPE_DYNAMIC") {
                 var dynamicData = module.module_dynamic || {}
@@ -2107,18 +2120,32 @@ FluPage {
 
     // ===== 详情页：转发 / 点赞 =====
     //
-    // 动态的点赞对象分两种（与 B 站网页 / PiliPlus 一致）：
-    //   · 普通动态 → POST /x/dynamic/feed/dyn/thumb（InteractionManager.likeDynamic）
-    //   · 视频动态（rtype=1）→ 点赞的是**视频本身**，必须走 archive/like，
-    //     否则动态里的赞和播放页的赞对不上
+    // 点赞对象分三种，判断顺序不能错：
+    //   · 普通动态 → POST /x/dynamic/feed/dyn/thumb，参数是这条动态自己的 id；
+    //   · 视频动态（DYNAMIC_TYPE_AV，rtype=1）→ 点赞的是**视频本身**，走
+    //     archive/like，参数必须是数字 aid（动态里的赞要和播放页对得上）；
+    //   · 转发动态（DYNAMIC_TYPE_FORWARD）→ 赞的是这条转发本身。
+    //     这一条最容易搞错：接口里 `basic.rtype` / `basic.rid_str` 描述的是
+    //     **被转发的原内容**（转发一个视频时 rtype=1、rid_str 指向原条目），
+    //     照着它去调 archive/like 就会拿一个根本不是 aid 的值去点视频，
+    //     服务端回 -400「参数错误」—— 用户看到的就是"点了转发里的视频"。
     //
-    // 视频这条要求参数是**数字 aid**，而 basic.rid_str 在新版接口里并不保证是
-    // aid（可能是 BV 号）。直接把 BV 丢给 archive/like，服务端回 -400「参数错误」
-    // —— 2026-11-10 用户点视频动态的赞就是这个提示。所以这里先把 aid 解析出来，
-    // 解析不到就退回"赞动态本身"，宁可不同步也不报错。
+    // aid 的来源按可靠度：卡片里的 archive.aid → basic.comment_id_str
+    // （comment_type=1 时它就是 aid）→ basic.rid_str；只接受纯数字，取不到就
+    // 退回"赞动态本身"，宁可不同步也不报错。
+    function isForwardDynamic(d) {
+        var dyn = d || currentDynamic
+        if (!dyn) return false
+        if (String(dyn.dynamicType || "") === "DYNAMIC_TYPE_FORWARD") return true
+        // 兜底：个别接口/旧数据不带 type，但转发卡片一定内嵌着被转发的对象
+        return !!(dyn.forward && dyn.forward.id_str)
+    }
+
     function videoAid() {
         var d = currentDynamic
         if (!d) return ""
+        // 转发卡片没有"自己的视频"，直接让上层走 likeDynamic（赞这条转发）
+        if (isForwardDynamic(d)) return ""
         var candidates = []
         if (d.videos && d.videos.length > 0) candidates.push(d.videos[0].aid)
         // comment_type=1（视频）时 comment_id_str 就是 aid
@@ -2610,6 +2637,10 @@ FluPage {
 
     function detailCommentOid() {
         if (!currentDynamic) return ""
+        // 转发动态：评论区永远是"这条转发"自己的（type=17、oid=动态 id）。
+        // 走下面那几条会把评论对象指到被转发的原视频/原动态上，
+        // 表现就是"评论区里是原视频的评论"。
+        if (isForwardDynamic()) return String(currentDynamic.id_str || "")
         if (currentDynamic.commentId) return String(currentDynamic.commentId)
         if (currentDynamic.rid_str) return String(currentDynamic.rid_str)
         if (currentDynamic.videos && currentDynamic.videos.length > 0 && currentDynamic.videos[0].aid) {
@@ -2620,6 +2651,7 @@ FluPage {
 
     function detailCommentType() {
         if (!currentDynamic) return 17
+        if (isForwardDynamic()) return 17
         if (currentDynamic.commentType) return currentDynamic.commentType
         if (currentDynamic.rtype === 1 || currentDynamic.rtype === 8) return 1
         if (currentDynamic.videos && currentDynamic.videos.length > 0) return 1
