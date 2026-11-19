@@ -620,6 +620,12 @@ CommentManager::Comment CommentManager::parseCommentObject(const QJsonObject &ob
     comment.isTop = (replyControl.value("is_top_admin").toInt() == 1) ||
                     (replyControl.value("is_up_top").toInt() == 1) ||
                     ((obj["up_action"].toInt() & 1) != 0);
+
+    // UP 主觉得很赞：up_action.like（对象里的 bool，不是位标记）。
+    // 楼中楼用的是同一个 reply 结构，所以这里解析一次两边都有。
+    const QJsonValue upLikeVal = obj["up_action"].toObject().value("like");
+    comment.upLiked = upLikeVal.isBool() ? upLikeVal.toBool()
+                                         : (upLikeVal.toInt() == 1);
     comment.timeDesc = replyControl.value("time_desc").toString();
     // 参照 biliuwp-lite：IP 属地优先取 reply_control.location
     comment.ipLocation = replyControl.value("location").toString();
@@ -880,6 +886,7 @@ QVariantMap CommentManager::commentToMap(const Comment &comment) const
     map["root"] = comment.root;
     map["parent"] = comment.parent;
     map["isTop"] = comment.isTop;
+    map["upLiked"] = comment.upLiked;
     map["action"] = comment.action;
     map["ipLocation"] = comment.ipLocation;
 

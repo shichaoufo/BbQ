@@ -1015,6 +1015,17 @@ Item {
                                     }
                                 }
 
+                                // UP 主觉得很赞：接口 up_action.like（对象里的 bool）。
+                                // 与"回复"并排、浅蓝色，和 B 站网页一致
+                                FluText {
+                                    Layout.alignment: Qt.AlignVCenter
+                                    Layout.leftMargin: 8
+                                    visible: model.upLiked === true
+                                    text: "UP主觉得很赞"
+                                    font: FluTextStyle.Caption
+                                    color: "#00AEEC"
+                                }
+
                                 Item { Layout.fillWidth: true }
                             }
 
@@ -1462,6 +1473,16 @@ Item {
                                                         // 点击回复即聚焦输入框，用户可直接输入
                                                         commentInput.forceActiveFocus()
                                                     }
+                                                }
+
+                                                // 楼中楼同样有 up_action.like（同一个 reply 结构）
+                                                FluText {
+                                                    Layout.alignment: Qt.AlignVCenter
+                                                    Layout.leftMargin: 8
+                                                    visible: modelData.upLiked === true
+                                                    text: "UP主觉得很赞"
+                                                    font: FluTextStyle.Caption
+                                                    color: "#00AEEC"
                                                 }
 
                                                 Item { Layout.fillWidth: true }

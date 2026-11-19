@@ -501,6 +501,8 @@ Rectangle {
     }
     
     function switchTab(tabIndex) {
+        // 切页时把"回顶"动画停掉：它可能正跑在上一个（马上不可见的）页面上
+        topScrollAnim.stop()
         var tabName = pivotTabs[tabIndex]
         var targetIndex = stackIndexOf(tabName)
         rightStack.currentIndex = targetIndex
@@ -514,6 +516,48 @@ Rectangle {
             ugcEpisodesAutoScrollTimer.retryCount = 0
             ugcEpisodesAutoScrollTimer.restart()
         }
+    }
+
+    // 再次点击"当前已选中"的标签 → 该页回到顶端（Pivot 的常见交互：
+    // 点到已选中的 tab 不再重复切页，而是把内容滚回顶部）。
+    // 返回 false 表示这一页没有可滚动的容器（比如 Loader 还没就绪），调用方忽略即可。
+    function scrollTabToTop(tabIndex) {
+        var stackIdx = stackIndexOf(pivotTabs[tabIndex])
+        var flick = null
+        switch (stackIdx) {
+        case 0: // 评论
+            flick = commentFlickable
+            break
+        case 1: // 分P / 番剧选集（在 Loader 里，id 只在 Component 内部可见）
+            flick = pagesTabLoader && pagesTabLoader.active ? pagesTabLoader.item : null
+            break
+        case 2: // 合集
+            flick = ugcEpisodesTabLoader && ugcEpisodesTabLoader.active ? ugcEpisodesTabLoader.item : null
+            break
+        case 3: // 推荐
+            flick = recommendFlick
+            break
+        case 4: // 投稿
+            flick = upVideoFlick
+            break
+        }
+        if (!flick) return false
+        if (flick.contentY <= 0) return true      // 已经在顶端，不用动
+        flick.cancelFlick()                       // 有惯性滚动时先停住，否则会被它抢
+        topScrollAnim.stop()
+        topScrollAnim.target = flick
+        topScrollAnim.from = flick.contentY
+        topScrollAnim.to = 0
+        topScrollAnim.start()
+        return true
+    }
+
+    // 回顶用显式动画：不能给 contentY 加 Behavior（那会影响用户自己拖动/惯性）
+    NumberAnimation {
+        id: topScrollAnim
+        property: "contentY"
+        duration: 220
+        easing.type: Easing.OutCubic
     }
 
     // 两个「选集自动滚」Timer：延迟 1 帧（interval=0 或 16ms 等效下一个事件循环 tick）
@@ -6826,7 +6870,13 @@ Rectangle {
 
                                 MouseArea {
                                     anchors.fill: parent
-                                    onClicked: pageRoot.switchTab(index)
+                                    onClicked: {
+                                        // 点的是当前标签 → 回到该页顶端；否则正常切页
+                                        if (pageRoot.stackIndexToTabIndex(rightStack.currentIndex) === index)
+                                            pageRoot.scrollTabToTop(index)
+                                        else
+                                            pageRoot.switchTab(index)
+                                    }
                                 }
                             }
                         }
@@ -7392,6 +7442,16 @@ Rectangle {
                                                     }
                                                 }
 
+                                                // UP 主觉得很赞（接口 up_action.like）
+                                                FluText {
+                                                    Layout.alignment: Qt.AlignVCenter
+                                                    Layout.leftMargin: 8
+                                                    visible: model.upLiked === true
+                                                    text: "UP主觉得很赞"
+                                                    font: FluTextStyle.Caption
+                                                    color: "#00AEEC"
+                                                }
+
                                                 Item { Layout.fillWidth: true }
                                             }
 
@@ -7834,6 +7894,16 @@ Rectangle {
                                                             }
                                                         }
 
+                                                        // 楼中楼同样有 up_action.like
+                                                        FluText {
+                                                            Layout.alignment: Qt.AlignVCenter
+                                                            Layout.leftMargin: 8
+                                                            visible: modelData.upLiked === true
+                                                            text: "UP主觉得很赞"
+                                                            font: FluTextStyle.Caption
+                                                            color: "#00AEEC"
+                                                        }
+
                                                         Item { Layout.fillWidth: true }
                                                     }
                                                 }
@@ -8224,6 +8294,7 @@ Rectangle {
 
                 // ---------- 推荐视频页 ----------
                 Flickable {
+                    id: recommendFlick
                     Layout.fillWidth: true
                     Layout.fillHeight: true
                     clip: true

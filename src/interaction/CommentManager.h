@@ -110,6 +110,9 @@ public:
         QString root;      // 根评论ID（""=0）
         QString parent;    // 上一级评论ID
         bool isTop;        // 是否置顶
+        // UP 主觉得很赞（接口 up_action.like）。注意 up_action 是对象
+        // {like, reply}，不是位标记，不能拿它 toInt() 出来当置顶用
+        bool upLiked = false;
         int action;        // 点赞状态（0=未操作, 1=已点赞）
         QString ipLocation; // IP 属地（来自 reply_control.location）
         // 评论图片列表
