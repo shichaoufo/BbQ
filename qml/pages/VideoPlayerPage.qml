@@ -1152,6 +1152,31 @@ Rectangle {
     // 当前实际生效的音质 id（由 playUrlReady 的 audioId 带回来），下拉框显示它
     property int currentAudioId: 0
 
+    // ===== 高级音质（杜比全景声 30250 / Hi-Res 无损 30251）=====
+    // 只列"当前视频真的提供"的高音质档，普通档不进这个菜单。
+    // Hi-Res 排在前面：两种都支持时优先它（与 C++ pickAudioStream 的默认规则一致）。
+    readonly property var premiumAudioOptions: {
+        var out = []
+        for (var i = 0; i < audioQualityOptions.length; ++i) {
+            var o = audioQualityOptions[i]
+            if (o.id === 30250 || o.id === 30251)
+                out.push(o)
+        }
+        out.sort(function(a, b) {
+            return (a.id === 30251 ? 0 : 1) - (b.id === 30251 ? 0 : 1)
+        })
+        return out
+    }
+    // 当前是否正在用高音质（控制栏的音符图标据此高亮）
+    readonly property bool premiumAudioActive: currentAudioId === 30250
+                                               || currentAudioId === 30251
+
+    // 设置面板「选择音质」直接列全部档位（含杜比全景声 / Hi-Res 无损）。
+    // 两处入口不会不同步：都走 switchAudio()，最终以 playUrlReady 带回的
+    // currentAudioId 为准 —— 设置面板按它选中，控制栏图标也按它高亮；
+    // 选高音质后 switchAudio 只置 premiumAudioEnabled 这个开关（不记具体档位），
+    // 保证下次遇到两种高音质都支持的视频时仍优先 Hi-Res。
+
     // 视频信息浮层
     property bool showVideoInfo: false
     property int actualWidth: 0
@@ -1276,16 +1301,31 @@ Rectangle {
     // 视频轨按当前清晰度从缓存里挑回来，续播走 _switchingStream 那套
     function switchAudio(audioId) {
         if (pageRoot.aid === "" || pageRoot.cid === "") return
-        // 先落偏好（即使正好等于当前生效档位，也要记下来，否则下次换视频
-        // 会退回上一次的偏好）
-        pageRoot.audioQualityId = audioId
-        Settings.setInt("videoAudioQuality", audioId)
+        // 高音质（30250/30251）只记"开过"这个开关，不记具体档位：
+        // 下次遇到同时支持两种高音质的视频，才能按约定优先 Hi-Res
+        // （具体取舍在 PlayUrlManager::pickAudioStream 的 premium 分支里）
+        var isPremium = (audioId === 30250 || audioId === 30251)
+        Settings.setBool("premiumAudioEnabled", isPremium)
+        pageRoot.audioQualityId = isPremium ? 0 : audioId
+        Settings.setInt("videoAudioQuality", isPremium ? 0 : audioId)
         // 当前已经是这一档：不必重载播放器
         if (audioId === pageRoot.currentAudioId) return
         pageRoot._savedPosition = mpvPlayer.position
         pageRoot._switchingStream = true
         heartbeatTimer.stop()
         PlayUrlManager.switchAudioQualityFromCache(audioId, pageRoot.currentQualityId)
+    }
+
+    // 控制栏"高音质"菜单里点了某一档：
+    //   · 点的不是当前这档 → 切过去（并记住"默认开高音质"）
+    //   · 点的正是当前这档 → 视为关闭，回到标准档（自动挑最高标准音质）
+    function selectPremiumAudio(audioId) {
+        if (pageRoot.aid === "" || pageRoot.cid === "") return
+        if (pageRoot.currentAudioId === audioId) {
+            pageRoot.switchAudio(0)
+            return
+        }
+        pageRoot.switchAudio(audioId)
     }
 
     // 选择字幕轨：index = -1 关闭字幕（保留已加载的轨道、不重新下载，
@@ -6110,6 +6150,55 @@ Rectangle {
                                         }
                                     }
                                 }
+
+                                // 高级音质入口（杜比全景声 / Hi-Res 无损）：
+                                // 只有当前视频真的提供这两档时才出现，图标高亮（主题蓝）= 正在用高音质。
+                                // 位置在清晰度**左侧**：父级 RowLayout 是 RightToLeft，
+                                // 声明得越靠后越靠左，所以必须放在清晰度菜单之后。
+                                FluMenuBar {
+                                    id: premiumAudioBar
+                                    Layout.alignment: Qt.AlignVCenter
+                                    visible: pageRoot.premiumAudioOptions.length > 0
+                                    delegate: FluMenuBarItem {
+                                        id: premiumAudioItem
+                                        // 只放图标不显示文字：7+16+7 = 30，与旁边
+                                        // FluIconButton 的点击区一致
+                                        leftPadding: 7
+                                        rightPadding: 7
+                                        topPadding: 7
+                                        bottomPadding: 7
+                                        contentItem: FluIcon {
+                                            iconSource: FluentIcons.MusicNote
+                                            iconSize: 16
+                                            color: pageRoot.premiumAudioActive ? "#00AEEC" : "#FFFFFF"
+                                        }
+                                        background: Rectangle {
+                                            implicitWidth: 30
+                                            implicitHeight: 30
+                                            radius: 3
+                                            color: premiumAudioItem.pressed ? "#40FFFFFF"
+                                                 : (premiumAudioItem.highlighted ? "#26FFFFFF" : "transparent")
+                                        }
+                                    }
+
+                                    FluMenu {
+                                        id: premiumAudioMenu
+                                        title: "高音质"
+                                        onAboutToShow: closePopups()
+                                        Repeater {
+                                            model: pageRoot.premiumAudioOptions
+                                            FluMenuItem {
+                                                text: modelData.label || ""
+                                                // 打勾 = 当前实际在用的那一档；
+                                                // 再点一次即关闭，回到标准音质
+                                                checkable: true
+                                                checked: pageRoot.currentAudioId === modelData.id
+                                                onTriggered: pageRoot.selectPremiumAudio(modelData.id)
+                                            }
+                                        }
+                                    }
+                                }
+
                             }
                         }
                     }
@@ -9718,8 +9807,8 @@ Rectangle {
                     }
                 }
 
-                // 选择音质（档位来自 playurl 的 dash.audio，全部是视频真实提供的档位，
-                // 不含"自动"；下拉显示的是当前实际生效的那一档）
+                // 选择音质（含杜比全景声 / Hi-Res 无损；与控制栏音符菜单双向同步，
+                // 都以 playUrlReady 带回的 currentAudioId 为准）
                 RowLayout {
                     Layout.fillWidth: true
                     spacing: 12

@@ -623,6 +623,14 @@ void PlayUrlManager::getPlayUrl(const QString &aid, const QString &cid, int qual
     if (quality <= 0) {
         quality = appSettings->defaultQuality();
     }
+    // 默认清晰度也是 0 → "自动"：请求 qn=127（8K），让服务端按**账号权益**
+    // 下发它能给的最高档；实际播哪一档由下面的选流逻辑从真正打包的流里挑最高
+    // （杜比视界 126 比 4K 120 高，所以 DV 片源会自然选中 DV）。
+    // 以前这里直接落到 80（1080P），大会员也要每次手动切 4K。
+    if (quality <= 0) {
+        quality = 127;
+        qDebug() << "[PlayUrlManager] auto quality → request qn=127 (best allowed by account)";
+    }
 
     // 构建请求参数（不带签名参数）
     QString params = QString("appkey=%1&avid=%2&cid=%3&fnval=%4&fnver=0&fourk=1&platform=pc")
@@ -1048,6 +1056,70 @@ void PlayUrlManager::parsePlayUrlData(const QByteArray &data, int quality, const
                 }
             }
         }
+
+        // ===== 杜比全景声 / Hi-Res 无损 =====
+        // 这两档**不在** dash.audio 里，而是单独的 dash.dolby.audio / dash.flac.audio。
+        // 只遍历 dash.audio 永远看不到它们 —— 这就是"客户端识别不出杜比/无损"的原因。
+        // 请求侧不用改：fnval=4048 已经带上了杜比(256)/8K(1024) 这些位，服务端会给。
+        auto appendExtraAudio = [&](const QJsonArray &arr, int fallbackId) {
+            for (const QJsonValue &val : arr) {
+                QJsonObject audio = val.toObject();
+                PlayUrlInfo info;
+
+                QList<QString> backups;
+                const QJsonValue backupVal = audio.contains("backupUrl") ? audio["backupUrl"]
+                                                                         : audio["backup_url"];
+                if (backupVal.isArray()) {
+                    for (const QJsonValue &b : backupVal.toArray())
+                        backups.append(b.toString());
+                }
+                sortBackupsByCdnPriority(backups);
+                info.audioBackupUrls = backups;
+                // 字段名两种风格都兜一下：dolby/flac 容器里偶尔用 snake_case
+                const QString baseUrl = audio.contains("baseUrl") ? audio["baseUrl"].toString()
+                                                                  : audio["base_url"].toString();
+                info.audioUrl = handleUrl(baseUrl, backups);
+                // 个别响应里没有 id，按所在容器兜底（dolby→30250, flac→30251）
+                info.qualityId = audio.contains("id") ? audio["id"].toInt() : 0;
+                if (info.qualityId <= 0) info.qualityId = fallbackId;
+                info.bandwidth = audio["bandwidth"].toInt();
+                info.codec = audio.contains("codecs") ? audio["codecs"].toString()
+                                                      : audio["codec"].toString();
+                info.mimeType = audio.contains("mimeType") ? audio["mimeType"].toString()
+                                                           : audio["mime_type"].toString();
+
+                if (!info.audioUrl.isEmpty()) {
+                    qDebug() << "[PlayUrlManager] extra audio stream id:" << info.qualityId
+                             << "codec:" << info.codec << "bandwidth:" << info.bandwidth;
+                    result.dashAudioUrls.append(info);
+                }
+            }
+        };
+
+        if (dash.contains("dolby")) {
+            // dolby.type: 1 = 杜比全景声可用；audio 是**数组**
+            const QJsonObject dolby = dash["dolby"].toObject();
+            const QJsonValue dolbyAudio = dolby.value("audio");
+            if (dolbyAudio.isArray())
+                appendExtraAudio(dolbyAudio.toArray(), 30250);
+            else if (dolbyAudio.isObject())
+                appendExtraAudio(QJsonArray{dolbyAudio}, 30250);
+        }
+        if (dash.contains("flac")) {
+            const QJsonObject flac = dash["flac"].toObject();
+            const QJsonValue flacAudio = flac.value("audio");
+            // 关键：B 站这里两种容器不一致 —— dolby.audio 是数组，
+            // 而 **flac.audio 是单个对象**。之前统一 toArray()，flac 永远拿到
+            // 空数组，所以杜比能出来、Hi-Res 出不来。
+            if (flacAudio.isArray()) {
+                appendExtraAudio(flacAudio.toArray(), 30251);
+            } else if (flacAudio.isObject()) {
+                appendExtraAudio(QJsonArray{flacAudio}, 30251);
+            }
+            qDebug() << "[PlayUrlManager] flac container — display:" << flac.value("display").toBool()
+                     << "audio node:" << (flacAudio.isArray() ? "array"
+                                        : flacAudio.isObject() ? "object" : "none");
+        }
     }
 
     // Debug: show available video streams
@@ -1095,14 +1167,19 @@ void PlayUrlManager::parsePlayUrlData(const QByteArray &data, int quality, const
             return 4;
         };
 
+        // 杜比视界不再排除：DV 片源默认就播 126（qualityId 比 4K 的 120 高，
+        // "取最高档"自然会选中它），与 B 站客户端的观感一致。
+        // 之前按 **codec 前缀**（dvh/dvu）来排除 DV，问题是同一个 DV 片源里
+        // codec 字段并不统一：有的 dwh1、有的还是 hev1，于是部分视频被排除
+        // （默认落 4K）、部分没认出来（默认进 DV）—— 这就是"有些 DV、有些 4K"
+        // 的来源。现在统一按 qualityId 走，不再依赖 codec 猜测。
         if (quality > 0) {
             // 用户指定了清晰度，先找到该清晰度的所有视频流，按编码优先级选
             qDebug() << "[PlayUrlManager] Looking for streams with qualityId:" << quality;
             QList<PlayUrlInfo> matchingStreams;
             for (const PlayUrlInfo &stream : result.dashVideoUrls) {
-                if (stream.qualityId == quality) {
-                    matchingStreams.append(stream);
-                }
+                if (stream.qualityId != quality) continue;
+                matchingStreams.append(stream);
             }
             qDebug() << "[PlayUrlManager] Found" << matchingStreams.count() << "streams with exact qualityId:" << quality;
 
@@ -1491,15 +1568,40 @@ PlayUrlManager::PlayUrlInfo PlayUrlManager::pickAudioStream(const QList<PlayUrlI
         qDebug() << "[PlayUrlManager] audio id" << want << "not available, fallback to auto";
     }
 
-    // 自动：按实际码率取最高；bandwidth 缺失时退回 id 最大的（旧行为）
-    QList<PlayUrlInfo> sorted = audios;
-    std::sort(sorted.begin(), sorted.end(),
+    // 高级音质开关（控制栏音符菜单的记忆项）：开启时优先 Hi-Res 无损(30251)，
+    // 其次杜比全景声(30250)，两者都没有再走标准档。
+    // 这里不记具体档位，只认"开关"——下次打开的视频同时支持两种高音质时，
+    // 才能按约定优先 Hi-Res。
+    if (AppSettings::instance()->getBool("premiumAudioEnabled", false)) {
+        for (int id : {30251, 30250}) {
+            for (const PlayUrlInfo &a : audios) {
+                if (a.qualityId == id) {
+                    qDebug() << "[PlayUrlManager] premium audio enabled → pick id" << id;
+                    return a;
+                }
+            }
+        }
+        qDebug() << "[PlayUrlManager] premium audio enabled but this video has neither, "
+                    "fallback to standard";
+    }
+
+    // 自动：优先在"标准三档"（30216/30232/30280）里按实际码率取最高。
+    // 杜比全景声(30250)/Hi-Res 无损(30251) 码率大得多（FLAC 十几 Mbps），
+    // 弱网起播容易卡，默认不自动选 —— 下拉框里可以手动切；
+    // 万一视频只有这两档（没有标准档），才退回去用它们，总比没声音强。
+    QList<PlayUrlInfo> standard;
+    for (const PlayUrlInfo &a : audios) {
+        if (a.qualityId == 30216 || a.qualityId == 30232 || a.qualityId == 30280)
+            standard.append(a);
+    }
+    QList<PlayUrlInfo> pool = standard.isEmpty() ? audios : standard;
+    std::sort(pool.begin(), pool.end(),
               [](const PlayUrlInfo &a, const PlayUrlInfo &b) {
                   if (a.bandwidth != b.bandwidth)
                       return a.bandwidth > b.bandwidth;
                   return a.qualityId > b.qualityId;
               });
-    return sorted.first();
+    return pool.first();
 }
 
 void PlayUrlManager::emitAudioQualityList(const QList<PlayUrlInfo> &audios)
@@ -1520,6 +1622,12 @@ void PlayUrlManager::emitAudioQualityList(const QList<PlayUrlInfo> &audios)
     }
 
     qDebug() << "[PlayUrlManager] emitAudioQualityList count:" << list.size();
+    // 顺带把档位打出来：排查"杜比/无损没出现"时，一眼能看出是没下发还是没解析
+    for (const QVariant &v : list) {
+        const QVariantMap m = v.toMap();
+        qDebug() << "[PlayUrlManager]   audio option id:" << m.value("id").toInt()
+                 << "label:" << m.value("label").toString();
+    }
     emit audioQualityListReady(list);
 }
 
@@ -5240,13 +5348,16 @@ void PlayUrlManager::getSeasonPlayUrl(const QString &cid, int quality,
 
     int clientQuality;
     if (forceMaxQuality) {
-        clientQuality = 120;
-        qDebug() << "[PlayUrlManager] forceMaxQuality=true → qn=120 (requested quality=" << quality << "ignored)";
+        // 127 而不是 120：番剧/影视同样有杜比视界（126），只请求 4K 会让 DV
+        // 永远选不到。qn 只是"想要多高"，服务端仍按账号权益下发，
+        // 没有 DV 的片子自然还是回到 4K。
+        clientQuality = 127;
+        qDebug() << "[PlayUrlManager] forceMaxQuality=true → qn=127 (requested quality=" << quality << "ignored)";
     } else if (quality > 0) {
         clientQuality = quality;
         qDebug() << "[PlayUrlManager] explicit switch → exact qn=" << quality;
     } else {
-        clientQuality = 120;
+        clientQuality = 127;
     }
 
     requestSeasonPlayUrlStrategyA(cid, clientQuality, epId, seasonType, seasonId,

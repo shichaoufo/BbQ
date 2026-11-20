@@ -86,6 +86,10 @@ int AppSettings::getCodecFnval(int codec)
 
 int AppSettings::defaultQuality()
 {
-    // 默认 1080P
-    return m_settings->value("defaultQuality", 80).toInt();
+    // 默认 0 = 自动（取账号权益允许的最高清晰度）。
+    // 以前写死 80（1080P），大会员账号打开 4K/杜比视频也只有 1080P，
+    // 必须每次手动去清晰度菜单里改——所以改成"自动"，具体档位由
+    // PlayUrlManager::getPlayUrl 请求 qn=127 后按实际下发的流挑最高的。
+    // 老配置里如果存过明确值（比如 80），仍然按存的走，不会被这次改动强行覆盖。
+    return m_settings->value("defaultQuality", 0).toInt();
 }
